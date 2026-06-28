@@ -1,2 +1,14 @@
 docs/superpowers/.worktrees
 .worktrees/
+__pycache__/
+*.pyc
+.env
+*.db
+frontend/node_modules/
+frontend/dist/
+frontend/src/*.js
+frontend/src/*.jsx
+frontend/*.tsbuildinfo
+.venv/
+*.egg-info/
+.pytest_cache/
