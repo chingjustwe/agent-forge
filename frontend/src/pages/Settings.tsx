@@ -25,46 +25,53 @@ export default function Settings({ wsId, isAdmin }: { wsId: string; isAdmin: boo
   };
 
   return (
-    <div style={{ padding: 24 }}>
-      <h1>Settings</h1>
+    <div>
+      <div className="page-header">
+        <h1 className="page-title">Settings</h1>
+        <p className="page-subtitle">Configure workspace integrations and preferences</p>
+      </div>
 
-      <div style={{ background: "#fff", padding: 16, borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", maxWidth: 500 }}>
-        <h3>OpenTelemetry Export</h3>
+      <div className="card settings-section">
+        <div className="card-header">
+          <h3 className="card-title">OpenTelemetry Export</h3>
+        </div>
 
-        <div style={{ marginBottom: 12 }}>
-          <label>
-            <input type="checkbox" checked={config.enabled}
+        <div className="form-group">
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: isAdmin ? "pointer" : "default" }}>
+            <input
+              type="checkbox"
+              checked={config.enabled}
               onChange={e => isAdmin && setConfig({ ...config, enabled: e.target.checked })}
-              disabled={!isAdmin} />
-            {" "}Enabled
+              disabled={!isAdmin}
+              style={{ width: "auto" }}
+            />
+            <span style={{ fontSize: "0.88rem", color: "var(--text-primary)" }}>Enabled</span>
           </label>
         </div>
 
-        <div style={{ marginBottom: 12 }}>
-          <label>Endpoint URL:</label>
+        <div className="form-group">
+          <label className="form-label">Endpoint URL</label>
           <input
             type="text"
             value={config.endpoint}
             onChange={e => isAdmin && setConfig({ ...config, endpoint: e.target.value })}
             disabled={!isAdmin}
-            style={{ width: "100%", padding: 8, marginTop: 4 }}
             placeholder="http://otel-collector:4318"
           />
         </div>
 
-        <div style={{ marginBottom: 12 }}>
-          <label>Headers (JSON):</label>
+        <div className="form-group">
+          <label className="form-label">Headers (JSON)</label>
           <textarea
             value={headersText}
             onChange={e => isAdmin && setHeadersText(e.target.value)}
             disabled={!isAdmin}
             rows={4}
-            style={{ width: "100%", padding: 8, marginTop: 4, fontFamily: "monospace" }}
           />
         </div>
 
         {isAdmin && (
-          <button onClick={handleSave} style={{ padding: "8px 16px" }}>
+          <button className="btn btn-primary" onClick={handleSave}>
             {saved ? "Saved!" : "Save Settings"}
           </button>
         )}

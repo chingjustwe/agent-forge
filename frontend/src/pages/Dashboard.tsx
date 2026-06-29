@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, LineChart, Line, PieChart, Pie, Cell, ResponsiveContainer } from "recharts";
 import { getObservabilitySummary, getTokenDaily, getLatency, getErrors, ObservabilitySummary, DailyToken, LatencyData, ErrorGroup } from "../api";
 
-const COLORS = ["#0088FE", "#00C49F", "#FFBB28", "#FF8042"];
+const COLORS = ["#6C5CE7", "#00D2FF", "#00E676", "#FFD600", "#FF5252", "#448AFF"];
 
 export default function Dashboard({ wsId }: { wsId: string }) {
   const [summary, setSummary] = useState<ObservabilitySummary | null>(null);
@@ -18,74 +18,97 @@ export default function Dashboard({ wsId }: { wsId: string }) {
   }, [wsId]);
 
   return (
-    <div style={{ padding: 24 }}>
-      <h1>Dashboard</h1>
+    <div>
+      <div className="page-header">
+        <h1 className="page-title">Dashboard</h1>
+        <p className="page-subtitle">Observability and usage metrics for your workspace</p>
+      </div>
 
       {summary && (
-        <div style={{ display: "flex", gap: 16, marginBottom: 24 }}>
-          <Card label="Total Requests" value={summary.total_requests} />
-          <Card label="Avg Latency (ms)" value={summary.avg_latency_ms.toFixed(2)} />
-          <Card label="Total Tokens" value={summary.total_tokens} />
-          <Card label="Error Rate" value={(summary.error_rate * 100).toFixed(2) + "%"} />
+        <div className="stat-grid">
+          <div className="stat-card stat-card-accent">
+            <div className="stat-card-value">{summary.total_requests}</div>
+            <div className="stat-card-label">Total Requests</div>
+          </div>
+          <div className="stat-card stat-card-accent-success">
+            <div className="stat-card-value">{summary.avg_latency_ms.toFixed(2)}</div>
+            <div className="stat-card-label">Avg Latency (ms)</div>
+          </div>
+          <div className="stat-card stat-card-accent">
+            <div className="stat-card-value">{summary.total_tokens.toLocaleString()}</div>
+            <div className="stat-card-label">Total Tokens</div>
+          </div>
+          <div className="stat-card stat-card-accent-warning">
+            <div className="stat-card-value">{(summary.error_rate * 100).toFixed(2)}%</div>
+            <div className="stat-card-label">Error Rate</div>
+          </div>
         </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-        <div style={{ background: "#fff", padding: 16, borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}>
-          <h3>Token Usage (Daily)</h3>
-          <ResponsiveContainer width="100%" height={250}>
+      <div className="chart-grid">
+        <div className="chart-card">
+          <h3 className="chart-card-title">Token Usage (Daily)</h3>
+          <ResponsiveContainer width="100%" height={260}>
             <BarChart data={tokens}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="date" />
-              <YAxis />
-              <Tooltip />
-              <Bar dataKey="input_tokens" fill="#0088FE" name="Input" />
-              <Bar dataKey="output_tokens" fill="#00C49F" name="Output" />
+              <CartesianGrid strokeDasharray="3 3" stroke="#2A2A3E" />
+              <XAxis dataKey="date" tick={{ fill: "#8888A0", fontSize: 12 }} />
+              <YAxis tick={{ fill: "#8888A0", fontSize: 12 }} />
+              <Tooltip
+                contentStyle={{ background: "#1A1A2E", border: "1px solid #2A2A3E", borderRadius: 8, color: "#E8E8F0" }}
+              />
+              <Bar dataKey="input_tokens" fill="#6C5CE7" name="Input" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="output_tokens" fill="#00D2FF" name="Output" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
 
         {latency && (
-          <div style={{ background: "#fff", padding: 16, borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}>
-            <h3>Latency (ms)</h3>
-            <p>p50: {latency.p50_ms}ms | p95: {latency.p95_ms}ms | p99: {latency.p99_ms}ms</p>
-            <ResponsiveContainer width="100%" height={200}>
+          <div className="chart-card">
+            <h3 className="chart-card-title">Latency (ms)</h3>
+            <div style={{ fontSize: "0.8rem", color: "var(--text-secondary)", marginBottom: 12 }}>
+              p50: {latency.p50_ms}ms &middot; p95: {latency.p95_ms}ms &middot; p99: {latency.p99_ms}ms
+            </div>
+            <ResponsiveContainer width="100%" height={220}>
               <LineChart data={latency.over_time}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="bucket" />
-                <YAxis />
-                <Tooltip />
-                <Line type="monotone" dataKey="p50" stroke="#0088FE" name="p50" />
-                <Line type="monotone" dataKey="p95" stroke="#FF8042" name="p95" />
-                <Line type="monotone" dataKey="p99" stroke="#FF0000" name="p99" />
+                <CartesianGrid strokeDasharray="3 3" stroke="#2A2A3E" />
+                <XAxis dataKey="bucket" tick={{ fill: "#8888A0", fontSize: 12 }} />
+                <YAxis tick={{ fill: "#8888A0", fontSize: 12 }} />
+                <Tooltip
+                  contentStyle={{ background: "#1A1A2E", border: "1px solid #2A2A3E", borderRadius: 8, color: "#E8E8F0" }}
+                />
+                <Line type="monotone" dataKey="p50" stroke="#6C5CE7" name="p50" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="p95" stroke="#00D2FF" name="p95" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="p99" stroke="#FF5252" name="p99" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>
           </div>
         )}
 
         {errors.length > 0 && (
-          <div style={{ background: "#fff", padding: 16, borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}>
-            <h3>Error Breakdown</h3>
-            <ResponsiveContainer width="100%" height={250}>
+          <div className="chart-card">
+            <h3 className="chart-card-title">Error Breakdown</h3>
+            <ResponsiveContainer width="100%" height={260}>
               <PieChart>
-                <Pie data={errors} dataKey="count" nameKey="error_type" cx="50%" cy="50%" outerRadius={80} label>
+                <Pie
+                  data={errors}
+                  dataKey="count"
+                  nameKey="error_type"
+                  cx="50%"
+                  cy="50%"
+                  outerRadius={90}
+                  label={({ error_type, count }) => `${error_type} (${count})`}
+                  labelLine={{ stroke: "#2A2A3E" }}
+                >
                   {errors.map((_, idx) => <Cell key={idx} fill={COLORS[idx % COLORS.length]} />)}
                 </Pie>
-                <Tooltip />
+                <Tooltip
+                  contentStyle={{ background: "#1A1A2E", border: "1px solid #2A2A3E", borderRadius: 8, color: "#E8E8F0" }}
+                />
               </PieChart>
             </ResponsiveContainer>
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-function Card({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div style={{ flex: 1, background: "#fff", padding: 16, borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", textAlign: "center" }}>
-      <div style={{ fontSize: 12, color: "#666" }}>{label}</div>
-      <div style={{ fontSize: 24, fontWeight: "bold" }}>{value}</div>
     </div>
   );
 }

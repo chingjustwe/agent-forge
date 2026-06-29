@@ -23,87 +23,73 @@ export default function AdminDashboard() {
     });
   }, []);
 
-  if (loading) return <div>Loading...</div>;
+  if (loading) return <div className="loading">Loading admin dashboard</div>;
 
   const totalUsers = users.length;
   const totalWorkspaces = workspaces.length;
   const requestsToday = usage?.total_requests || 0;
   const activeSessions = users.filter((u) => u.last_login).length;
 
-  const cardStyle: React.CSSProperties = {
-    background: "#f5f5f5",
-    borderRadius: 8,
-    padding: "20px 24px",
-    flex: 1,
-    minWidth: 200,
-  };
-
   return (
     <div>
-      <h1>Admin Dashboard</h1>
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 32 }}>
-        <div style={cardStyle}>
-          <div style={{ fontSize: 28, fontWeight: "bold" }}>{totalUsers}</div>
-          <div style={{ color: "#666" }}>Total Users</div>
+      <div className="page-header">
+        <h1 className="page-title">Admin Dashboard</h1>
+        <p className="page-subtitle">Platform-wide overview and management</p>
+      </div>
+
+      <div className="stat-grid">
+        <div className="stat-card stat-card-accent">
+          <div className="stat-card-value">{totalUsers}</div>
+          <div className="stat-card-label">Total Users</div>
         </div>
-        <div style={cardStyle}>
-          <div style={{ fontSize: 28, fontWeight: "bold" }}>{totalWorkspaces}</div>
-          <div style={{ color: "#666" }}>Workspaces</div>
+        <div className="stat-card stat-card-accent-success">
+          <div className="stat-card-value">{totalWorkspaces}</div>
+          <div className="stat-card-label">Workspaces</div>
         </div>
-        <div style={cardStyle}>
-          <div style={{ fontSize: 28, fontWeight: "bold" }}>{requestsToday}</div>
-          <div style={{ color: "#666" }}>Requests Today</div>
+        <div className="stat-card stat-card-accent">
+          <div className="stat-card-value">{requestsToday}</div>
+          <div className="stat-card-label">Requests Today</div>
         </div>
-        <div style={cardStyle}>
-          <div style={{ fontSize: 28, fontWeight: "bold" }}>{activeSessions}</div>
-          <div style={{ color: "#666" }}>Active Sessions</div>
+        <div className="stat-card stat-card-accent-warning">
+          <div className="stat-card-value">{activeSessions}</div>
+          <div className="stat-card-label">Active Sessions</div>
         </div>
       </div>
 
       {tenants.length > 0 && (
-        <div style={{ marginBottom: 24 }}>
-          <h2>Tenants</h2>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ textAlign: "left", background: "#eee" }}>
-                <th style={thStyle}>Name</th>
-                <th style={thStyle}>Domain</th>
-                <th style={thStyle}>Users</th>
-                <th style={thStyle}>Workspaces</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tenants.map((t) => (
-                <tr key={t.id}>
-                  <td style={tdStyle}>{t.name}</td>
-                  <td style={tdStyle}>{t.domain}</td>
-                  <td style={tdStyle}>{t.user_count}</td>
-                  <td style={tdStyle}>{t.workspace_count}</td>
+        <div className="detail-section">
+          <h2 className="detail-section-title">Tenants</h2>
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Domain</th>
+                  <th>Users</th>
+                  <th>Workspaces</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {tenants.map((t) => (
+                  <tr key={t.id}>
+                    <td>{t.name}</td>
+                    <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>{t.domain}</td>
+                    <td>{t.user_count}</td>
+                    <td>{t.workspace_count}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 16 }}>
-        <a href="/admin/users" style={linkStyle}>Manage Users →</a>
-        <a href="/admin/workspaces" style={linkStyle}>Manage Workspaces →</a>
-        <a href="/admin/audit" style={linkStyle}>Audit Log →</a>
-        <a href="/admin/usage" style={linkStyle}>Usage →</a>
+      <div className="admin-nav">
+        <a href="/admin/users" className="admin-nav-link">👥 Manage Users</a>
+        <a href="/admin/workspaces" className="admin-nav-link">🏢 Manage Workspaces</a>
+        <a href="/admin/audit" className="admin-nav-link">📝 Audit Log</a>
+        <a href="/admin/usage" className="admin-nav-link">📈 Usage</a>
       </div>
     </div>
   );
 }
-
-const thStyle: React.CSSProperties = { padding: "8px 12px", borderBottom: "2px solid #ddd" };
-const tdStyle: React.CSSProperties = { padding: "8px 12px", borderBottom: "1px solid #eee" };
-const linkStyle: React.CSSProperties = {
-  display: "block",
-  padding: "12px 20px",
-  background: "#1a1a2e",
-  color: "#fff",
-  textDecoration: "none",
-  borderRadius: 6,
-  fontWeight: 500,
-};

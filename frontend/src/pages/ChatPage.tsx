@@ -11,13 +11,17 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [userRole, setUserRole] = useState<string>("member");
-  const abortRef = useRef<AbortController | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     getCurrentUser()
       .then((u) => setUserRole(u.role))
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   const canSend = userRole !== "viewer";
 
@@ -37,65 +41,86 @@ export default function ChatPage() {
       for await (const event of streamChat(history)) {
         if (event.type === "text") {
           assistantContent += event.data.content as string;
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last?.role === "assistant") {
+              // Update existing assistant message with the latest content
+              return [...prev.slice(0, -1), { role: "assistant", content: assistantContent }];
+            } else {
+              // First chunk: append a new assistant message
+              return [...prev, { role: "assistant", content: assistantContent }];
+            }
+          });
+        } else if (event.type === "error") {
+          const errMsg = (event.data as { message?: string })?.message || "Unknown error";
           setMessages((prev) => [
-            ...prev.slice(0, -1),
-            { role: "assistant", content: assistantContent },
+            ...prev,
+            { role: "assistant", content: `⚠️ Error: ${errMsg}` },
           ]);
+          break;
         }
       }
-      if (assistantContent) {
-        setMessages((prev) => [
-          ...prev,
-          { role: "assistant", content: assistantContent },
-        ]);
-      }
     } catch (err) {
-      console.error(err);
+      const errMsg = err instanceof Error ? err.message : "Network error";
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: `⚠️ Error: ${errMsg}` },
+      ]);
     } finally {
       setStreaming(false);
     }
   }, [input, messages, streaming, canSend]);
 
   return (
-    <div style={{ maxWidth: 720, margin: "16px auto", padding: 16 }}>
+    <div className="chat-container">
+      <div className="page-header">
+        <h1 className="page-title">Chat</h1>
+        <p className="page-subtitle">Interact with your AI agents</p>
+      </div>
+
       {userRole === "viewer" && (
-        <p style={{ color: "#666", fontStyle: "italic" }}>
+        <div className="chat-viewer-notice">
           You are in viewer mode. You can see chat results but cannot send messages.
-        </p>
+        </div>
       )}
-      <div
-        style={{
-          border: "1px solid #ccc",
-          borderRadius: 8,
-          padding: 16,
-          marginBottom: 16,
-          minHeight: 400,
-          overflowY: "auto",
-        }}
-      >
+
+      <div className="chat-messages">
+        {messages.length === 0 && (
+          <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }}>
+            <div style={{ fontSize: "2.5rem", marginBottom: 12 }}>💬</div>
+            <p style={{ fontSize: "0.95rem" }}>Start a conversation with your AI agent.</p>
+            <p style={{ fontSize: "0.82rem", marginTop: 4 }}>Type a message below to begin.</p>
+          </div>
+        )}
         {messages.map((m, i) => (
           <div
             key={i}
-            style={{
-              marginBottom: 8,
-              textAlign: m.role === "user" ? "right" : "left",
-            }}
+            className={`chat-message chat-message-${m.role}`}
           >
-            <strong>{m.role}:</strong> {m.content}
+            <div className={`chat-bubble chat-bubble-${m.role}`}>
+              <div className="chat-bubble-label">{m.role}</div>
+              {m.content}
+            </div>
           </div>
         ))}
+        <div ref={messagesEndRef} />
       </div>
-      <div style={{ display: "flex", gap: 8 }}>
+
+      <div className="chat-input-area">
         <input
+          className="chat-input"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+          onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && sendMessage()}
           placeholder={canSend ? "Type a message..." : "Viewing only"}
           disabled={streaming || !canSend}
-          style={{ flex: 1, padding: 8 }}
         />
-        <button onClick={sendMessage} disabled={streaming || !canSend}>
-          Send
+        <button
+          className="btn btn-primary"
+          onClick={sendMessage}
+          disabled={streaming || !canSend}
+        >
+          {streaming ? "Sending..." : "Send"}
         </button>
       </div>
     </div>

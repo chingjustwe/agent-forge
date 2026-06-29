@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from src.gateway.auth.roles import has_permission
+from src.infra.settings import settings
 from src.runtime.harness.pipeline import GuardrailPipeline
 from src.runtime.harness.context import HarnessContext
 from src.runtime.models import RuntimeConfig, StreamEvent
@@ -18,8 +19,13 @@ _guardrail_pipeline = GuardrailPipeline.create_default()
 
 
 def _get_adapter(config: RuntimeConfig) -> DirectLLMAdapter:
+    if not settings.llm_api_key:
+        raise RuntimeError(
+            "LLM_API_KEY is not configured. "
+            "Set it in .env file or export LLM_API_KEY environment variable."
+        )
     return DirectLLMAdapter(
-        api_key=config.extra.get("api_key", ""),
+        api_key=settings.llm_api_key,
         model=config.model,
     )
 

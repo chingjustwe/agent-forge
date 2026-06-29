@@ -48,6 +48,34 @@ function authHeaders(): Record<string, string> {
   return {};
 }
 
+let _isRedirecting = false;
+
+/** Clear token and redirect to login page. */
+export function redirectToLogin(): void {
+  if (_isRedirecting) return;
+  _isRedirecting = true;
+  clearToken();
+  window.location.href = "/login";
+}
+
+/**
+ * Wrapper around fetch that automatically attaches auth headers and
+ * intercepts 401 responses to redirect to the login page.
+ */
+async function apiFetch(url: string, options?: RequestInit): Promise<Response> {
+  const resp = await fetch(url, {
+    ...options,
+    headers: {
+      ...options?.headers,
+      ...authHeaders(),
+    },
+  });
+  if (resp.status === 401) {
+    redirectToLogin();
+  }
+  return resp;
+}
+
 export async function registerUser(email: string, password: string, name: string): Promise<AuthResponse> {
   const resp = await fetch("/api/v1/auth/register", {
     method: "POST",
@@ -79,25 +107,21 @@ export async function loginUser(email: string, password: string): Promise<AuthRe
 }
 
 export async function getCurrentUser(): Promise<User> {
-  const resp = await fetch("/api/v1/users/me", {
-    headers: { ...authHeaders() },
-  });
+  const resp = await apiFetch("/api/v1/users/me");
   if (!resp.ok) throw new Error("Not authenticated");
   return resp.json();
 }
 
 export async function listWorkspaces(): Promise<Workspace[]> {
-  const resp = await fetch("/api/v1/workspaces", {
-    headers: { ...authHeaders() },
-  });
+  const resp = await apiFetch("/api/v1/workspaces");
   if (!resp.ok) throw new Error("Failed to list workspaces");
   return resp.json();
 }
 
 export async function createWorkspace(name: string): Promise<Workspace> {
-  const resp = await fetch("/api/v1/workspaces", {
+  const resp = await apiFetch("/api/v1/workspaces", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
   if (!resp.ok) throw new Error("Failed to create workspace");
@@ -157,7 +181,7 @@ export interface OTelConfig {
 }
 
 export async function getObservabilitySummary(wsId: string): Promise<ObservabilitySummary> {
-  const resp = await fetch(`/api/v1/workspaces/${wsId}/observability/summary`, { headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/summary`);
   if (!resp.ok) throw new Error("Failed to fetch summary");
   return resp.json();
 }
@@ -169,7 +193,7 @@ export async function getObservabilityRequests(wsId: string, params?: { limit?: 
   if (params?.status) qs.set("status", String(params.status));
   if (params?.model) qs.set("model", params.model);
   if (params?.since) qs.set("since", params.since);
-  const resp = await fetch(`/api/v1/workspaces/${wsId}/observability/requests?${qs}`, { headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/requests?${qs}`);
   if (!resp.ok) throw new Error("Failed to fetch requests");
   return resp.json();
 }
@@ -178,8 +202,14 @@ export async function getTokenDaily(wsId: string, since?: string, until?: string
   const qs = new URLSearchParams();
   if (since) qs.set("since", since);
   if (until) qs.set("until", until);
-  const resp = await fetch(`/api/v1/workspaces/${wsId}/observability/tokens/daily?${qs}`, { headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/tokens/daily?${qs}`);
   if (!resp.ok) throw new Error("Failed to fetch token data");
+  return resp.json();
+}
+
+export async function getRequestDetail(wsId: string, traceId: string): Promise<Record<string, unknown>> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/requests/${traceId}`);
+  if (!resp.ok) throw new Error("Failed to fetch request detail");
   return resp.json();
 }
 
@@ -187,7 +217,7 @@ export async function getLatency(wsId: string, since?: string, until?: string): 
   const qs = new URLSearchParams();
   if (since) qs.set("since", since);
   if (until) qs.set("until", until);
-  const resp = await fetch(`/api/v1/workspaces/${wsId}/observability/latency?${qs}`, { headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/latency?${qs}`);
   if (!resp.ok) throw new Error("Failed to fetch latency data");
   return resp.json();
 }
@@ -195,21 +225,21 @@ export async function getLatency(wsId: string, since?: string, until?: string): 
 export async function getErrors(wsId: string, since?: string): Promise<ErrorGroup[]> {
   const qs = new URLSearchParams();
   if (since) qs.set("since", since);
-  const resp = await fetch(`/api/v1/workspaces/${wsId}/observability/errors?${qs}`, { headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/errors?${qs}`);
   if (!resp.ok) throw new Error("Failed to fetch errors");
   return resp.json();
 }
 
 export async function getQuota(wsId: string): Promise<QuotaInfo> {
-  const resp = await fetch(`/api/v1/workspaces/${wsId}/quota`, { headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/quota`);
   if (!resp.ok) throw new Error("Failed to fetch quota");
   return resp.json();
 }
 
 export async function updateQuota(wsId: string, data: { max_tokens_per_day?: number; max_cost_per_month?: number }): Promise<{ quota: QuotaInfo }> {
-  const resp = await fetch(`/api/v1/workspaces/${wsId}/quota`, {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/quota`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
   if (!resp.ok) throw new Error("Failed to update quota");
@@ -217,15 +247,15 @@ export async function updateQuota(wsId: string, data: { max_tokens_per_day?: num
 }
 
 export async function getOtelSettings(wsId: string): Promise<OTelConfig> {
-  const resp = await fetch(`/api/v1/workspaces/${wsId}/settings/otel`, { headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/settings/otel`);
   if (!resp.ok) throw new Error("Failed to fetch OTel settings");
   return resp.json();
 }
 
 export async function updateOtelSettings(wsId: string, config: OTelConfig): Promise<{ otel: OTelConfig }> {
-  const resp = await fetch(`/api/v1/workspaces/${wsId}/settings/otel`, {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/settings/otel`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
   });
   if (!resp.ok) throw new Error("Failed to update OTel settings");
@@ -233,9 +263,7 @@ export async function updateOtelSettings(wsId: string, config: OTelConfig): Prom
 }
 
 export async function listAdminUsers(): Promise<User[]> {
-  const resp = await fetch("/api/v1/admin/users", {
-    headers: { ...authHeaders() },
-  });
+  const resp = await apiFetch("/api/v1/admin/users");
   if (!resp.ok) throw new Error("Failed to list users");
   return resp.json();
 }
@@ -252,15 +280,15 @@ export interface Tenant {
 }
 
 export async function fetchTenants(): Promise<Tenant[]> {
-  const resp = await fetch("/api/v1/admin/tenants", { headers: { ...authHeaders() } });
+  const resp = await apiFetch("/api/v1/admin/tenants");
   if (!resp.ok) throw new Error("Failed to fetch tenants");
   return resp.json();
 }
 
 export async function updateTenant(id: string, data: Partial<Tenant>): Promise<Tenant> {
-  const resp = await fetch(`/api/v1/admin/tenants/${id}`, {
+  const resp = await apiFetch(`/api/v1/admin/tenants/${id}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
   if (!resp.ok) throw new Error("Failed to update tenant");
@@ -284,15 +312,15 @@ export async function fetchUsers(params?: { search?: string; role?: string; work
   if (params?.search) q.set("search", params.search);
   if (params?.role) q.set("role", params.role);
   if (params?.workspace_id) q.set("workspace_id", params.workspace_id);
-  const resp = await fetch(`/api/v1/admin/users?${q}`, { headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/admin/users?${q}`);
   if (!resp.ok) throw new Error("Failed to fetch users");
   return resp.json();
 }
 
 export async function updateUser(id: string, data: { role?: string; workspace_ids?: string[] }): Promise<AdminUser> {
-  const resp = await fetch(`/api/v1/admin/users/${id}`, {
+  const resp = await apiFetch(`/api/v1/admin/users/${id}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
   if (!resp.ok) throw new Error("Failed to update user");
@@ -300,14 +328,14 @@ export async function updateUser(id: string, data: { role?: string; workspace_id
 }
 
 export async function deleteUser(id: string): Promise<void> {
-  const resp = await fetch(`/api/v1/admin/users/${id}`, { method: "DELETE", headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/admin/users/${id}`, { method: "DELETE" });
   if (!resp.ok) throw new Error("Failed to delete user");
 }
 
 export async function inviteUser(data: { email: string; role: string; workspace_id?: string }): Promise<AdminUser> {
-  const resp = await fetch("/api/v1/admin/users/invite", {
+  const resp = await apiFetch("/api/v1/admin/users/invite", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
   if (!resp.ok) throw new Error("Failed to invite user");
@@ -326,15 +354,15 @@ export interface AdminWorkspace {
 }
 
 export async function fetchAdminWorkspaces(): Promise<AdminWorkspace[]> {
-  const resp = await fetch("/api/v1/admin/workspaces", { headers: { ...authHeaders() } });
+  const resp = await apiFetch("/api/v1/admin/workspaces");
   if (!resp.ok) throw new Error("Failed to fetch workspaces");
   return resp.json();
 }
 
 export async function updateAdminWorkspace(id: string, data: { name?: string; settings?: Record<string, unknown>; max_tokens_per_day?: number; max_cost_per_month?: number }): Promise<AdminWorkspace> {
-  const resp = await fetch(`/api/v1/admin/workspaces/${id}`, {
+  const resp = await apiFetch(`/api/v1/admin/workspaces/${id}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
   if (!resp.ok) throw new Error("Failed to update workspace");
@@ -342,7 +370,7 @@ export async function updateAdminWorkspace(id: string, data: { name?: string; se
 }
 
 export async function archiveWorkspace(id: string): Promise<void> {
-  const resp = await fetch(`/api/v1/admin/workspaces/${id}`, { method: "DELETE", headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/admin/workspaces/${id}`, { method: "DELETE" });
   if (!resp.ok) throw new Error("Failed to archive workspace");
 }
 
@@ -372,7 +400,7 @@ export async function fetchAdminAudit(params?: { action?: string; user_id?: stri
   if (params?.until) q.set("until", params.until);
   if (params?.limit) q.set("limit", String(params.limit));
   if (params?.offset) q.set("offset", String(params.offset));
-  const resp = await fetch(`/api/v1/admin/audit?${q}`, { headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/admin/audit?${q}`);
   if (!resp.ok) throw new Error("Failed to fetch audit log");
   return resp.json();
 }
@@ -384,7 +412,7 @@ export async function fetchWorkspaceAudit(workspaceId: string, params?: { action
   if (params?.until) q.set("until", params.until);
   if (params?.limit) q.set("limit", String(params.limit));
   if (params?.offset) q.set("offset", String(params.offset));
-  const resp = await fetch(`/api/v1/workspaces/${workspaceId}/audit?${q}`, { headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/workspaces/${workspaceId}/audit?${q}`);
   if (!resp.ok) throw new Error("Failed to fetch workspace audit");
   return resp.json();
 }
@@ -403,7 +431,7 @@ export async function fetchUsage(params?: { tenant_id?: string; since?: string; 
   if (params?.tenant_id) q.set("tenant_id", params.tenant_id);
   if (params?.since) q.set("since", params.since);
   if (params?.until) q.set("until", params.until);
-  const resp = await fetch(`/api/v1/admin/usage?${q}`, { headers: { ...authHeaders() } });
+  const resp = await apiFetch(`/api/v1/admin/usage?${q}`);
   if (!resp.ok) throw new Error("Failed to fetch usage");
   return resp.json();
 }
@@ -412,9 +440,9 @@ export async function* streamChat(
   messages: { role: string; content: string }[],
   config?: Record<string, unknown>,
 ): AsyncGenerator<StreamEvent> {
-  const response = await fetch("/api/v1/chat", {
+  const response = await apiFetch("/api/v1/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, config }),
   });
 

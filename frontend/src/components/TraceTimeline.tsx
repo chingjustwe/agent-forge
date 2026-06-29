@@ -8,25 +8,22 @@ interface Span {
 export default function TraceTimeline({ spans }: { spans: Span[] }) {
   const maxDur = Math.max(...spans.map(s => s.duration_ms || 0), 1);
 
+  if (spans.length === 0) return null;
+
   return (
-    <div style={{ background: "#fff", padding: 16, borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", marginBottom: 16 }}>
+    <div className="trace-timeline">
       {spans.map(span => {
         const pct = maxDur > 0 ? ((span.duration_ms || 0) / maxDur) * 100 : 0;
         return (
-          <div key={span.span_id} style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
-            <div style={{ width: 180, fontSize: 13, color: "#333" }}>{span.name}</div>
-            <div style={{ flex: 1, background: "#eee", borderRadius: 4, height: 20, position: "relative" }}>
+          <div key={span.span_id} className="trace-item">
+            <div className="trace-name">{span.name}</div>
+            <div className="trace-bar-bg">
               <div
-                style={{
-                  width: `${pct}%`,
-                  background: "#0088FE",
-                  borderRadius: 4,
-                  height: 20,
-                  transition: "width 0.3s",
-                }}
+                className="trace-bar-fill"
+                style={{ width: `${pct}%` }}
               />
             </div>
-            <div style={{ width: 80, textAlign: "right", fontSize: 12, color: "#666", marginLeft: 8 }}>
+            <div className="trace-duration">
               {span.duration_ms?.toFixed(2)}ms
             </div>
           </div>

@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
+from src.infra.settings import settings
 from src.runtime.adapters.base import RunAdapter
 from src.runtime.models import StreamEvent
 
@@ -13,10 +14,10 @@ class DirectLLMAdapter(RunAdapter):
     def __init__(
         self,
         api_key: str = "",
-        base_url: str = "https://api.anthropic.com/v1",
-        model: str = "claude-sonnet-4-20250514",
+        base_url: str = "https://api.deepseek.com",
+        model: str = "deepseek-chat",
     ):
-        self.api_key = api_key
+        self.api_key = api_key or settings.llm_api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
 
@@ -32,10 +33,9 @@ class DirectLLMAdapter(RunAdapter):
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream(
                 "POST",
-                f"{self.base_url}/messages",
+                f"{self.base_url}/v1/chat/completions",
                 headers={
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01",
+                    "Authorization": f"Bearer {self.api_key}",
                     "content-type": "application/json",
                 },
                 json={
@@ -58,18 +58,19 @@ class DirectLLMAdapter(RunAdapter):
                     except json.JSONDecodeError:
                         continue
 
-                    event_type = data.get("type", "")
-                    if event_type == "content_block_delta":
-                        delta = data.get("delta", {})
-                        if "text" in delta:
+                    choices = data.get("choices", [])
+                    if choices:
+                        delta = choices[0].get("delta", {})
+                        content = delta.get("content")
+                        if content:
                             yield StreamEvent(
                                 type="text",
-                                data={"content": delta["text"]},
+                                data={"content": content},
                             )
-                    elif event_type == "message_delta":
-                        usage = data.get("usage", {})
-                        if usage:
-                            yield StreamEvent(
-                                type="status",
-                                data={"usage": usage},
-                            )
+
+                    usage = data.get("usage")
+                    if usage:
+                        yield StreamEvent(
+                            type="status",
+                            data={"usage": usage},
+                        )

@@ -1,9 +1,18 @@
+import os
+
 import pytest
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy import text
 
 from src.gateway.auth.jwt import create_jwt
 from src.infra.db.engine import async_session
+
+
+@pytest.fixture(autouse=True)
+def _set_env():
+    os.environ["LLM_API_KEY"] = "test-key"
+    yield
+    os.environ.pop("LLM_API_KEY", None)
 
 
 def _token(role: str = "member"):
@@ -34,8 +43,8 @@ async def test_health_endpoint(app):
 @pytest.mark.asyncio
 async def test_chat_streaming(app, httpx_mock):
     httpx_mock.add_response(
-        url="https://api.anthropic.com/v1/messages",
-        content=b'data: {"type":"content_block_delta","delta":{"text":"Hello"}}\n\ndata: [DONE]\n',
+        url="https://api.deepseek.com/v1/chat/completions",
+        content=b'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\ndata: [DONE]\n',
         headers={"Content-Type": "text/event-stream"},
     )
 
@@ -46,7 +55,6 @@ async def test_chat_streaming(app, httpx_mock):
             "/api/v1/chat",
             json={
                 "messages": [{"role": "user", "content": "Hello"}],
-                "config": {"extra": {"api_key": "test-key"}},
             },
             headers={"Authorization": f"Bearer {_token()}"},
         ) as resp:
@@ -115,8 +123,8 @@ async def test_chat_viewer_forbidden(app):
 @pytest.mark.asyncio
 async def test_chat_creates_request_log(app, httpx_mock):
     httpx_mock.add_response(
-        url="https://api.anthropic.com/v1/messages",
-        content=b'data: {"type":"content_block_delta","delta":{"text":"Hi"}}\n\ndata: [DONE]\n',
+        url="https://api.deepseek.com/v1/chat/completions",
+        content=b'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}\n\ndata: [DONE]\n',
         headers={"Content-Type": "text/event-stream"},
     )
 
@@ -127,7 +135,6 @@ async def test_chat_creates_request_log(app, httpx_mock):
             "/api/v1/chat",
             json={
                 "messages": [{"role": "user", "content": "Hello"}],
-                "config": {"extra": {"api_key": "test-key"}},
             },
             headers={"Authorization": f"Bearer {_token()}"},
         ) as resp:

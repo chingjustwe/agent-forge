@@ -43,68 +43,98 @@ export default function AdminAuditLog() {
 
   return (
     <div>
-      <h1>Audit Log</h1>
+      <div className="page-header">
+        <h1 className="page-title">Audit Log</h1>
+        <p className="page-subtitle">Track administrative actions across the platform</p>
+      </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
-        <select value={action} onChange={(e) => setAction(e.target.value)} style={inputStyle}>
+      <div className="filter-bar">
+        <select value={action} onChange={(e) => setAction(e.target.value)}>
           {ACTIONS.map((a) => (
             <option key={a} value={a}>{a || "All actions"}</option>
           ))}
         </select>
-        <input placeholder="User ID" value={userId} onChange={(e) => setUserId(e.target.value)} style={inputStyle} />
-        <input type="date" value={since} onChange={(e) => setSince(e.target.value)} style={inputStyle} />
-        <input type="date" value={until} onChange={(e) => setUntil(e.target.value)} style={inputStyle} />
-        <button onClick={load} style={btnStyle}>Filter</button>
+        <input placeholder="User ID" value={userId} onChange={(e) => setUserId(e.target.value)} style={{ minWidth: 200 }} />
+        <input type="date" value={since} onChange={(e) => setSince(e.target.value)} />
+        <input type="date" value={until} onChange={(e) => setUntil(e.target.value)} />
+        <button className="btn btn-secondary" onClick={load}>Filter</button>
       </div>
 
       {loading ? (
-        <div>Loading...</div>
+        <div className="loading">Loading audit log</div>
       ) : (
         <>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ textAlign: "left", background: "#eee" }}>
-                <th style={thStyle}>Timestamp</th>
-                <th style={thStyle}>User</th>
-                <th style={thStyle}>Action</th>
-                <th style={thStyle}>Target</th>
-                <th style={thStyle}>IP</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data?.items.map((entry: AuditEntry) => (
-                <>
-                  <tr
-                    key={entry.id}
-                    onClick={() => setExpandedId(expandedId === entry.id ? null : entry.id)}
-                    style={{ cursor: "pointer" }}
-                  >
-                    <td style={tdStyle}>{new Date(entry.created_at).toLocaleString()}</td>
-                    <td style={tdStyle}>{entry.user_id}</td>
-                    <td style={tdStyle}>{entry.action}</td>
-                    <td style={tdStyle}>{entry.target_type}:{entry.target_id}</td>
-                    <td style={tdStyle}>{entry.ip_address}</td>
-                  </tr>
-                  {expandedId === entry.id && (
-                    <tr>
-                      <td colSpan={5} style={{ padding: "12px 16px", background: "#f9f9f9" }}>
-                        <strong>Details:</strong>
-                        <pre style={{ background: "#eee", padding: 8, borderRadius: 4, fontSize: 12, maxHeight: 200, overflow: "auto" }}>
-                          {JSON.stringify(entry.details, null, 2)}
-                        </pre>
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Timestamp</th>
+                  <th>User</th>
+                  <th>Action</th>
+                  <th>Target</th>
+                  <th>IP</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data?.items.map((entry: AuditEntry) => (
+                  <>
+                    <tr
+                      key={entry.id}
+                      onClick={() => setExpandedId(expandedId === entry.id ? null : entry.id)}
+                      className="clickable"
+                    >
+                      <td style={{ fontSize: "0.82rem", color: "var(--text-secondary)" }}>
+                        {new Date(entry.created_at).toLocaleString()}
+                      </td>
+                      <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>{entry.user_id}</td>
+                      <td><span className="badge badge-info">{entry.action}</span></td>
+                      <td style={{ fontSize: "0.82rem" }}>{entry.target_type}:{entry.target_id}</td>
+                      <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                        {entry.ip_address}
                       </td>
                     </tr>
-                  )}
-                </>
-              ))}
-            </tbody>
-          </table>
+                    {expandedId === entry.id && (
+                      <tr className="expanded-row">
+                        <td colSpan={5}>
+                          <div className="expanded-content">
+                            <strong>Details</strong>
+                            <pre>{JSON.stringify(entry.details, null, 2)}</pre>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </>
+                ))}
+                {(!data?.items || data.items.length === 0) && (
+                  <tr>
+                    <td colSpan={5} style={{ textAlign: "center", padding: 32, color: "var(--text-muted)" }}>
+                      No audit entries found
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
 
           {data && (
-            <div style={{ marginTop: 16, display: "flex", gap: 8, alignItems: "center" }}>
-              <button disabled={offset <= 0} onClick={() => setOffset(Math.max(0, offset - limit))} style={btnStyle}>Previous</button>
-              <span>Page {currentPage} of {totalPages || 1} ({data.total} total)</span>
-              <button disabled={offset + limit >= data.total} onClick={() => setOffset(offset + limit)} style={btnStyle}>Next</button>
+            <div className="pagination">
+              <button
+                className="btn btn-secondary btn-sm"
+                disabled={offset <= 0}
+                onClick={() => setOffset(Math.max(0, offset - limit))}
+              >
+                Previous
+              </button>
+              <span className="pagination-info">
+                Page {currentPage} of {totalPages || 1} ({data.total} total)
+              </span>
+              <button
+                className="btn btn-secondary btn-sm"
+                disabled={offset + limit >= data.total}
+                onClick={() => setOffset(offset + limit)}
+              >
+                Next
+              </button>
             </div>
           )}
         </>
@@ -112,8 +142,3 @@ export default function AdminAuditLog() {
     </div>
   );
 }
-
-const inputStyle: React.CSSProperties = { padding: "8px 12px", border: "1px solid #ccc", borderRadius: 4, fontSize: 14 };
-const btnStyle: React.CSSProperties = { padding: "8px 16px", background: "#1a1a2e", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 14 };
-const thStyle: React.CSSProperties = { padding: "8px 12px", borderBottom: "2px solid #ddd" };
-const tdStyle: React.CSSProperties = { padding: "8px 12px", borderBottom: "1px solid #eee" };

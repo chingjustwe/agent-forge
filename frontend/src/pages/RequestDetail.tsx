@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { getObservabilityRequests } from "../api";
+import { getObservabilityRequests, getRequestDetail } from "../api";
 import TraceTimeline from "../components/TraceTimeline";
 
 interface SpanData {
@@ -42,74 +42,98 @@ export default function RequestDetail({ wsId }: { wsId: string }) {
       const requests = await getObservabilityRequests(wsId);
       const found = requests.find(r => r.trace_id === traceId);
       if (found) {
-        const resp = await fetch(`/api/v1/workspaces/${wsId}/observability/requests/${traceId}`, {
-          headers: { Authorization: `Bearer ${localStorage.getItem("agent_platform_token")}` },
-        });
-        if (resp.ok) setDetail(await resp.json());
+        try {
+          const data = await getRequestDetail(wsId, traceId);
+          setDetail(data as any);
+        } catch {
+          // apiFetch handles 401 redirect; other errors ignored
+        }
       }
     })();
   }, [wsId, traceId]);
 
-  if (!detail) return <div style={{ padding: 24 }}>Loading...</div>;
+  if (!detail) return <div className="loading">Loading request details</div>;
 
   return (
-    <div style={{ padding: 24 }}>
-      <h1>Request Detail</h1>
-      <pre style={{ background: "#f5f5f5", padding: 16, borderRadius: 8 }}>
-        {JSON.stringify(detail.request, null, 2)}
-      </pre>
+    <div>
+      <div className="page-header">
+        <h1 className="page-title">Request Detail</h1>
+        <p className="page-subtitle">Trace: {traceId}</p>
+      </div>
 
-      <h2>Trace Waterfall</h2>
-      <TraceTimeline spans={detail.spans} />
+      <div className="detail-section">
+        <h2 className="detail-section-title">Request Data</h2>
+        <div className="detail-json">
+          {JSON.stringify(detail.request, null, 2)}
+        </div>
+      </div>
+
+      <div className="detail-section">
+        <h2 className="detail-section-title">Trace Waterfall</h2>
+        <TraceTimeline spans={detail.spans} />
+      </div>
 
       {detail.tool_calls.length > 0 && (
-        <>
-          <h2>Tool Calls</h2>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ background: "#f5f5f5" }}>
-                <th style={thStyle}>Tool</th>
-                <th style={thStyle}>Duration (ms)</th>
-                <th style={thStyle}>Success</th>
-              </tr>
-            </thead>
-            <tbody>
-              {detail.tool_calls.map((tc, idx) => (
-                <tr key={idx}>
-                  <td style={tdStyle}>{tc.tool_name}</td>
-                  <td style={tdStyle}>{tc.duration_ms}</td>
-                  <td style={tdStyle}>{tc.success ? "✓" : "✗"}</td>
+        <div className="detail-section">
+          <h2 className="detail-section-title">Tool Calls</h2>
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Tool</th>
+                  <th>Duration (ms)</th>
+                  <th>Success</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </>
+              </thead>
+              <tbody>
+                {detail.tool_calls.map((tc, idx) => (
+                  <tr key={idx}>
+                    <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>{tc.tool_name}</td>
+                    <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>{tc.duration_ms}</td>
+                    <td>
+                      <span className={`badge ${tc.success ? "badge-success" : "badge-error"}`}>
+                        {tc.success ? "Success" : "Failed"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
 
       {detail.events.length > 0 && (
-        <>
-          <h2>Event Log</h2>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ background: "#f5f5f5" }}>
-                <th style={thStyle}>Level</th>
-                <th style={thStyle}>Event</th>
-              </tr>
-            </thead>
-            <tbody>
-              {detail.events.map((ev, idx) => (
-                <tr key={idx}>
-                  <td style={tdStyle}>{ev.level}</td>
-                  <td style={tdStyle}>{ev.event}</td>
+        <div className="detail-section">
+          <h2 className="detail-section-title">Event Log</h2>
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Level</th>
+                  <th>Event</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </>
+              </thead>
+              <tbody>
+                {detail.events.map((ev, idx) => (
+                  <tr key={idx}>
+                    <td>
+                      <span className={`badge ${
+                        ev.level === "error" ? "badge-error" :
+                        ev.level === "warn" ? "badge-warning" :
+                        "badge-info"
+                      }`}>
+                        {ev.level}
+                      </span>
+                    </td>
+                    <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>{ev.event}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
     </div>
   );
 }
-
-const thStyle: React.CSSProperties = { padding: 8, borderBottom: "2px solid #ddd", textAlign: "left" };
-const tdStyle: React.CSSProperties = { padding: 8, borderBottom: "1px solid #eee" };

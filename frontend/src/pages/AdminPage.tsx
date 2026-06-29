@@ -34,63 +34,91 @@ export default function AdminPage() {
   }
 
   return (
-    <div style={{ maxWidth: 960, margin: "16px auto", padding: 16 }}>
-      <h2>Admin Panel</h2>
-      {error && <p style={{ color: "red" }}>{error}</p>}
+    <div>
+      <div className="page-header">
+        <h1 className="page-title">Admin Overview</h1>
+        <p className="page-subtitle">Manage workspaces, users, and platform settings</p>
+      </div>
 
-      <section style={{ marginBottom: 32 }}>
-        <h3>Workspaces</h3>
+      {error && <div className="alert alert-error">{error}</div>}
+
+      <div className="stat-grid">
+        <div className="stat-card stat-card-accent">
+          <div className="stat-card-value">{workspaces.length}</div>
+          <div className="stat-card-label">Workspaces</div>
+        </div>
+        <div className="stat-card stat-card-accent-success">
+          <div className="stat-card-value">{users.length}</div>
+          <div className="stat-card-label">Users</div>
+        </div>
+      </div>
+
+      <div className="admin-nav">
+        <a href="/admin/users" className="admin-nav-link">👥 Manage Users</a>
+        <a href="/admin/workspaces" className="admin-nav-link">🏢 Manage Workspaces</a>
+        <a href="/admin/audit" className="admin-nav-link">📝 Audit Log</a>
+        <a href="/admin/usage" className="admin-nav-link">📈 Usage</a>
+      </div>
+
+      <section style={{ marginTop: 32 }}>
+        <h2 className="detail-section-title">Workspaces</h2>
         <form onSubmit={handleCreateWorkspace} style={{ display: "flex", gap: 8, marginBottom: 16 }}>
           <input
             value={newWsName}
             onChange={(e) => setNewWsName(e.target.value)}
             placeholder="New workspace name"
-            style={{ flex: 1, padding: 8 }}
+            style={{ maxWidth: 300 }}
           />
-          <button type="submit" style={{ padding: "8px 16px" }}>Create</button>
+          <button type="submit" className="btn btn-primary">Create</button>
         </form>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ textAlign: "left" }}>
-              <th style={{ borderBottom: "1px solid #ccc", padding: 8 }}>Name</th>
-              <th style={{ borderBottom: "1px solid #ccc", padding: 8 }}>Members</th>
-              <th style={{ borderBottom: "1px solid #ccc", padding: 8 }}>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {workspaces.map((ws) => (
-              <tr key={ws.id}>
-                <td style={{ padding: 8 }}>{ws.name}</td>
-                <td style={{ padding: 8 }}>{ws.member_count ?? 0}</td>
-                <td style={{ padding: 8 }}>{new Date(ws.created_at).toLocaleDateString()}</td>
+        <div className="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Members</th>
+                <th>Created</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {workspaces.map((ws) => (
+                <tr key={ws.id}>
+                  <td>{ws.name}</td>
+                  <td>{ws.member_count ?? 0}</td>
+                  <td style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>
+                    {new Date(ws.created_at).toLocaleDateString()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </section>
 
-      <section>
-        <h3>Users</h3>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ textAlign: "left" }}>
-              <th style={{ borderBottom: "1px solid #ccc", padding: 8 }}>Email</th>
-              <th style={{ borderBottom: "1px solid #ccc", padding: 8 }}>Name</th>
-              <th style={{ borderBottom: "1px solid #ccc", padding: 8 }}>Role</th>
-              <th style={{ borderBottom: "1px solid #ccc", padding: 8 }}>Workspaces</th>
-            </tr>
-          </thead>
-          <tbody>
-            {users.map((u) => (
-              <tr key={u.id}>
-                <td style={{ padding: 8 }}>{u.email}</td>
-                <td style={{ padding: 8 }}>{u.name}</td>
-                <td style={{ padding: 8 }}>{u.role}</td>
-                <td style={{ padding: 8 }}>{u.workspace_count ?? (u.workspace_ids?.length ?? 0)}</td>
+      <section style={{ marginTop: 32 }}>
+        <h2 className="detail-section-title">Users</h2>
+        <div className="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Name</th>
+                <th>Role</th>
+                <th>Workspaces</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {users.map((u) => (
+                <tr key={u.id}>
+                  <td>{u.email}</td>
+                  <td>{u.name}</td>
+                  <td><span className="badge badge-primary">{u.role}</span></td>
+                  <td>{u.workspace_count ?? (u.workspace_ids?.length ?? 0)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </section>
     </div>
   );

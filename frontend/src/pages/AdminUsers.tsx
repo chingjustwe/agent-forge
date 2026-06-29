@@ -57,17 +57,21 @@ export default function AdminUsers() {
 
   return (
     <div>
-      <h1>User Management</h1>
-      {message && <div style={{ color: "red", marginBottom: 12 }}>{message}</div>}
+      <div className="page-header">
+        <h1 className="page-title">User Management</h1>
+        <p className="page-subtitle">Manage users, roles, and invitations</p>
+      </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "center" }}>
+      {message && <div className="alert alert-error">{message}</div>}
+
+      <div className="filter-bar">
         <input
           placeholder="Search email or name..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={inputStyle}
+          style={{ minWidth: 200 }}
         />
-        <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)} style={inputStyle}>
+        <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)}>
           <option value="">All roles</option>
           <option value="tenant_admin">Tenant Admin</option>
           <option value="workspace_owner">Workspace Owner</option>
@@ -75,78 +79,89 @@ export default function AdminUsers() {
           <option value="member">Member</option>
           <option value="viewer">Viewer</option>
         </select>
-        <button onClick={handleSearch} style={btnStyle}>Search</button>
-        <button onClick={() => setShowInvite(true)} style={{ ...btnStyle, background: "#2d7d46" }}>
+        <button className="btn btn-secondary" onClick={handleSearch}>Search</button>
+        <button className="btn btn-success" onClick={() => setShowInvite(true)}>
           Invite User
         </button>
       </div>
 
       {showInvite && (
-        <div style={{ background: "#f5f5f5", padding: 16, borderRadius: 8, marginBottom: 16, display: "flex", gap: 8, alignItems: "center" }}>
-          <input placeholder="Email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} style={inputStyle} />
-          <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)} style={inputStyle}>
-            <option value="member">Member</option>
-            <option value="workspace_admin">Workspace Admin</option>
-            <option value="workspace_owner">Workspace Owner</option>
-            <option value="viewer">Viewer</option>
-          </select>
-          <button onClick={handleInvite} style={btnStyle}>Send Invite</button>
-          <button onClick={() => setShowInvite(false)} style={btnStyle}>Cancel</button>
+        <div className="card" style={{ marginBottom: 20, display: "flex", gap: 10, alignItems: "flex-end" }}>
+          <div className="form-group" style={{ margin: 0, flex: 1 }}>
+            <label className="form-label">Email</label>
+            <input placeholder="Email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} />
+          </div>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label">Role</label>
+            <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)}>
+              <option value="member">Member</option>
+              <option value="workspace_admin">Workspace Admin</option>
+              <option value="workspace_owner">Workspace Owner</option>
+              <option value="viewer">Viewer</option>
+            </select>
+          </div>
+          <div className="btn-group">
+            <button className="btn btn-primary" onClick={handleInvite}>Send Invite</button>
+            <button className="btn btn-secondary" onClick={() => setShowInvite(false)}>Cancel</button>
+          </div>
         </div>
       )}
 
       {loading ? (
-        <div>Loading...</div>
+        <div className="loading">Loading users</div>
       ) : (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ textAlign: "left", background: "#eee" }}>
-              <th style={thStyle}>Email</th>
-              <th style={thStyle}>Name</th>
-              <th style={thStyle}>Role</th>
-              <th style={thStyle}>Workspaces</th>
-              <th style={thStyle}>Created</th>
-              <th style={thStyle}>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {users.map((u) => (
-              <tr key={u.id}>
-                <td style={tdStyle}>{u.email}</td>
-                <td style={tdStyle}>{u.name}</td>
-                <td style={tdStyle}>
-                  {editingId === u.id ? (
-                    <select value={editRole} onChange={(e) => setEditRole(e.target.value)} style={inputStyle}>
-                      <option value="tenant_admin">Tenant Admin</option>
-                      <option value="workspace_owner">Workspace Owner</option>
-                      <option value="workspace_admin">Workspace Admin</option>
-                      <option value="member">Member</option>
-                      <option value="viewer">Viewer</option>
-                    </select>
-                  ) : (
-                    u.role
-                  )}
-                </td>
-                <td style={tdStyle}>{Array.isArray(u.workspaces) ? u.workspaces.join(", ") : u.workspaces}</td>
-                <td style={tdStyle}>{new Date(u.created_at).toLocaleDateString()}</td>
-                <td style={tdStyle}>
-                  {editingId === u.id ? (
-                    <button onClick={() => handleSaveRole(u.id)} style={btnStyle}>Save</button>
-                  ) : (
-                    <button onClick={() => { setEditingId(u.id); setEditRole(u.role); }} style={btnStyle}>Edit</button>
-                  )}
-                  <button onClick={() => handleDelete(u.id)} style={{ ...btnStyle, background: "#c0392b", marginLeft: 4 }}>Delete</button>
-                </td>
+        <div className="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Email</th>
+                <th>Name</th>
+                <th>Role</th>
+                <th>Workspaces</th>
+                <th>Created</th>
+                <th>Actions</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {users.map((u) => (
+                <tr key={u.id}>
+                  <td>{u.email}</td>
+                  <td>{u.name}</td>
+                  <td>
+                    {editingId === u.id ? (
+                      <select value={editRole} onChange={(e) => setEditRole(e.target.value)}>
+                        <option value="tenant_admin">Tenant Admin</option>
+                        <option value="workspace_owner">Workspace Owner</option>
+                        <option value="workspace_admin">Workspace Admin</option>
+                        <option value="member">Member</option>
+                        <option value="viewer">Viewer</option>
+                      </select>
+                    ) : (
+                      <span className="badge badge-primary">{u.role}</span>
+                    )}
+                  </td>
+                  <td style={{ fontSize: "0.82rem", color: "var(--text-secondary)" }}>
+                    {Array.isArray(u.workspaces) ? u.workspaces.join(", ") : u.workspaces}
+                  </td>
+                  <td style={{ fontSize: "0.82rem", color: "var(--text-secondary)" }}>
+                    {new Date(u.created_at).toLocaleDateString()}
+                  </td>
+                  <td>
+                    <div className="btn-group">
+                      {editingId === u.id ? (
+                        <button className="btn btn-primary btn-sm" onClick={() => handleSaveRole(u.id)}>Save</button>
+                      ) : (
+                        <button className="btn btn-secondary btn-sm" onClick={() => { setEditingId(u.id); setEditRole(u.role); }}>Edit</button>
+                      )}
+                      <button className="btn btn-danger btn-sm" onClick={() => handleDelete(u.id)}>Delete</button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
 }
-
-const inputStyle: React.CSSProperties = { padding: "8px 12px", border: "1px solid #ccc", borderRadius: 4, fontSize: 14 };
-const btnStyle: React.CSSProperties = { padding: "8px 16px", background: "#1a1a2e", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontSize: 14 };
-const thStyle: React.CSSProperties = { padding: "8px 12px", borderBottom: "2px solid #ddd" };
-const tdStyle: React.CSSProperties = { padding: "8px 12px", borderBottom: "1px solid #eee" };

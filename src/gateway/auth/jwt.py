@@ -6,6 +6,8 @@ from joserfc import jwt
 from joserfc.jwk import OctKey
 from joserfc.errors import JoseError
 
+from src.infra.settings import settings
+
 _SECRET = None
 _KEY = None
 
@@ -13,7 +15,7 @@ _KEY = None
 def _get_key() -> OctKey:
     global _SECRET, _KEY
     if _KEY is None:
-        _SECRET = uuid.uuid4().hex
+        _SECRET = settings.jwt_secret or uuid.uuid4().hex
         _KEY = OctKey.import_key(_SECRET)
     return _KEY
 

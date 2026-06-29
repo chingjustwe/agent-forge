@@ -16,39 +16,56 @@ export default function RequestList({ wsId }: { wsId: string }) {
   );
 
   return (
-    <div style={{ padding: 24 }}>
-      <h1>Request List</h1>
-      <input
-        placeholder="Filter by model or status..."
-        value={filter}
-        onChange={e => setFilter(e.target.value)}
-        style={{ marginBottom: 16, padding: 8, width: 300 }}
-      />
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
-        <thead>
-          <tr style={{ background: "#f5f5f5" }}>
-            <th style={thStyle}>Model</th>
-            <th style={thStyle}>Status</th>
-            <th style={thStyle}>Duration (ms)</th>
-            <th style={thStyle}>Error</th>
-            <th style={thStyle}>Created</th>
-          </tr>
-        </thead>
-        <tbody>
-          {filtered.map(r => (
-            <tr key={r.id} onClick={() => navigate(`/requests/${r.trace_id}`)} style={{ cursor: "pointer" }}>
-              <td style={tdStyle}>{r.model || "-"}</td>
-              <td style={tdStyle}>{r.status_code}</td>
-              <td style={tdStyle}>{r.duration_ms}</td>
-              <td style={tdStyle}>{r.error || "-"}</td>
-              <td style={tdStyle}>{r.created_at}</td>
+    <div>
+      <div className="page-header">
+        <h1 className="page-title">Request List</h1>
+        <p className="page-subtitle">Browse and inspect API requests to your agents</p>
+      </div>
+
+      <div className="filter-bar">
+        <input
+          placeholder="Filter by model or status..."
+          value={filter}
+          onChange={e => setFilter(e.target.value)}
+          style={{ minWidth: 240 }}
+        />
+      </div>
+
+      <div className="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Status</th>
+              <th>Duration (ms)</th>
+              <th>Error</th>
+              <th>Created</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {filtered.map(r => (
+              <tr key={r.id} onClick={() => navigate(`/requests/${r.trace_id}`)} className="clickable">
+                <td>{r.model || "-"}</td>
+                <td>
+                  <span className={`badge ${r.status_code >= 400 ? "badge-error" : "badge-success"}`}>
+                    {r.status_code}
+                  </span>
+                </td>
+                <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>{r.duration_ms}</td>
+                <td style={{ color: r.error ? "var(--error)" : "var(--text-muted)" }}>{r.error || "-"}</td>
+                <td style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>{r.created_at}</td>
+              </tr>
+            ))}
+            {filtered.length === 0 && (
+              <tr>
+                <td colSpan={5} style={{ textAlign: "center", padding: 32, color: "var(--text-muted)" }}>
+                  No requests found
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
-
-const thStyle: React.CSSProperties = { padding: 8, borderBottom: "2px solid #ddd", textAlign: "left" };
-const tdStyle: React.CSSProperties = { padding: 8, borderBottom: "1px solid #eee" };

@@ -19,40 +19,74 @@ export default function QuotaPage({ wsId, isAdmin }: { wsId: string; isAdmin: bo
     getQuota(wsId).then(setQuota);
   };
 
-  if (!quota) return <div style={{ padding: 24 }}>Loading...</div>;
+  if (!quota) return <div className="loading">Loading quota data</div>;
 
   const pct = quota.max_tokens_per_day > 0
     ? Math.min(100, (quota.tokens_used / quota.max_tokens_per_day) * 100)
     : 0;
 
-  return (
-    <div style={{ padding: 24 }}>
-      <h1>Quota Management</h1>
+  const barClass = pct > 90 ? "progress-bar-fill-error" : pct > 70 ? "progress-bar-fill-warning" : "";
 
-      <div style={{ background: "#fff", padding: 16, borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.1)", marginBottom: 16 }}>
-        <h3>Today's Usage</h3>
-        <div style={{ background: "#eee", borderRadius: 4, height: 24, width: "100%", marginBottom: 8 }}>
-          <div style={{ background: "#0088FE", borderRadius: 4, height: 24, width: `${pct}%`, transition: "width 0.3s" }} />
+  return (
+    <div>
+      <div className="page-header">
+        <h1 className="page-title">Quota Management</h1>
+        <p className="page-subtitle">Monitor and configure token usage limits</p>
+      </div>
+
+      <div className="stat-grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        <div className="stat-card stat-card-accent">
+          <div className="stat-card-value">{quota.tokens_used.toLocaleString()}</div>
+          <div className="stat-card-label">Tokens Used Today</div>
         </div>
-        <p>{quota.tokens_used} / {quota.max_tokens_per_day === 0 ? "Unlimited" : quota.max_tokens_per_day} tokens</p>
-        <p>Cost today: ${quota.cost_today.toFixed(4)}</p>
+        <div className="stat-card">
+          <div className="stat-card-value">${quota.cost_today.toFixed(4)}</div>
+          <div className="stat-card-label">Cost Today</div>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div className="card-header">
+          <h3 className="card-title">Today's Usage</h3>
+        </div>
+        <div className="progress-bar">
+          <div
+            className={`progress-bar-fill ${barClass}`}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <p className="quota-usage-text">
+          {quota.tokens_used.toLocaleString()} / {quota.max_tokens_per_day === 0 ? "Unlimited" : quota.max_tokens_per_day.toLocaleString()} tokens
+        </p>
       </div>
 
       {isAdmin && (
-        <div style={{ background: "#fff", padding: 16, borderRadius: 8, boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}>
-          <h3>Configuration</h3>
+        <div className="card">
+          <div className="card-header">
+            <h3 className="card-title">Configuration</h3>
+          </div>
           {editing ? (
             <div>
-              <label>Max Tokens Per Day: </label>
-              <input type="number" value={editTokens} onChange={e => setEditTokens(Number(e.target.value))} style={{ marginRight: 8 }} />
-              <button onClick={handleSave}>Save</button>
-              <button onClick={() => setEditing(false)} style={{ marginLeft: 8 }}>Cancel</button>
+              <div className="form-group">
+                <label className="form-label">Max Tokens Per Day</label>
+                <input
+                  type="number"
+                  value={editTokens}
+                  onChange={e => setEditTokens(Number(e.target.value))}
+                />
+              </div>
+              <div className="btn-group">
+                <button className="btn btn-primary" onClick={handleSave}>Save</button>
+                <button className="btn btn-secondary" onClick={() => setEditing(false)}>Cancel</button>
+              </div>
             </div>
           ) : (
-            <div>
-              <p>Max tokens/day: {quota.max_tokens_per_day}</p>
-              <p>Max cost/month: ${quota.max_cost_per_month}</p>
-              <button onClick={() => setEditing(true)}>Edit</button>
+            <div className="quota-config">
+              <p>Max tokens/day: <strong>{quota.max_tokens_per_day.toLocaleString()}</strong></p>
+              <p>Max cost/month: <strong>${quota.max_cost_per_month.toFixed(2)}</strong></p>
+              <button className="btn btn-secondary btn-sm" onClick={() => setEditing(true)} style={{ marginTop: 8 }}>
+                Edit Limits
+              </button>
             </div>
           )}
         </div>

@@ -8,8 +8,8 @@ from src.runtime.adapters.direct_llm import DirectLLMAdapter
 def adapter():
     return DirectLLMAdapter(
         api_key="test-key",
-        base_url="https://api.anthropic.com/v1",
-        model="claude-sonnet-4-20250514",
+        base_url="https://api.deepseek.com",
+        model="deepseek-chat",
     )
 
 
@@ -28,8 +28,8 @@ class TestDirectLLMAdapter:
     @pytest.mark.asyncio
     async def test_streams_text_events(self, adapter, httpx_mock):
         httpx_mock.add_response(
-            url="https://api.anthropic.com/v1/messages",
-            content=b'data: {"type":"content_block_delta","delta":{"text":"Hello"}}\n\ndata: [DONE]\n',
+            url="https://api.deepseek.com/v1/chat/completions",
+            content=b'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\ndata: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}\n\ndata: [DONE]\n',
             headers={"Content-Type": "text/event-stream"},
         )
 
@@ -43,3 +43,4 @@ class TestDirectLLMAdapter:
 
         assert len(results) > 0
         assert any(e.type == "text" for e in results)
+        assert any(e.type == "status" for e in results)

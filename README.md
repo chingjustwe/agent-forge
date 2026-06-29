@@ -44,9 +44,18 @@ npm run dev
 
 UI available at `http://localhost:5173`
 
-### 3. First User
+### 3. Configure LLM API Key
 
-Register via API:
+```bash
+# Create .env file from example (or export the variable)
+cp .env.example .env
+# Edit .env and set your DeepSeek API key:
+# LLM_API_KEY=sk-<your-key>
+```
+
+### 4. First User
+
+Register via API (server must be running first):
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/auth/register \
@@ -57,8 +66,10 @@ curl -X POST http://localhost:8000/api/v1/auth/register \
 The first user role is `member`. To enable admin access, update the DB:
 
 ```bash
-sqlite3 agent_platform.db "UPDATE users SET role='tenant_admin' WHERE email='admin@example.com';"
+sqlite3 data/agent_platform.db "UPDATE users SET role='tenant_admin' WHERE email='admin@example.com';"
 ```
+
+> **Note:** The SQLite database is located at `data/agent_platform.db`. It is created automatically when the server starts for the first time.
 
 Then log in at `http://localhost:5173`.
 

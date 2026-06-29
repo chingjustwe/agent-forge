@@ -30,75 +30,70 @@ export default function LoginPage() {
   }
 
   return (
-    <div style={{ maxWidth: 400, margin: "100px auto", padding: 16 }}>
-      <h1>Agent Platform</h1>
-      <h2>{mode === "login" ? "Sign In" : "Create Account"}</h2>
+    <div className="login-page">
+      <div className="login-card">
+        <div className="login-brand">
+          <div className="login-brand-icon">A</div>
+          <span className="login-brand-text">Agent Platform</span>
+        </div>
 
-      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {mode === "register" && (
+        <h1 className="login-title">
+          {mode === "login" ? "Sign in to your account" : "Create an account"}
+        </h1>
+
+        {error && <div className="alert alert-error">{error}</div>}
+
+        <form className="login-form" onSubmit={handleSubmit}>
+          {mode === "register" && (
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Full name"
+              required
+            />
+          )}
           <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Name"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="Email address"
             required
-            style={{ padding: 8 }}
           />
-        )}
-        <input
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          placeholder="Email"
-          required
-          style={{ padding: 8 }}
-        />
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          placeholder="Password"
-          required
-          style={{ padding: 8 }}
-        />
-        <button type="submit" disabled={loading} style={{ padding: 8 }}>
-          {loading ? "Please wait..." : mode === "login" ? "Sign In" : "Register"}
-        </button>
-      </form>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="Password"
+            required
+          />
+          <button type="submit" className="btn btn-primary" disabled={loading}>
+            {loading ? "Please wait..." : mode === "login" ? "Sign In" : "Register"}
+          </button>
+        </form>
 
-      {error && <p style={{ color: "red" }}>{error}</p>}
+        <div className="login-toggle">
+          {mode === "login" ? (
+            <>
+              Don't have an account?{" "}
+              <button onClick={() => setMode("register")}>Register</button>
+            </>
+          ) : (
+            <>
+              Already have an account?{" "}
+              <button onClick={() => setMode("login")}>Sign In</button>
+            </>
+          )}
+        </div>
 
-      <p style={{ marginTop: 16 }}>
-        {mode === "login" ? (
-          <>
-            Don't have an account?{" "}
-            <button onClick={() => setMode("register")} style={{ background: "none", border: "none", color: "blue", cursor: "pointer", textDecoration: "underline" }}>
-              Register
-            </button>
-          </>
-        ) : (
-          <>
-            Already have an account?{" "}
-            <button onClick={() => setMode("login")} style={{ background: "none", border: "none", color: "blue", cursor: "pointer", textDecoration: "underline" }}>
-              Sign In
-            </button>
-          </>
-        )}
-      </p>
+        <hr className="login-divider" />
 
-      <hr style={{ margin: "24px 0" }} />
-      <p style={{ fontSize: "0.9em", color: "#666" }}>
-        OIDC SSO providers (configured in backend):
-      </p>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <a href="/api/v1/auth/login?provider=google">
-          <button style={{ padding: "8px 16px" }}>Google</button>
-        </a>
-        <a href="/api/v1/auth/login?provider=azure">
-          <button style={{ padding: "8px 16px" }}>Azure AD</button>
-        </a>
-        <a href="/api/v1/auth/login?provider=okta">
-          <button style={{ padding: "8px 16px" }}>Okta</button>
-        </a>
+        <div className="login-sso-label">Single sign-on</div>
+        <div className="login-sso-buttons">
+          <a href="/api/v1/auth/login?provider=google" className="login-sso-btn">Google</a>
+          <a href="/api/v1/auth/login?provider=azure" className="login-sso-btn">Azure AD</a>
+          <a href="/api/v1/auth/login?provider=okta" className="login-sso-btn">Okta</a>
+        </div>
       </div>
     </div>
   );

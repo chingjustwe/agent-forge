@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 class RuntimeConfig(BaseModel):
     agent: str = ""
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "deepseek-chat"
     max_tokens: int = 4096
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     workspace_id: str = ""
