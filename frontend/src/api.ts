@@ -415,12 +415,23 @@ export interface AdminWorkspace {
   agent_count: number;
   owner: string;
   is_default: boolean;
+  // P3-3: present when the backend returns archived workspaces alongside
+  // active ones (via `include_archived=true`). Forward-compatible — older
+  // backends omit the field, in which case the workspace is treated as
+  // active.
+  archived?: boolean;
   created_at: string;
   updated_at?: string;
 }
 
-export async function fetchAdminWorkspaces(): Promise<AdminWorkspace[]> {
-  const resp = await apiFetch("/api/v1/admin/workspaces");
+export async function fetchAdminWorkspaces(
+  options?: { include_archived?: boolean },
+): Promise<AdminWorkspace[]> {
+  const q = new URLSearchParams();
+  if (options?.include_archived) q.set("include_archived", "true");
+  const qs = q.toString();
+  const url = qs ? `/api/v1/admin/workspaces?${qs}` : "/api/v1/admin/workspaces";
+  const resp = await apiFetch(url);
   if (!resp.ok) throw new Error("Failed to fetch workspaces");
   return resp.json();
 }
@@ -471,6 +482,38 @@ export async function archiveWorkspace(id: string): Promise<void> {
     const err = await resp.json().catch(() => ({}));
     throw new Error(err.error?.message || "Failed to archive workspace");
   }
+}
+
+// P3-3: hard-delete an archived workspace and all its data. Requires the
+// exact workspace name as `confirmName` (two-step confirmation).
+export async function purgeWorkspace(
+  workspaceId: string,
+  confirmName: string,
+): Promise<{ purged: boolean; workspace_id: string }> {
+  const resp = await apiFetch(`/api/v1/admin/workspaces/${workspaceId}/purge`, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ purge_confirm: confirmName }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to purge workspace");
+  }
+  return resp.json();
+}
+
+// P3-4: atomically transfer the is_default flag to the given workspace.
+export async function setDefaultWorkspace(
+  workspaceId: string,
+): Promise<{ id: string; is_default: boolean }> {
+  const resp = await apiFetch(`/api/v1/admin/workspaces/${workspaceId}/set-default`, {
+    method: "POST",
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to set default workspace");
+  }
+  return resp.json();
 }
 
 // ─── Workspace Members ─────────────────────────────────────────────────────
@@ -700,6 +743,55 @@ export async function deleteSession(wsId: string, sessionId: string): Promise<vo
   }
 }
 
+// ─── Session Shares (P3-5) ─────────────────────────────────────────────────
+// Backend response shape: only ids/timestamps are returned. The frontend
+// cross-references fetchWorkspaceMembers() to resolve user_email/user_name.
+
+export interface SessionShare {
+  session_id: string;
+  user_id: string;
+  shared_by: string;
+  shared_at: string;
+}
+
+export async function listSessionShares(sessionId: string): Promise<SessionShare[]> {
+  const resp = await apiFetch(`/api/v1/sessions/${sessionId}/shares`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to list shares");
+  }
+  return resp.json();
+}
+
+export async function createSessionShare(
+  sessionId: string,
+  userId: string,
+): Promise<SessionShare> {
+  const resp = await apiFetch(`/api/v1/sessions/${sessionId}/shares`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to share session");
+  }
+  return resp.json();
+}
+
+export async function deleteSessionShare(
+  sessionId: string,
+  userId: string,
+): Promise<void> {
+  const resp = await apiFetch(`/api/v1/sessions/${sessionId}/shares/${userId}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok && resp.status !== 204) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to revoke share");
+  }
+}
+
 // ─── Workspace Invitations (P2-1) ──────────────────────────────────────────
 
 export interface WorkspaceInvitation {
@@ -863,6 +955,24 @@ export async function deleteAgent(wsId: string, agentId: string): Promise<void> 
     const err = await resp.json().catch(() => ({}));
     throw new Error(err.error?.message || "Failed to delete agent");
   }
+}
+
+// P3-2: cross-workspace copy (tenant_admin only). Deep-copies an agent
+// config into a target workspace within the same tenant.
+export async function copyAgentToWorkspace(
+  workspaceId: string,
+  agentId: string,
+  targetWorkspaceId: string,
+): Promise<AgentConfig> {
+  const resp = await apiFetch(
+    `/api/v1/workspaces/${workspaceId}/agents/${agentId}/copy-to/${targetWorkspaceId}`,
+    { method: "POST" },
+  );
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to copy agent");
+  }
+  return resp.json();
 }
 
 // ─── API Keys (P2-3) ───────────────────────────────────────────────────────

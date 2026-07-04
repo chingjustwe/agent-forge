@@ -1,7 +1,7 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { createSession, deleteSession, getCurrentUser, getSession, listSessions, streamChat, updateSession, } from "../api";
+import { createSession, createSessionShare, deleteSession, deleteSessionShare, fetchWorkspaceMembers, getCurrentUser, getSession, listSessionShares, listSessions, streamChat, updateSession, } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
 export default function Sessions() {
     const { sessionId } = useParams();
@@ -114,6 +114,15 @@ function SessionDetail({ sessionId }) {
     const [titleDraft, setTitleDraft] = useState("");
     const messagesEndRef = useRef(null);
     const navigate = useNavigate();
+    // P3-5: session sharing state.
+    const [showShareModal, setShowShareModal] = useState(false);
+    const [shares, setShares] = useState([]);
+    const [members, setMembers] = useState([]);
+    const [shareLoading, setShareLoading] = useState(false);
+    const [shareError, setShareError] = useState(null);
+    const [selectedUserId, setSelectedUserId] = useState("");
+    const [sharing, setSharing] = useState(false);
+    const [removingUserId, setRemovingUserId] = useState(null);
     async function loadSession() {
         if (!currentWorkspaceId)
             return;
@@ -218,6 +227,78 @@ function SessionDetail({ sessionId }) {
             setError(e instanceof Error ? e.message : "Failed to delete session");
         }
     }
+    // P3-5: open the share modal — load current shares + workspace members.
+    async function openShareModal() {
+        if (!session)
+            return;
+        setShowShareModal(true);
+        setShareError(null);
+        setShareLoading(true);
+        try {
+            const [shareList, memberList] = await Promise.all([
+                listSessionShares(session.id),
+                currentWorkspaceId
+                    ? fetchWorkspaceMembers(currentWorkspaceId)
+                    : Promise.resolve([]),
+            ]);
+            setShares(shareList);
+            setMembers(memberList);
+            setSelectedUserId("");
+        }
+        catch (e) {
+            setShareError(e instanceof Error ? e.message : "Failed to load share info");
+        }
+        finally {
+            setShareLoading(false);
+        }
+    }
+    async function handleShare() {
+        if (!session || !selectedUserId)
+            return;
+        setSharing(true);
+        setShareError(null);
+        try {
+            const newShare = await createSessionShare(session.id, selectedUserId);
+            // Idempotent backend may return an existing share without bumping
+            // shared_at; just ensure the row is present in the list.
+            setShares(prev => prev.some(s => s.user_id === newShare.user_id)
+                ? prev
+                : [...prev, newShare]);
+            setSelectedUserId("");
+        }
+        catch (e) {
+            setShareError(e instanceof Error ? e.message : "Failed to share session");
+        }
+        finally {
+            setSharing(false);
+        }
+    }
+    async function handleRemoveShare(userId) {
+        if (!session)
+            return;
+        setRemovingUserId(userId);
+        setShareError(null);
+        try {
+            await deleteSessionShare(session.id, userId);
+            setShares(prev => prev.filter(s => s.user_id !== userId));
+        }
+        catch (e) {
+            setShareError(e instanceof Error ? e.message : "Failed to revoke share");
+        }
+        finally {
+            setRemovingUserId(null);
+        }
+    }
+    // Map user_id → {name, email} for resolving share rows. Falls back to the
+    // id when the user isn't a workspace member (e.g. removed after sharing).
+    function resolveUser(userId) {
+        const m = members.find(x => x.user_id === userId);
+        if (m)
+            return { name: m.name, email: m.email };
+        if (user && user.id === userId)
+            return { name: user.name, email: user.email };
+        return { name: userId.slice(0, 8), email: "" };
+    }
     if (!currentWorkspaceId) {
         return (_jsxs("div", { children: [_jsx("div", { className: "page-header", children: _jsx("h1", { className: "page-title", children: "Session" }) }), _jsx("div", { className: "alert alert-info", children: "No workspace selected." })] }));
     }
@@ -227,7 +308,24 @@ function SessionDetail({ sessionId }) {
     if (!session) {
         return (_jsxs("div", { children: [_jsx("div", { className: "page-header", children: _jsx("h1", { className: "page-title", children: "Session not found" }) }), error && _jsx("div", { className: "alert alert-error", children: error }), _jsx("button", { className: "btn btn-secondary", onClick: () => navigate("/sessions"), children: "Back to sessions" })] }));
     }
-    return (_jsxs("div", { className: "chat-container", children: [_jsxs("div", { className: "page-header", style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }, children: [_jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [editingTitle ? (_jsxs("div", { style: { display: "flex", gap: 6 }, children: [_jsx("input", { className: "chat-input", value: titleDraft, onChange: e => setTitleDraft(e.target.value), style: { flex: 1 }, autoFocus: true }), _jsx("button", { className: "btn btn-primary", onClick: handleSaveTitle, children: "Save" }), _jsx("button", { className: "btn btn-secondary", onClick: () => { setEditingTitle(false); setTitleDraft(session.title); }, children: "Cancel" })] })) : (_jsxs("h1", { className: "page-title", style: { cursor: canMutate ? "pointer" : "default" }, onClick: () => canMutate && setEditingTitle(true), children: [session.title, canMutate && _jsx("span", { style: { fontSize: "0.78rem", color: "var(--text-muted)", marginLeft: 8 }, children: "\u270E click to rename" })] })), _jsxs("p", { className: "page-subtitle", children: [_jsx("span", { className: `badge ${session.visibility === "workspace" ? "badge-info" : "badge-warning"}`, children: session.visibility }), " ", _jsxs("span", { style: { marginLeft: 8 }, children: [messages.length, " messages"] })] })] }), _jsx("button", { className: "btn btn-secondary", onClick: () => navigate("/sessions"), children: "\u2190 Back" })] }), error && _jsx("div", { className: "alert alert-error", children: error }), _jsxs("div", { className: "chat-messages", children: [messages.length === 0 && (_jsxs("div", { style: { textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }, children: [_jsx("div", { style: { fontSize: "2.5rem", marginBottom: 12 }, children: "\uD83D\uDCAC" }), _jsx("p", { style: { fontSize: "0.95rem" }, children: "No messages yet. Send the first message below." })] })), messages.map(m => (_jsx("div", { className: `chat-message chat-message-${m.role}`, children: _jsxs("div", { className: `chat-bubble chat-bubble-${m.role}`, children: [_jsx("div", { className: "chat-bubble-label", children: m.role }), m.content || (m.role === "assistant" && streaming ? "..." : "")] }) }, m.id))), _jsx("div", { ref: messagesEndRef })] }), _jsx("div", { className: "chat-input-area", children: canMutate ? (_jsxs(_Fragment, { children: [_jsx("input", { className: "chat-input", value: input, onChange: e => setInput(e.target.value), onKeyDown: e => e.key === "Enter" && !e.shiftKey && sendMessage(), placeholder: "Type a message...", disabled: streaming }), _jsx("button", { className: "btn btn-primary", onClick: sendMessage, disabled: streaming || !input.trim(), children: streaming ? "Sending..." : "Send" }), _jsx("button", { className: "btn btn-secondary", onClick: handleDeleteSession, title: "Delete session", children: "Delete" })] })) : (_jsx("div", { className: "alert alert-info", style: { flex: 1, margin: 0 }, children: "\uD83D\uDC41\uFE0F View only \u2014 only the session owner or a workspace admin can send messages in a shared session." })) })] }));
+    return (_jsxs("div", { className: "chat-container", children: [_jsxs("div", { className: "page-header", style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }, children: [_jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [editingTitle ? (_jsxs("div", { style: { display: "flex", gap: 6 }, children: [_jsx("input", { className: "chat-input", value: titleDraft, onChange: e => setTitleDraft(e.target.value), style: { flex: 1 }, autoFocus: true }), _jsx("button", { className: "btn btn-primary", onClick: handleSaveTitle, children: "Save" }), _jsx("button", { className: "btn btn-secondary", onClick: () => { setEditingTitle(false); setTitleDraft(session.title); }, children: "Cancel" })] })) : (_jsxs("h1", { className: "page-title", style: { cursor: canMutate ? "pointer" : "default" }, onClick: () => canMutate && setEditingTitle(true), children: [session.title, canMutate && _jsx("span", { style: { fontSize: "0.78rem", color: "var(--text-muted)", marginLeft: 8 }, children: "\u270E click to rename" })] })), _jsxs("p", { className: "page-subtitle", children: [_jsx("span", { className: `badge ${session.visibility === "workspace" ? "badge-info" : "badge-warning"}`, children: session.visibility }), " ", _jsxs("span", { style: { marginLeft: 8 }, children: [messages.length, " messages"] })] })] }), _jsxs("div", { style: { display: "flex", gap: 8 }, children: [canMutate && (_jsx("button", { className: "btn btn-secondary", onClick: openShareModal, title: "Share this session with workspace members", children: "Share" })), _jsx("button", { className: "btn btn-secondary", onClick: () => navigate("/sessions"), children: "\u2190 Back" })] })] }), error && _jsx("div", { className: "alert alert-error", children: error }), _jsxs("div", { className: "chat-messages", children: [messages.length === 0 && (_jsxs("div", { style: { textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }, children: [_jsx("div", { style: { fontSize: "2.5rem", marginBottom: 12 }, children: "\uD83D\uDCAC" }), _jsx("p", { style: { fontSize: "0.95rem" }, children: "No messages yet. Send the first message below." })] })), messages.map(m => (_jsx("div", { className: `chat-message chat-message-${m.role}`, children: _jsxs("div", { className: `chat-bubble chat-bubble-${m.role}`, children: [_jsx("div", { className: "chat-bubble-label", children: m.role }), m.content || (m.role === "assistant" && streaming ? "..." : "")] }) }, m.id))), _jsx("div", { ref: messagesEndRef })] }), _jsx("div", { className: "chat-input-area", children: canMutate ? (_jsxs(_Fragment, { children: [_jsx("input", { className: "chat-input", value: input, onChange: e => setInput(e.target.value), onKeyDown: e => e.key === "Enter" && !e.shiftKey && sendMessage(), placeholder: "Type a message...", disabled: streaming }), _jsx("button", { className: "btn btn-primary", onClick: sendMessage, disabled: streaming || !input.trim(), children: streaming ? "Sending..." : "Send" }), _jsx("button", { className: "btn btn-secondary", onClick: handleDeleteSession, title: "Delete session", children: "Delete" })] })) : (_jsx("div", { className: "alert alert-info", style: { flex: 1, margin: 0 }, children: "\uD83D\uDC41\uFE0F View only \u2014 only the session owner or a workspace admin can send messages in a shared session." })) }), showShareModal && session && (_jsx("div", { className: "modal-backdrop", onClick: () => !sharing && !removingUserId && setShowShareModal(false), children: _jsxs("div", { className: "card modal-card", onClick: e => e.stopPropagation(), style: { maxWidth: 560 }, children: [_jsx("div", { className: "card-header", children: _jsx("h3", { className: "card-title", children: "Share session" }) }), _jsx("p", { style: { color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 12px" }, children: "Shared members can view this session even when visibility is private." }), shareError && _jsx("div", { className: "alert alert-error", style: { margin: "0 0 12px" }, children: shareError }), shareLoading ? (_jsx("div", { className: "loading", style: { padding: 16 }, children: "Loading..." })) : (_jsxs(_Fragment, { children: [_jsx("div", { className: "form-label", style: { marginBottom: 6 }, children: "Currently shared with" }), shares.length === 0 ? (_jsx("div", { style: { padding: "8px 0", color: "var(--text-muted)", fontSize: "0.88rem" }, children: "Not shared with anyone yet." })) : (_jsx("div", { style: { borderTop: "1px solid var(--border)", marginBottom: 12 }, children: shares.map(s => {
+                                        const info = resolveUser(s.user_id);
+                                        const sharedBy = resolveUser(s.shared_by);
+                                        return (_jsxs("div", { style: {
+                                                display: "flex", alignItems: "center", gap: 8,
+                                                padding: "8px 0", borderBottom: "1px solid var(--border)",
+                                            }, children: [_jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [_jsxs("div", { style: { fontSize: "0.9rem" }, children: [info.name, info.email && (_jsxs("span", { style: { color: "var(--text-muted)", marginLeft: 6, fontSize: "0.8rem" }, children: ["<", info.email, ">"] }))] }), _jsxs("div", { style: { fontSize: "0.72rem", color: "var(--text-muted)" }, children: ["shared by ", sharedBy.name, " \u00B7 ", formatTimestamp(s.shared_at)] })] }), _jsx("button", { className: "btn btn-danger", style: { padding: "4px 10px", fontSize: "0.78rem" }, onClick: () => handleRemoveShare(s.user_id), disabled: removingUserId === s.user_id, children: removingUserId === s.user_id ? "Removing..." : "Remove" })] }, s.user_id));
+                                    }) })), _jsx("div", { className: "form-label", style: { marginBottom: 6 }, children: "Add a workspace member" }), (() => {
+                                    const sharedIds = new Set(shares.map(s => s.user_id));
+                                    const ownerExcluded = new Set([session.owner_id, ...(user ? [user.id] : [])]);
+                                    // Eligible = workspace members, excluding the owner and
+                                    // anyone already in the shares list.
+                                    const eligible = members.filter(m => !sharedIds.has(m.user_id) && !ownerExcluded.has(m.user_id));
+                                    if (eligible.length === 0) {
+                                        return (_jsx("div", { style: { padding: "8px 0", color: "var(--text-muted)", fontSize: "0.85rem" }, children: "No more workspace members to share with." }));
+                                    }
+                                    return (_jsxs("div", { style: { display: "flex", gap: 8, alignItems: "flex-end" }, children: [_jsx("div", { className: "form-group", style: { flex: 1, margin: 0 }, children: _jsxs("select", { value: selectedUserId, onChange: e => setSelectedUserId(e.target.value), children: [_jsx("option", { value: "", children: "Select a member\u2026" }), eligible.map(m => (_jsxs("option", { value: m.user_id, children: [m.name || m.email, " ", m.email ? `<${m.email}>` : ""] }, m.user_id)))] }) }), _jsx("button", { className: "btn btn-primary", onClick: handleShare, disabled: sharing || !selectedUserId, children: sharing ? "Sharing..." : "Share" })] }));
+                                })()] })), _jsx("div", { style: { display: "flex", justifyContent: "flex-end", marginTop: 12 }, children: _jsx("button", { className: "btn btn-secondary", onClick: () => setShowShareModal(false), disabled: sharing || !!removingUserId, children: "Close" }) })] }) }))] }));
 }
 // ---------------------------------------------------------------------------
 // Helpers

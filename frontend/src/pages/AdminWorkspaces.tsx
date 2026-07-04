@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from "react";
-import { fetchAdminWorkspaces, createAdminWorkspace, updateAdminWorkspace, archiveWorkspace, addWorkspaceMember, removeWorkspaceMember, fetchWorkspaceMembers, fetchUsers, AdminWorkspace, WorkspaceMember, AdminUser } from "../api";
+import { fetchAdminWorkspaces, createAdminWorkspace, updateAdminWorkspace, archiveWorkspace, purgeWorkspace, setDefaultWorkspace, addWorkspaceMember, removeWorkspaceMember, fetchWorkspaceMembers, fetchUsers, AdminWorkspace, WorkspaceMember, AdminUser } from "../api";
 
 export default function AdminWorkspaces() {
   const [workspaces, setWorkspaces] = useState<AdminWorkspace[]>([]);
@@ -31,6 +31,15 @@ export default function AdminWorkspaces() {
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showDropdown, setShowDropdown] = useState(false);
 
+  // P3-3: purge confirmation state. `purgeWs` holds the workspace pending
+  // confirmation; `purgeInput` is the typed-name field.
+  const [purgeWs, setPurgeWs] = useState<AdminWorkspace | null>(null);
+  const [purgeInput, setPurgeInput] = useState("");
+  const [purging, setPurging] = useState(false);
+
+  // P3-4: track in-flight set-default to disable the clicked button.
+  const [settingDefault, setSettingDefault] = useState<string | null>(null);
+
   const showMessage = (msg: string, type: "error" | "success" = "error") => {
     setMessage(msg);
     setMessageType(type);
@@ -38,7 +47,11 @@ export default function AdminWorkspaces() {
 
   const load = () => {
     setLoading(true);
-    fetchAdminWorkspaces()
+    // P3-3: request archived workspaces too so they can be purged. The
+    // backend currently ignores `include_archived`, so archived rows won't
+    // appear until it honors the param — see the implementation note in
+    // the task report.
+    fetchAdminWorkspaces({ include_archived: true })
       .then(setWorkspaces)
       .finally(() => setLoading(false));
   };
@@ -92,6 +105,44 @@ export default function AdminWorkspaces() {
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       showMessage(msg);
+    }
+  };
+
+  // P3-3: hard-delete an archived workspace. Requires the typed name to
+  // exactly match — the submit button stays disabled until it does.
+  const openPurge = (ws: AdminWorkspace) => {
+    setPurgeWs(ws);
+    setPurgeInput("");
+  };
+
+  const handlePurge = async () => {
+    if (!purgeWs) return;
+    if (purgeInput !== purgeWs.name) return;
+    setPurging(true);
+    try {
+      await purgeWorkspace(purgeWs.id, purgeInput);
+      showMessage("Workspace purged", "success");
+      setPurgeWs(null);
+      setPurgeInput("");
+      load();
+    } catch (e: unknown) {
+      showMessage(e instanceof Error ? e.message : "Failed to purge workspace");
+    } finally {
+      setPurging(false);
+    }
+  };
+
+  // P3-4: reversible — no confirmation modal needed.
+  const handleSetDefault = async (id: string) => {
+    setSettingDefault(id);
+    try {
+      await setDefaultWorkspace(id);
+      showMessage("Default workspace updated", "success");
+      load();
+    } catch (e: unknown) {
+      showMessage(e instanceof Error ? e.message : "Failed to set default workspace");
+    } finally {
+      setSettingDefault(null);
     }
   };
 
@@ -255,7 +306,15 @@ export default function AdminWorkspaces() {
                       {editingId === ws.id ? (
                         <input value={editName} onChange={(e) => setEditName(e.target.value)} />
                       ) : (
-                        ws.name
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                          {ws.name}
+                          {ws.is_default && (
+                            <span className="badge badge-success" style={{ fontSize: "0.7rem" }}>Default</span>
+                          )}
+                          {ws.archived && (
+                            <span className="badge badge-error" style={{ fontSize: "0.7rem" }}>Archived</span>
+                          )}
+                        </span>
                       )}
                     </td>
                     <td style={{ fontSize: "0.82rem", color: "var(--text-secondary)" }}>
@@ -300,10 +359,33 @@ export default function AdminWorkspaces() {
                         </div>
                       ) : (
                         <div className="btn-group">
-                          <button className="btn btn-secondary btn-sm" onClick={() => { setEditingId(ws.id); setEditName(ws.name); setEditSlug(ws.slug || ""); setEditDescription(ws.description || ""); setEditIcon(ws.icon || ""); setEditTokens(0); setEditCost(0); }}>Edit</button>
-                          <button className="btn btn-secondary btn-sm" onClick={() => openMembers(ws.id)}>Members</button>
-                          {!ws.is_default && (
-                            <button className="btn btn-danger btn-sm" onClick={() => handleArchive(ws.id, ws.name)}>Archive</button>
+                          {ws.archived ? (
+                            // P3-3: archived workspaces can only be purged.
+                            <button
+                              className="btn btn-danger btn-sm"
+                              onClick={() => openPurge(ws)}
+                              title="Permanently delete this workspace and all its data"
+                            >
+                              Purge
+                            </button>
+                          ) : (
+                            <>
+                              <button className="btn btn-secondary btn-sm" onClick={() => { setEditingId(ws.id); setEditName(ws.name); setEditSlug(ws.slug || ""); setEditDescription(ws.description || ""); setEditIcon(ws.icon || ""); setEditTokens(0); setEditCost(0); }}>Edit</button>
+                              <button className="btn btn-secondary btn-sm" onClick={() => openMembers(ws.id)}>Members</button>
+                              {!ws.is_default && (
+                                <button
+                                  className="btn btn-secondary btn-sm"
+                                  onClick={() => handleSetDefault(ws.id)}
+                                  disabled={settingDefault === ws.id}
+                                  title="Set as the default workspace for new users"
+                                >
+                                  {settingDefault === ws.id ? "Setting..." : "Set as default"}
+                                </button>
+                              )}
+                              {!ws.is_default && (
+                                <button className="btn btn-danger btn-sm" onClick={() => handleArchive(ws.id, ws.name)}>Archive</button>
+                              )}
+                            </>
                           )}
                         </div>
                       )}
@@ -424,6 +506,49 @@ export default function AdminWorkspaces() {
             </div>
           )}
         </>
+      )}
+
+      {purgeWs && (
+        <div className="modal-backdrop" onClick={() => !purging && setPurgeWs(null)}>
+          <div className="card modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
+            <div className="card-header">
+              <h3 className="card-title">Purge workspace</h3>
+            </div>
+            <div className="alert alert-error" style={{ marginTop: 8 }}>
+              This will permanently delete <strong>{purgeWs.name}</strong> and ALL its data
+              (sessions, agents, API keys, invitations, logs). This cannot be undone.
+            </div>
+            <div className="form-group" style={{ marginTop: 12 }}>
+              <label className="form-label">
+                Type the workspace name to confirm:
+              </label>
+              <input
+                type="text"
+                value={purgeInput}
+                onChange={e => setPurgeInput(e.target.value)}
+                placeholder={purgeWs.name}
+                autoFocus
+                style={{ fontFamily: "monospace" }}
+              />
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button
+                className="btn btn-danger"
+                onClick={handlePurge}
+                disabled={purging || purgeInput !== purgeWs.name}
+              >
+                {purging ? "Purging..." : "Purge permanently"}
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setPurgeWs(null)}
+                disabled={purging}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

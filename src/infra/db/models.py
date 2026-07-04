@@ -186,6 +186,35 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
+class ChatSessionShare(Base):
+    """P3-5: per-user session sharing.
+
+    A row (session_id, user_id) grants ``user_id`` view access to a private
+    ``ChatSession`` owned by someone else. ``shared_by`` is the user who
+    created the share (typically the session owner or a workspace admin).
+    Composite PK (session_id, user_id) makes repeated shares idempotent —
+    re-sharing with the same user is a no-op (shared_at is NOT bumped).
+
+    Visibility matrix (``_can_see_session`` in sessions.py):
+    - tenant_admin → sees everything
+    - workspace_admin/owner → sees everything in their workspace
+    - owner → sees their own sessions
+    - shared user (ChatSessionShare.user_id == self) → sees the session
+    - otherwise → only non-private sessions
+    """
+    __tablename__ = "chat_session_shares"
+    session_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("chat_sessions.id"), primary_key=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("users.id"), primary_key=True
+    )
+    shared_by: Mapped[str] = mapped_column(
+        String(32), ForeignKey("users.id"), nullable=False
+    )
+    shared_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
 class InviteToken(Base):
     __tablename__ = "invite_tokens"
 

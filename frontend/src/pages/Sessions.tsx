@@ -3,11 +3,17 @@ import { useParams, useNavigate } from "react-router-dom";
 import {
   ChatMessageInfo,
   ChatSessionInfo,
+  SessionShare,
   User,
+  WorkspaceMember,
   createSession,
+  createSessionShare,
   deleteSession,
+  deleteSessionShare,
+  fetchWorkspaceMembers,
   getCurrentUser,
   getSession,
+  listSessionShares,
   listSessions,
   streamChat,
   updateSession,
@@ -211,6 +217,16 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
 
+  // P3-5: session sharing state.
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [shares, setShares] = useState<SessionShare[]>([]);
+  const [members, setMembers] = useState<WorkspaceMember[]>([]);
+  const [shareLoading, setShareLoading] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [selectedUserId, setSelectedUserId] = useState("");
+  const [sharing, setSharing] = useState(false);
+  const [removingUserId, setRemovingUserId] = useState<string | null>(null);
+
   async function loadSession() {
     if (!currentWorkspaceId) return;
     setLoading(true);
@@ -326,6 +342,73 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
     }
   }
 
+  // P3-5: open the share modal — load current shares + workspace members.
+  async function openShareModal() {
+    if (!session) return;
+    setShowShareModal(true);
+    setShareError(null);
+    setShareLoading(true);
+    try {
+      const [shareList, memberList] = await Promise.all([
+        listSessionShares(session.id),
+        currentWorkspaceId
+          ? fetchWorkspaceMembers(currentWorkspaceId)
+          : Promise.resolve([]),
+      ]);
+      setShares(shareList);
+      setMembers(memberList);
+      setSelectedUserId("");
+    } catch (e: unknown) {
+      setShareError(e instanceof Error ? e.message : "Failed to load share info");
+    } finally {
+      setShareLoading(false);
+    }
+  }
+
+  async function handleShare() {
+    if (!session || !selectedUserId) return;
+    setSharing(true);
+    setShareError(null);
+    try {
+      const newShare = await createSessionShare(session.id, selectedUserId);
+      // Idempotent backend may return an existing share without bumping
+      // shared_at; just ensure the row is present in the list.
+      setShares(prev =>
+        prev.some(s => s.user_id === newShare.user_id)
+          ? prev
+          : [...prev, newShare],
+      );
+      setSelectedUserId("");
+    } catch (e: unknown) {
+      setShareError(e instanceof Error ? e.message : "Failed to share session");
+    } finally {
+      setSharing(false);
+    }
+  }
+
+  async function handleRemoveShare(userId: string) {
+    if (!session) return;
+    setRemovingUserId(userId);
+    setShareError(null);
+    try {
+      await deleteSessionShare(session.id, userId);
+      setShares(prev => prev.filter(s => s.user_id !== userId));
+    } catch (e: unknown) {
+      setShareError(e instanceof Error ? e.message : "Failed to revoke share");
+    } finally {
+      setRemovingUserId(null);
+    }
+  }
+
+  // Map user_id → {name, email} for resolving share rows. Falls back to the
+  // id when the user isn't a workspace member (e.g. removed after sharing).
+  function resolveUser(userId: string): { name: string; email: string } {
+    const m = members.find(x => x.user_id === userId);
+    if (m) return { name: m.name, email: m.email };
+    if (user && user.id === userId) return { name: user.name, email: user.email };
+    return { name: userId.slice(0, 8), email: "" };
+  }
+
   if (!currentWorkspaceId) {
     return (
       <div>
@@ -393,7 +476,14 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
             <span style={{ marginLeft: 8 }}>{messages.length} messages</span>
           </p>
         </div>
-        <button className="btn btn-secondary" onClick={() => navigate("/sessions")}>← Back</button>
+        <div style={{ display: "flex", gap: 8 }}>
+          {canMutate && (
+            <button className="btn btn-secondary" onClick={openShareModal} title="Share this session with workspace members">
+              Share
+            </button>
+          )}
+          <button className="btn btn-secondary" onClick={() => navigate("/sessions")}>← Back</button>
+        </div>
       </div>
 
       {error && <div className="alert alert-error">{error}</div>}
@@ -440,6 +530,121 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
           </div>
         )}
       </div>
+
+      {showShareModal && session && (
+        <div className="modal-backdrop" onClick={() => !sharing && !removingUserId && setShowShareModal(false)}>
+          <div className="card modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 560 }}>
+            <div className="card-header">
+              <h3 className="card-title">Share session</h3>
+            </div>
+            <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 12px" }}>
+              Shared members can view this session even when visibility is private.
+            </p>
+
+            {shareError && <div className="alert alert-error" style={{ margin: "0 0 12px" }}>{shareError}</div>}
+
+            {shareLoading ? (
+              <div className="loading" style={{ padding: 16 }}>Loading...</div>
+            ) : (
+              <>
+                <div className="form-label" style={{ marginBottom: 6 }}>Currently shared with</div>
+                {shares.length === 0 ? (
+                  <div style={{ padding: "8px 0", color: "var(--text-muted)", fontSize: "0.88rem" }}>
+                    Not shared with anyone yet.
+                  </div>
+                ) : (
+                  <div style={{ borderTop: "1px solid var(--border)", marginBottom: 12 }}>
+                    {shares.map(s => {
+                      const info = resolveUser(s.user_id);
+                      const sharedBy = resolveUser(s.shared_by);
+                      return (
+                        <div key={s.user_id} style={{
+                          display: "flex", alignItems: "center", gap: 8,
+                          padding: "8px 0", borderBottom: "1px solid var(--border)",
+                        }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: "0.9rem" }}>
+                              {info.name}
+                              {info.email && (
+                                <span style={{ color: "var(--text-muted)", marginLeft: 6, fontSize: "0.8rem" }}>
+                                  &lt;{info.email}&gt;
+                                </span>
+                              )}
+                            </div>
+                            <div style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
+                              shared by {sharedBy.name} · {formatTimestamp(s.shared_at)}
+                            </div>
+                          </div>
+                          <button
+                            className="btn btn-danger"
+                            style={{ padding: "4px 10px", fontSize: "0.78rem" }}
+                            onClick={() => handleRemoveShare(s.user_id)}
+                            disabled={removingUserId === s.user_id}
+                          >
+                            {removingUserId === s.user_id ? "Removing..." : "Remove"}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="form-label" style={{ marginBottom: 6 }}>Add a workspace member</div>
+                {(() => {
+                  const sharedIds = new Set(shares.map(s => s.user_id));
+                  const ownerExcluded = new Set([session.owner_id, ...(user ? [user.id] : [])]);
+                  // Eligible = workspace members, excluding the owner and
+                  // anyone already in the shares list.
+                  const eligible = members.filter(
+                    m => !sharedIds.has(m.user_id) && !ownerExcluded.has(m.user_id),
+                  );
+                  if (eligible.length === 0) {
+                    return (
+                      <div style={{ padding: "8px 0", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                        No more workspace members to share with.
+                      </div>
+                    );
+                  }
+                  return (
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                      <div className="form-group" style={{ flex: 1, margin: 0 }}>
+                        <select
+                          value={selectedUserId}
+                          onChange={e => setSelectedUserId(e.target.value)}
+                        >
+                          <option value="">Select a member…</option>
+                          {eligible.map(m => (
+                            <option key={m.user_id} value={m.user_id}>
+                              {m.name || m.email} {m.email ? `<${m.email}>` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <button
+                        className="btn btn-primary"
+                        onClick={handleShare}
+                        disabled={sharing || !selectedUserId}
+                      >
+                        {sharing ? "Sharing..." : "Share"}
+                      </button>
+                    </div>
+                  );
+                })()}
+              </>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setShowShareModal(false)}
+                disabled={sharing || !!removingUserId}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

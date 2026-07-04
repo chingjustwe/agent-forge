@@ -3,6 +3,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.gateway.auth.rbac import get_workspace_member_role
 from src.gateway.auth.roles import has_permission
 from src.infra.db.engine import async_session
-from src.infra.db.models import ChatMessage, ChatSession
+from src.infra.db.models import ChatMessage, ChatSession, WorkspaceMember
 from src.infra.db.session import get_db
 from src.infra.settings import settings
 from src.runtime.harness.pipeline import GuardrailPipeline
@@ -99,6 +100,26 @@ async def _persist_assistant_message(session_id: str, content: str, tokens: int)
         logger.warning("Failed to persist assistant message to session %s: %s", session_id, exc)
 
 
+async def _touch_workspace_member(workspace_id: str, user_id: str) -> None:
+    """P3-1: bump WorkspaceMember.last_active_at on a successful chat request.
+
+    Decoupled from the chat response: any failure is logged and swallowed
+    so the SSE stream is not affected. Uses a separate session so it does
+    not interfere with the request-scoped transaction.
+    """
+    try:
+        async with async_session() as db:
+            wm = await db.get(WorkspaceMember, (workspace_id, user_id))
+            if wm is not None:
+                wm.last_active_at = datetime.now(timezone.utc)
+                await db.commit()
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning(
+            "Failed to update last_active_at for (%s, %s): %s",
+            workspace_id, user_id, exc,
+        )
+
+
 async def _event_stream(
     messages: list[dict],
     config: RuntimeConfig,
@@ -108,6 +129,11 @@ async def _event_stream(
     session_id: str | None = None,
 ) -> AsyncIterator[str]:
     ws_id = config.workspace_id
+
+    # P3-1: bump WorkspaceMember.last_active_at on a successful chat request
+    # (RBAC membership check already passed in the chat handler before the
+    # stream started). Fire-and-forget — failures are logged inside the helper.
+    await _touch_workspace_member(ws_id, user_id)
 
     # P1-1: persist the latest user prompt BEFORE streaming starts so the
     # user message survives even if the LLM stream errors out mid-flight.

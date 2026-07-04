@@ -8,6 +8,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.infra.db.models import Workspace, WorkspaceMember
 from src.infra.db.session import get_db
 
+
+def _order_by_activity():
+    """P3-1: shared ORDER BY clause — is_default DESC, last_active_at DESC
+    NULLS LAST, name ASC.
+
+    SQLite doesn't support ``NULLS LAST`` directly, so we emulate it with
+    ``last_active_at IS NULL`` (False sorts before True, i.e. non-null first).
+    """
+    from sqlalchemy import asc, desc
+    return [
+        desc(Workspace.is_default),
+        asc(WorkspaceMember.last_active_at.is_(None)),
+        desc(WorkspaceMember.last_active_at),
+        asc(Workspace.name),
+    ]
+
 router = APIRouter()
 
 # P0-4: in-process cache for /me/workspaces. asyncio is single-threaded so a
@@ -53,10 +69,18 @@ async def list_my_workspaces(request: Request, db: AsyncSession = Depends(get_db
     # tenant_admin sees every workspace in their tenant (treated as owner).
     if user.get("role") == "tenant_admin":
         tenant_id = user.get("tenant_id", "")
+        from sqlalchemy import asc, desc
+        # P3-1: tenant_admin has no WorkspaceMember row per workspace, so we
+        # order only by is_default DESC then name ASC (no last_active_at).
         result = await db.execute(
-            select(Workspace).where(
+            select(Workspace)
+            .where(
                 Workspace.tenant_id == tenant_id,
                 Workspace.archived == 0,
+            )
+            .order_by(
+                desc(Workspace.is_default),
+                asc(Workspace.name),
             )
         )
         workspaces = result.scalars().all()
@@ -71,6 +95,7 @@ async def list_my_workspaces(request: Request, db: AsyncSession = Depends(get_db
         ]
     else:
         # Plain member: join WorkspaceMember to Workspace.
+        # P3-1: order by is_default DESC → last_active_at DESC NULLS LAST → name ASC.
         result = await db.execute(
             select(Workspace, WorkspaceMember.role)
             .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
@@ -78,6 +103,7 @@ async def list_my_workspaces(request: Request, db: AsyncSession = Depends(get_db
                 WorkspaceMember.user_id == user_id,
                 Workspace.archived == 0,
             )
+            .order_by(*_order_by_activity())
         )
         rows = result.all()
         body = [

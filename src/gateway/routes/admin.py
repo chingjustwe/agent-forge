@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import sqlalchemy
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, delete, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.gateway.auth.rbac import (
@@ -18,10 +18,17 @@ from src.gateway.auth.rbac import (
 from src.gateway.email.sender import send_invite_email
 from src.infra.db.models import (
     AgentConfig,
+    ApiKey,
+    ChatMessage,
+    ChatSession,
     InviteToken,
+    OTelSettings,
+    QuotaUsage,
+    RequestLog,
     Tenant,
     User,
     Workspace,
+    WorkspaceInvitation,
     WorkspaceMember,
     AuditLog as AuditLogModel,
 )
@@ -379,10 +386,16 @@ async def invite_user(
 @admin_router.get("/workspaces")
 async def list_workspaces(
     request: Request,
+    include_archived: bool = False,
     db: AsyncSession = Depends(get_db),
     _user=Depends(require_tenant_role("tenant_admin")),
 ):
-    result = await db.execute(select(Workspace).where(Workspace.archived == 0))
+    # P3-3 前端集成：默认隐藏 archived workspace；传 include_archived=true
+    # 时返回全部（含 archived），用于 Purge 操作入口。
+    query = select(Workspace)
+    if not include_archived:
+        query = query.where(Workspace.archived == 0)
+    result = await db.execute(query)
     workspaces = result.scalars().all()
 
     ws_ids = [w.id for w in workspaces]
@@ -436,6 +449,7 @@ async def list_workspaces(
             "agent_count": agent_counts.get(ws.id, 0),
             "owner": owners.get(ws.id, ""),
             "is_default": bool(ws.is_default),
+            "archived": bool(ws.archived),
             "created_at": ws.created_at.isoformat() if ws.created_at else None,
             "updated_at": ws.updated_at.isoformat() if ws.updated_at else None,
         }
@@ -590,6 +604,232 @@ async def archive_workspace(
 
     ws.archived = 1
     await db.commit()
+
+
+# ─── Workspace purge (P3-3) ─────────────────────────────────────────────────
+
+
+@admin_router.delete("/workspaces/{workspace_id}/purge")
+async def purge_workspace(
+    workspace_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_tenant_role("tenant_admin")),
+):
+    """Hard-delete an archived workspace AND all of its associated data.
+
+    This is the "manual purge" counterpart to archive (soft-delete). Only
+    workspaces that have already been archived may be purged (409 otherwise)
+    — archiving requires the workspace to have no members, so the purge
+    path mostly cleans up leftover sessions/agents/keys/logs.
+
+    Two-step confirmation: the request body must carry
+    ``{"purge_confirm": "<exact workspace name>"}`` to prevent accidental
+    destructive deletes. A mismatch returns 400.
+
+    Deletion order respects FK dependencies:
+        chat_messages → chat_sessions → chat_session_shares (if present)
+        → agent_configs → api_keys → workspace_invitations
+        → workspace_members → otel_settings → quota_usage → request_logs
+        → workspace itself.
+    """
+    user = request.state.user
+    tenant_id = user.get("tenant_id", "")
+    user_id = user.get("sub") or user.get("id", "")
+
+    # Parse body — FastAPI doesn't auto-parse a JSON body on DELETE without
+    # a Pydantic model, so read it manually (tolerate missing/invalid body).
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict) or body.get("purge_confirm") is None:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "code": "BAD_REQUEST",
+                    "message": "Body must include 'purge_confirm' matching the workspace name",
+                }
+            },
+        )
+
+    ws = await db.get(Workspace, workspace_id)
+    if not ws:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND", "message": "Workspace not found"}},
+        )
+
+    # Must be archived first.
+    if not ws.archived:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "code": "NOT_ARCHIVED",
+                    "message": "Workspace must be archived before it can be purged",
+                }
+            },
+        )
+
+    # Two-step confirmation: name must match exactly.
+    if body.get("purge_confirm") != ws.name:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": {
+                    "code": "BAD_REQUEST",
+                    "message": "purge_confirm does not match workspace name",
+                }
+            },
+        )
+
+    # Cascade delete associated rows (workspace_id-scoped). chat_messages
+    # have no workspace_id FK, so delete via a subquery on chat_sessions.
+    await db.execute(
+        sa_text(
+            "DELETE FROM chat_messages WHERE session_id IN "
+            "(SELECT id FROM chat_sessions WHERE workspace_id = :wid)"
+        ),
+        {"wid": workspace_id},
+    )
+    # chat_session_shares (P3-5) — guarded so purge works on DBs that
+    # haven't been migrated yet (the table is created idempotently by
+    # _migrate_schema once P3-5 ships).
+    try:
+        await db.execute(
+            sa_text(
+                "DELETE FROM chat_session_shares WHERE session_id IN "
+                "(SELECT id FROM chat_sessions WHERE workspace_id = :wid)"
+            ),
+            {"wid": workspace_id},
+        )
+    except Exception:
+        # Table doesn't exist yet — nothing to delete. Roll back nothing;
+        # the statement had no side effects.
+        pass
+    await db.execute(
+        delete(ChatSession).where(ChatSession.workspace_id == workspace_id)
+    )
+    await db.execute(
+        delete(AgentConfig).where(AgentConfig.workspace_id == workspace_id)
+    )
+    await db.execute(
+        delete(ApiKey).where(ApiKey.workspace_id == workspace_id)
+    )
+    await db.execute(
+        delete(WorkspaceInvitation).where(WorkspaceInvitation.workspace_id == workspace_id)
+    )
+    await db.execute(
+        delete(WorkspaceMember).where(WorkspaceMember.workspace_id == workspace_id)
+    )
+    await db.execute(
+        delete(OTelSettings).where(OTelSettings.workspace_id == workspace_id)
+    )
+    await db.execute(
+        delete(QuotaUsage).where(QuotaUsage.workspace_id == workspace_id)
+    )
+    await db.execute(
+        delete(RequestLog).where(RequestLog.workspace_id == workspace_id)
+    )
+
+    # Audit log BEFORE the workspace row goes (so workspace_id is still
+    # resolvable at insert time; the log row itself is tenant-scoped and
+    # survives the workspace delete).
+    db.add(
+        AuditLogModel(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            action="workspace.purge",
+            target_type="workspace",
+            target_id=workspace_id,
+            details={"name": ws.name},
+            ip_address=request.client.host if request.client else "",
+        )
+    )
+
+    # Finally, drop the workspace row itself.
+    await db.delete(ws)
+    await db.commit()
+
+    return JSONResponse(
+        status_code=200,
+        content={"purged": True, "workspace_id": workspace_id},
+    )
+
+
+# ─── Default workspace transfer (P3-4) ──────────────────────────────────────
+
+
+@admin_router.post("/workspaces/{workspace_id}/set-default")
+async def set_default_workspace(
+    workspace_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_tenant_role("tenant_admin")),
+):
+    """Atomically transfer the ``is_default`` flag to ``workspace_id``.
+
+    Within a single transaction:
+    1. Clear ``is_default=1`` on every workspace in this tenant.
+    2. Set ``is_default=1`` on the target workspace.
+
+    The target must exist, belong to the caller's tenant, and not be
+    archived. Newly registered users (via ``auth.register``) auto-join the
+    default workspace, so changing the default changes where new users land.
+    """
+    user = request.state.user
+    tenant_id = user.get("tenant_id", "")
+    user_id = user.get("sub") or user.get("id", "")
+
+    ws = await db.get(Workspace, workspace_id)
+    if not ws or ws.tenant_id != tenant_id:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND", "message": "Workspace not found"}},
+        )
+
+    if ws.archived:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "code": "CANNOT_SET_DEFAULT_ARCHIVED",
+                    "message": "Cannot set an archived workspace as default",
+                }
+            },
+        )
+
+    # Atomic transfer: clear all defaults in this tenant, then set the new one.
+    # Both statements run inside the same transaction (db.commit at the end).
+    await db.execute(
+        sa_text(
+            "UPDATE workspaces SET is_default = 0 WHERE tenant_id = :tid AND is_default = 1"
+        ),
+        {"tid": tenant_id},
+    )
+    ws.is_default = 1
+
+    db.add(
+        AuditLogModel(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            action="workspace.set_default",
+            target_type="workspace",
+            target_id=workspace_id,
+            details={"name": ws.name},
+            ip_address=request.client.host if request.client else "",
+        )
+    )
+    await db.commit()
+    await db.refresh(ws)
+    return JSONResponse(
+        status_code=200,
+        content={"id": ws.id, "is_default": bool(ws.is_default)},
+    )
 
 
 # ─── Usage ───────────────────────────────────────────────────────────────────

@@ -215,6 +215,18 @@ def _migrate_schema(sync_conn):
             "ON chat_messages (session_id)"
         )
 
+        # Migration M3b (P3-5): create chat_session_shares table (idempotent).
+        # Composite PK (session_id, user_id) makes repeated shares idempotent.
+        sync_conn.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS chat_session_shares ("
+            "session_id VARCHAR(32) NOT NULL REFERENCES chat_sessions(id),"
+            "user_id VARCHAR(32) NOT NULL REFERENCES users(id),"
+            "shared_by VARCHAR(32) NOT NULL REFERENCES users(id),"
+            "shared_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "PRIMARY KEY (session_id, user_id)"
+            ")"
+        )
+
     # Migration M7 (P2-1): create workspace_invitations table (idempotent).
     # Stores per-workspace invitation links with a random token; an invitee
     # accepts via /api/v1/invitations/{token}/accept to join as a member.

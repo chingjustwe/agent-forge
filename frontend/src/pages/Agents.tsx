@@ -1,11 +1,16 @@
 import { useEffect, useState } from "react";
 import {
+  AdminWorkspace,
   AgentConfig,
   AgentFramework,
+  copyAgentToWorkspace,
   createAgent,
   deleteAgent,
+  fetchAdminWorkspaces,
+  getCurrentUser,
   listAgents,
   updateAgent,
+  User,
 } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
 
@@ -61,6 +66,15 @@ export default function Agents() {
   const [form, setForm] = useState<AgentFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
 
+  // P3-2: cross-workspace copy (tenant_admin only).
+  const [user, setUser] = useState<User | null>(null);
+  const [copyAgent, setCopyAgent] = useState<AgentConfig | null>(null);
+  const [targetWsId, setTargetWsId] = useState("");
+  const [targetWorkspaces, setTargetWorkspaces] = useState<AdminWorkspace[]>([]);
+  const [copying, setCopying] = useState(false);
+
+  const isTenantAdmin = user?.role === "tenant_admin";
+
   const canManage =
     currentRole === "workspace_admin" ||
     currentRole === "workspace_owner" ||
@@ -89,6 +103,45 @@ export default function Agents() {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentWorkspaceId]);
+
+  useEffect(() => {
+    getCurrentUser().then(setUser).catch(() => {});
+  }, []);
+
+  // P3-2: load the target-workspace list when the copy modal opens.
+  async function openCopyModal(agent: AgentConfig) {
+    setCopyAgent(agent);
+    setTargetWsId("");
+    try {
+      const list = await fetchAdminWorkspaces();
+      // Exclude the current workspace; archived workspaces can't be a copy
+      // target either.
+      const eligible = list.filter(
+        w => w.id !== currentWorkspaceId && !w.archived,
+      );
+      setTargetWorkspaces(eligible);
+      setTargetWsId(eligible[0]?.id || "");
+    } catch (e: unknown) {
+      showMsg(e instanceof Error ? e.message : "Failed to load workspaces");
+    }
+  }
+
+  async function handleCopySubmit() {
+    if (!copyAgent || !currentWorkspaceId || !targetWsId) return;
+    setCopying(true);
+    setMessage(null);
+    try {
+      await copyAgentToWorkspace(currentWorkspaceId, copyAgent.id, targetWsId);
+      const targetName =
+        targetWorkspaces.find(w => w.id === targetWsId)?.name || targetWsId;
+      showMsg(`Agent copied to ${targetName}`, "success");
+      setCopyAgent(null);
+    } catch (err: unknown) {
+      showMsg(err instanceof Error ? err.message : "Failed to copy agent");
+    } finally {
+      setCopying(false);
+    }
+  }
 
   function resetForm() {
     setForm(EMPTY_FORM);
@@ -298,6 +351,16 @@ export default function Agents() {
                           >
                             Edit
                           </button>
+                          {isTenantAdmin && (
+                            <button
+                              className="btn btn-secondary"
+                              style={{ padding: "4px 10px", fontSize: "0.78rem" }}
+                              onClick={() => openCopyModal(agent)}
+                              title="Copy this agent to another workspace"
+                            >
+                              Copy to...
+                            </button>
+                          )}
                           <button
                             className="btn btn-danger"
                             style={{ padding: "4px 10px", fontSize: "0.78rem" }}
@@ -315,6 +378,53 @@ export default function Agents() {
               })}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {copyAgent && (
+        <div className="modal-backdrop" onClick={() => !copying && setCopyAgent(null)}>
+          <div className="card modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
+            <div className="card-header">
+              <h3 className="card-title">Copy agent to…</h3>
+            </div>
+            <p style={{ color: "var(--text-secondary)", fontSize: "0.88rem", margin: "4px 0 12px" }}>
+              Copies <strong>{copyAgent.name}</strong> into the selected workspace. The original is left untouched.
+            </p>
+            <div className="form-group">
+              <label className="form-label">Target workspace</label>
+              {targetWorkspaces.length === 0 ? (
+                <div className="alert alert-info" style={{ margin: 0 }}>
+                  No other workspaces available to copy to.
+                </div>
+              ) : (
+                <select
+                  value={targetWsId}
+                  onChange={e => setTargetWsId(e.target.value)}
+                  autoFocus
+                >
+                  {targetWorkspaces.map(w => (
+                    <option key={w.id} value={w.id}>{w.name}</option>
+                  ))}
+                </select>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button
+                className="btn btn-primary"
+                onClick={handleCopySubmit}
+                disabled={copying || !targetWsId}
+              >
+                {copying ? "Copying..." : "Copy"}
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={() => setCopyAgent(null)}
+                disabled={copying}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

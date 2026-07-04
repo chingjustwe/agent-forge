@@ -18,8 +18,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.gateway.auth.rbac import require_workspace_role
-from src.infra.db.models import AgentConfig, AuditLog
+from src.gateway.auth.rbac import require_tenant_role, require_workspace_role
+from src.infra.db.models import AgentConfig, AuditLog, Workspace
 from src.infra.db.session import get_db
 
 router = APIRouter()
@@ -260,3 +260,90 @@ async def delete_agent(
     await db.delete(agent)
     await db.commit()
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# P3-2: cross-workspace copy (tenant_admin only)
+# ---------------------------------------------------------------------------
+@router.post(
+    "/api/v1/workspaces/{workspace_id}/agents/{agent_id}/copy-to/{target_workspace_id}"
+)
+async def copy_agent_to(
+    workspace_id: str,
+    agent_id: str,
+    target_workspace_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_tenant_role("tenant_admin")),
+):
+    """Copy an agent config from one workspace to another (same tenant).
+
+    Produces a new AgentConfig row with a fresh id, ``workspace_id`` set to
+    the target, and the same name / framework / config as the source. The
+    source row is left untouched (deep copy — mutations after the copy do
+    not propagate). An ``agent.copy`` AuditLog entry is written against the
+    destination workspace.
+
+    Cross-workspace isolation: looking up the source agent under a
+    workspace it doesn't belong to returns 404 (no leak). Target workspace
+    must exist and belong to the same tenant as the caller.
+    """
+    user = request.state.user
+    tenant_id = user.get("tenant_id", "")
+    user_id = user.get("sub") or user.get("id", "")
+
+    # 1. Source agent must exist in the path's workspace (cross-ws → 404).
+    result = await db.execute(
+        select(AgentConfig).where(
+            AgentConfig.id == agent_id,
+            AgentConfig.workspace_id == workspace_id,
+        )
+    )
+    source = result.scalar_one_or_none()
+    if not source:
+        return _not_found()
+
+    # 2. Target workspace must exist and belong to the caller's tenant.
+    target_ws = await db.get(Workspace, target_workspace_id)
+    if not target_ws or target_ws.tenant_id != tenant_id:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "code": "NOT_FOUND",
+                    "message": "Target workspace not found",
+                }
+            },
+        )
+
+    # 3. Deep-copy into a fresh row.
+    copy = AgentConfig(
+        workspace_id=target_workspace_id,
+        name=source.name,
+        framework=source.framework,
+        config=source.config or {},
+        created_by=user_id,
+    )
+    db.add(copy)
+    await db.flush()  # populate copy.id before audit log references it
+
+    # 4. Audit log against the destination workspace.
+    await _write_audit(
+        db,
+        tenant_id=tenant_id,
+        workspace_id=target_workspace_id,
+        user_id=user_id,
+        action="agent.copy",
+        target_id=copy.id,
+        details={
+            "source_agent_id": source.id,
+            "source_workspace_id": workspace_id,
+            "target_workspace_id": target_workspace_id,
+            "name": source.name,
+            "framework": source.framework,
+        },
+        ip_address=request.client.host if request.client else "",
+    )
+    await db.commit()
+    await db.refresh(copy)
+    return JSONResponse(status_code=201, content=_serialize_agent(copy))
