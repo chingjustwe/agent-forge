@@ -1,6 +1,57 @@
-# Agent Development Workflow
+# Agent Platform — Development Guide
 
-## Agent Architecture
+## About This Project
+
+Agent Platform is an open-source, self-hostable, multi-tenant AI agent platform with RBAC, observability, quota management, and admin dashboard. It provides governance (sandboxing, guardrails, tool management) and observability on top of pluggable agent framework adapters (Google ADK, LangGraph, or direct LLM). The platform itself is **not** an agent framework — it orchestrates and manages agents built by any framework.
+
+Design specs live in [`docs/superpowers/specs/`](docs/superpowers/specs/). The project follows a 7-phase spec-driven development approach.
+
+## Project Structure
+
+```
+agent-platform/
+├── src/                     # Python backend
+│   ├── main.py              # create_app() factory, lifespan, DI wiring
+│   ├── gateway/
+│   │   ├── auth/            # JWT, OIDC, password, RBAC roles
+│   │   ├── routes/          # API route handlers (chat, auth, admin, etc.)
+│   │   ├── middleware/      # Auth + audit middleware
+│   │   └── email/           # SMTP / console email sender
+│   ├── runtime/
+│   │   ├── abc.py           # AgentRuntime abstract base
+│   │   ├── models.py        # RuntimeConfig, StreamEvent (Pydantic)
+│   │   ├── adapters/        # RunAdapter ABC + DirectLLMAdapter
+│   │   └── harness/         # GuardrailPipeline, HarnessContext
+│   └── infra/
+│       ├── db/              # SQLAlchemy async engine + ORM models
+│       ├── telemetry/       # Collector, spans, metrics, logs, OTLP, quota
+│       └── settings.py      # Pydantic Settings
+├── frontend/                # React 18 SPA (Vite + TypeScript + recharts)
+├── tests/                   # pytest suite (~1,850 lines, 20 test files)
+├── docs/superpowers/        # Design specs and implementation plans
+├── .opencode/agents/        # AI agent definitions for spec-driven development
+└── pyproject.toml           # Python project config (uv)
+```
+
+## Current Status
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | Chat MVP (DirectLLM + SSE + React chat) | **Done** |
+| 2 | Multi-Tenant + RBAC + JWT (OIDC stub) | **Done** (OIDC not fully wired) |
+| 3 | Agent Harness (tools, sandbox, guardrails, retry) | Partially stubbed |
+| 4 | ADK Adapter | Not started |
+| 5 | Observability (traces, metrics, quota, dashboard) | **Done** |
+| 6 | Admin UI & Audit Log | **Done** |
+| 7 | LangGraph Adapter | Not started |
+
+Tech stack: Python 3.11+, FastAPI, SQLAlchemy async (SQLite), React 18, Vite, TypeScript, recharts. LLM provider: DeepSeek (OpenAI-compatible API).
+
+---
+
+## Agent Development Workflow
+
+### Agent Architecture
 
 ```
 .opencode/agents/
@@ -9,8 +60,22 @@
 ├── py-adapter.md         ← AI framework integration (ADK, LangGraph, Harness)
 ├── react-frontend.md     ← React frontend (Vite, TypeScript, recharts)
 ├── spec-reviewer.md      ← Spec compliance review (read-only)
-└── code-reviewer.md      ← Code quality review (read-only)
+├── code-reviewer.md      ← Code quality review (read-only)
+└── troubleshooter.md     ← Full-stack diagnostics & fixes — investigates
+                            symptoms, diagnoses root causes, fixes bugs
+                            and reliability issues across all layers
 ```
+
+### Available Skills
+
+Reusable skills in `.agents/skills/` that agents can load during implementation:
+
+| Skill | Purpose |
+|-------|---------|
+| `fastapi-python` | FastAPI best practices, Pydantic v2 patterns, async I/O |
+| `frontend-design` | Design philosophy, anti-default guidance for distinctive UI |
+| `tdd-orchestrator` | Red-green-refactor discipline, multi-agent TDD coordination |
+| `ui-ux-pro-max` | 161 color palettes, 57 font pairings, 99 UX guidelines, chart types, accessibility |
 
 ## Execution Model
 
@@ -97,11 +162,14 @@ All tasks complete → final code-reviewer (holistic) → report to human
 
 To start a new phase:
 
-```bash
-# Load the subagent-driven-development skill
-# The orchestrator will:
-#   1. Read the phase spec
-#   2. Create a git worktree for isolation
-#   3. Dispatch tasks in order
-#   4. Coordinate review cycles
-```
+1. Read the target phase spec in `docs/superpowers/specs/` (e.g., `2026-06-26-agent-platform-phase3-spec.md`)
+2. Load the `subagent-driven-development` skill in your AI agent tool
+3. The orchestrator will create a git worktree, dispatch tasks in dependency order, and coordinate review cycles
+4. After all tasks pass both reviewers, merge the worktree branch back
+
+Key references:
+
+- Master design: `docs/superpowers/specs/2026-06-26-remote-agent-platform-design.md`
+- Phase 1 plan (with full code): `docs/superpowers/plans/2026-06-26-agent-platform-phase1.md`
+- Session handoff notes: `docs/superpowers/session-handoff-agent-platform.md`
+- Roadmap / TODO: `docs/ROADMAP.md`

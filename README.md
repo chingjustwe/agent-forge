@@ -5,11 +5,57 @@ A multi-tenant AI agent platform with RBAC, observability, quota management, and
 ## Architecture
 
 ```
-Frontend (React/Vite)  →  Backend (FastAPI)  →  Agent Runtime (stub)
-                                │
-                    ┌───────────┼───────────┐
-                    │           │           │
-               SQLite/DB   OTel Export   LLM API
+Frontend (React/Vite)  →  API Gateway (FastAPI)  →  Agent Runtime
+                                │                       │
+                    ┌───────────┼───────────┐           │
+                    │           │           │           │
+               SQLite/DB   OTel Export   LLM API   DirectLLMAdapter
+                                                  (DeepSeek, SSE streaming)
+```
+
+Three-layer design: **Frontend** (React SPA) → **API Gateway** (auth, RBAC, routing, audit) → **Agent Runtime** (pluggable adapters behind `AgentRuntime` ABC). The gateway only depends on the abstract interface — adding a new adapter (ADK, LangGraph) requires zero gateway changes.
+
+See the [master design spec](docs/superpowers/specs/2026-06-26-remote-agent-platform-design.md) for the full architecture document.
+
+## Project Status
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | Chat MVP (DirectLLM + SSE + React chat) | **Done** |
+| 2 | Multi-Tenant + RBAC + JWT | **Done** (OIDC is a stub) |
+| 3 | Agent Harness (tools, sandbox, guardrails, retry) | Partially stubbed |
+| 4 | Google ADK Adapter | Not started |
+| 5 | Observability (traces, metrics, quota, dashboard) | **Done** |
+| 6 | Admin UI & Audit Log | **Done** |
+| 7 | LangGraph Adapter | Not started |
+
+See the [roadmap](docs/ROADMAP.md) for upcoming features (SMTP, password change, batch invites, webhooks, etc.).
+
+## Directory Structure
+
+```
+agent-platform/
+├── src/
+│   ├── main.py                  # App factory, lifespan, router wiring
+│   ├── gateway/
+│   │   ├── auth/                # JWT, OIDC stub, password hashing, RBAC roles
+│   │   ├── routes/              # chat, auth, workspaces, admin, audit, observability, quota, settings
+│   │   ├── middleware/          # AuthMiddleware, AuditMiddleware
+│   │   └── email/               # Console + SMTP email sender
+│   ├── runtime/
+│   │   ├── abc.py               # AgentRuntime ABC
+│   │   ├── models.py            # RuntimeConfig, StreamEvent
+│   │   ├── adapters/            # RunAdapter ABC, DirectLLMAdapter (DeepSeek)
+│   │   └── harness/             # GuardrailPipeline, HarnessContext
+│   └── infra/
+│       ├── db/                  # SQLAlchemy async engine, 10 ORM models
+│       ├── telemetry/           # Collector, spans, metrics, logs, OTLP exporter, quota guardrail
+│       └── settings.py          # Pydantic Settings (env-driven)
+├── frontend/                    # React 18 + Vite + TypeScript + recharts
+│   └── src/pages/               # ChatPage, Dashboard, Admin*, QuotaPage, Settings, etc.
+├── tests/                       # pytest suite (20 files, ~1,850 lines)
+├── docs/superpowers/specs/    # Phase-by-phase design specs (7 phases)
+└── .opencode/agents/            # 7 AI agents for spec-driven development
 ```
 
 ## Quick Start
@@ -42,7 +88,7 @@ npm install
 npm run dev
 ```
 
-UI available at `http://localhost:5173`
+UI available at `http://localhost:5175`
 
 ### 3. Configure LLM API Key
 
@@ -71,29 +117,40 @@ sqlite3 data/agent_platform.db "UPDATE users SET role='tenant_admin' WHERE email
 
 > **Note:** The SQLite database is located at `data/agent_platform.db`. It is created automatically when the server starts for the first time.
 
-Then log in at `http://localhost:5173`.
+Then log in at `http://localhost:5175`.
 
-## Admin Routes
+## Frontend Pages
 
-| Path | Description |
-|------|-------------|
-| `/admin/dashboard` | Tenant overview, usage summary |
+| Route | Page |
+|-------|------|
+| `/` | Chat (SSE streaming) |
+| `/login` | Login |
+| `/invite` | Accept invite & register |
+| `/dashboard` | Observability dashboard |
+| `/requests` | Request log list |
+| `/quota` | Quota management |
+| `/settings` | OTel export config |
+| `/admin/dashboard` | Tenant overview |
 | `/admin/users` | User CRUD + invite |
 | `/admin/workspaces` | Workspace management |
 | `/admin/audit` | Audit log viewer |
-| `/admin/usage` | Usage statistics per workspace |
+| `/admin/usage` | Usage statistics |
 
-## API Overview
+## API Endpoints
 
-| Endpoint | Description |
-|----------|-------------|
-| `POST /api/v1/auth/register` | Register |
-| `POST /api/v1/auth/login` | Login |
-| `GET /api/v1/health` | Health check |
-| `POST /api/v1/chat` | Chat (SSE streaming) |
-| `GET /api/v1/workspaces/{id}/observability/*` | Metrics, traces |
-| `GET/PUT /api/v1/workspaces/{id}/quota` | Quota management |
-| `GET /api/v1/admin/*` | Admin API |
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/auth/register` | Register new user |
+| `POST` | `/api/v1/auth/login` | Login (JWT) |
+| `POST` | `/api/v1/auth/logout` | Logout |
+| `GET` | `/api/v1/auth/invite/{token}` | Get invite details |
+| `POST` | `/api/v1/auth/invite/{token}/accept` | Accept invite |
+| `GET` | `/api/v1/health` | Health check |
+| `POST` | `/api/v1/chat` | Chat (SSE streaming) |
+| `GET` | `/api/v1/admin/*` | Admin API (users, tenants, workspaces, audit, usage) |
+| `GET` | `/api/v1/workspaces/{id}/observability/*` | Traces, metrics, errors |
+| `GET/PUT` | `/api/v1/workspaces/{id}/quota` | Quota management |
+| `GET/PUT` | `/api/v1/workspaces/{id}/settings` | OTel export settings |
 
 ## Development
 
@@ -105,3 +162,18 @@ python -m pytest tests/ -v
 python -m src.main                  # backend
 cd frontend && npm run dev          # frontend
 ```
+
+## Documentation
+
+All design specs are in [`docs/superpowers/specs/`](docs/superpowers/specs/):
+
+| Spec | Description |
+|------|-------------|
+| [Master Design](docs/superpowers/specs/2026-06-26-remote-agent-platform-design.md) | Full platform architecture (15 sections) |
+| [Phase 1](docs/superpowers/specs/2026-06-26-agent-platform-phase1-spec.md) | Chat MVP |
+| [Phase 2](docs/superpowers/specs/2026-06-26-agent-platform-phase2-spec.md) | Multi-Tenant + SSO + RBAC |
+| [Phase 3](docs/superpowers/specs/2026-06-26-agent-platform-phase3-spec.md) | Agent Harness |
+| [Phase 4](docs/superpowers/specs/2026-06-26-agent-platform-phase4-spec.md) | ADK Adapter |
+| [Phase 5](docs/superpowers/specs/2026-06-26-agent-platform-phase5-spec.md) | Observability |
+| [Phase 6](docs/superpowers/specs/2026-06-26-agent-platform-phase6-spec.md) | Admin UI & Audit Log |
+| [Phase 7](docs/superpowers/specs/2026-06-26-agent-platform-phase7-spec.md) | LangGraph Adapter |

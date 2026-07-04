@@ -33,7 +33,6 @@ def create_jwt(user: dict, expires_delta: timedelta | None = None) -> str:
         "tenant_id": user["tenant_id"],
         "email": user["email"],
         "role": user["role"],
-        "workspace_ids": user.get("workspace_ids", []),
         "exp": int((now + expires_delta).timestamp()),
         "iat": int(now.timestamp()),
     }
@@ -52,8 +51,10 @@ PUBLIC_ROUTES = frozenset({
     "GET:/api/v1/health",
     "GET:/api/v1/auth/login",
     "GET:/api/v1/auth/callback",
+    "GET:/api/v1/auth/invite",
     "POST:/api/v1/auth/login",
     "POST:/api/v1/auth/register",
+    "POST:/api/v1/auth/accept-invite",
     "POST:/api/v1/auth/logout",
 })
 

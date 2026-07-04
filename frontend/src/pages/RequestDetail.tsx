@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { getObservabilityRequests, getRequestDetail } from "../api";
 import TraceTimeline from "../components/TraceTimeline";
+import { useWorkspace } from "../context/WorkspaceContext";
 
 interface SpanData {
   span_id: string;
@@ -32,25 +33,38 @@ interface RequestDetailData {
   events: EventData[];
 }
 
-export default function RequestDetail({ wsId }: { wsId: string }) {
+export default function RequestDetail() {
+  const { currentWorkspaceId } = useWorkspace();
   const { traceId } = useParams<{ traceId: string }>();
   const [detail, setDetail] = useState<RequestDetailData | null>(null);
 
   useEffect(() => {
-    if (!traceId) return;
+    if (!currentWorkspaceId || !traceId) return;
     (async () => {
-      const requests = await getObservabilityRequests(wsId);
+      const requests = await getObservabilityRequests(currentWorkspaceId);
       const found = requests.find(r => r.trace_id === traceId);
       if (found) {
         try {
-          const data = await getRequestDetail(wsId, traceId);
+          const data = await getRequestDetail(currentWorkspaceId, traceId);
           setDetail(data as any);
         } catch {
           // apiFetch handles 401 redirect; other errors ignored
         }
       }
     })();
-  }, [wsId, traceId]);
+  }, [currentWorkspaceId, traceId]);
+
+  if (!currentWorkspaceId) {
+    return (
+      <div>
+        <div className="page-header">
+          <h1 className="page-title">Request Detail</h1>
+          <p className="page-subtitle">Trace: {traceId}</p>
+        </div>
+        <div className="alert alert-info">No workspace selected. Please select a workspace from the top bar.</div>
+      </div>
+    );
+  }
 
   if (!detail) return <div className="loading">Loading request details</div>;
 

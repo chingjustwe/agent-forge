@@ -1,10 +1,10 @@
 import json
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from src.gateway.auth.roles import has_permission
+from src.gateway.auth.rbac import require_workspace_role
 from src.infra.db.engine import async_session
 from src.infra.db.models import OTelSettings
 
@@ -18,13 +18,13 @@ class OTelConfig(BaseModel):
 
 
 @router.get("/api/v1/workspaces/{ws_id}/settings/otel")
-async def get_otel_settings(request: Request, ws_id: str):
-    user = getattr(request.state, "user", None)
-    if not user:
-        return JSONResponse(status_code=401, content={"error": {"code": "UNAUTHORIZED", "message": "Not authenticated"}})
-    if not has_permission(user.get("role", "viewer"), "member"):
-        return JSONResponse(status_code=403, content={"error": {"code": "FORBIDDEN", "message": "Insufficient permissions"}})
-
+async def get_otel_settings(
+    request: Request,
+    ws_id: str,
+    _ctx=Depends(
+        require_workspace_role("ws_id", "member", "workspace_admin", "workspace_owner")
+    ),
+):
     async with async_session() as session:
         settings = await session.get(OTelSettings, ws_id)
         if not settings:
@@ -38,13 +38,14 @@ async def get_otel_settings(request: Request, ws_id: str):
 
 
 @router.put("/api/v1/workspaces/{ws_id}/settings/otel")
-async def update_otel_settings(request: Request, ws_id: str, body: OTelConfig):
-    user = getattr(request.state, "user", None)
-    if not user:
-        return JSONResponse(status_code=401, content={"error": {"code": "UNAUTHORIZED", "message": "Not authenticated"}})
-    if not has_permission(user.get("role", "viewer"), "workspace_admin"):
-        return JSONResponse(status_code=403, content={"error": {"code": "FORBIDDEN", "message": "Workspace admin role required"}})
-
+async def update_otel_settings(
+    request: Request,
+    ws_id: str,
+    body: OTelConfig,
+    _ctx=Depends(
+        require_workspace_role("ws_id", "workspace_admin", "workspace_owner")
+    ),
+):
     async with async_session() as session:
         settings = await session.get(OTelSettings, ws_id)
         if not settings:

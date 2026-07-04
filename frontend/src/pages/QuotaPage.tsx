@@ -1,24 +1,59 @@
 import { useEffect, useState } from "react";
 import { getQuota, updateQuota, QuotaInfo } from "../api";
+import { useWorkspace } from "../context/WorkspaceContext";
 
-export default function QuotaPage({ wsId, isAdmin }: { wsId: string; isAdmin: boolean }) {
+export default function QuotaPage() {
+  const { currentWorkspaceId, currentRole } = useWorkspace();
   const [quota, setQuota] = useState<QuotaInfo | null>(null);
   const [editTokens, setEditTokens] = useState(0);
   const [editing, setEditing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Workspace-level admin (or tenant_admin) can edit quota.
+  const canEdit =
+    currentRole === "workspace_admin" ||
+    currentRole === "workspace_owner";
 
   useEffect(() => {
-    getQuota(wsId).then(data => {
-      setQuota(data);
-      setEditTokens(data.max_tokens_per_day);
-    });
-  }, [wsId]);
+    if (!currentWorkspaceId) {
+      setError("No workspace selected. Please select a workspace from the top bar.");
+      return;
+    }
+    setError(null);
+    getQuota(currentWorkspaceId)
+      .then(data => {
+        setQuota(data);
+        setEditTokens(data.max_tokens_per_day);
+      })
+      .catch(err => {
+        setError(err instanceof Error ? err.message : "Failed to load quota data");
+      });
+  }, [currentWorkspaceId]);
 
   const handleSave = async () => {
-    await updateQuota(wsId, { max_tokens_per_day: editTokens });
-    setEditing(false);
-    getQuota(wsId).then(setQuota);
+    if (!currentWorkspaceId) return;
+    try {
+      await updateQuota(currentWorkspaceId, { max_tokens_per_day: editTokens });
+      setEditing(false);
+      const data = await getQuota(currentWorkspaceId);
+      setQuota(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update quota");
+    }
   };
 
+  if (error) return <div className="alert alert-error">{error}</div>;
+  if (!currentWorkspaceId) {
+    return (
+      <div>
+        <div className="page-header">
+          <h1 className="page-title">Quota Management</h1>
+          <p className="page-subtitle">Monitor and configure token usage limits</p>
+        </div>
+        <div className="alert alert-info">No workspace selected. Please select a workspace from the top bar.</div>
+      </div>
+    );
+  }
   if (!quota) return <div className="loading">Loading quota data</div>;
 
   const pct = quota.max_tokens_per_day > 0
@@ -60,7 +95,7 @@ export default function QuotaPage({ wsId, isAdmin }: { wsId: string; isAdmin: bo
         </p>
       </div>
 
-      {isAdmin && (
+      {canEdit && (
         <div className="card">
           <div className="card-header">
             <h3 className="card-title">Configuration</h3>

@@ -18,11 +18,50 @@ def _set_env():
 def _token(role: str = "member"):
     return create_jwt({
         "id": "test-user",
+        "sub": "test-user",
         "tenant_id": "test-tenant",
         "email": "test@test.com",
         "role": role,
-        "workspace_ids": [],
     })
+
+
+async def _seed_chat_membership() -> None:
+    """P0-4: /chat now requires config.workspace_id and a WorkspaceMember row.
+
+    Seeds tenant + workspace + user + membership so test-user can chat in
+    ws-test-chat. Idempotent — safe to call from multiple tests.
+    """
+    from src.infra.db.models import Tenant, User, Workspace, WorkspaceMember
+    from src.infra.db.session import get_db
+
+    async for session in get_db():
+        if not await session.get(Tenant, "test-tenant"):
+            session.add(Tenant(id="test-tenant", name="T", domain="test.test"))
+            await session.flush()
+        if not await session.get(Workspace, "ws-test-chat"):
+            session.add(Workspace(id="ws-test-chat", tenant_id="test-tenant", name="WS Chat"))
+            await session.flush()
+        if not await session.get(User, "test-user"):
+            session.add(
+                User(
+                    id="test-user",
+                    tenant_id="test-tenant",
+                    email="test@test.com",
+                    name="Test",
+                    role="member",
+                )
+            )
+            await session.flush()
+        if not await session.get(WorkspaceMember, ("ws-test-chat", "test-user")):
+            session.add(
+                WorkspaceMember(
+                    workspace_id="ws-test-chat",
+                    user_id="test-user",
+                    role="member",
+                )
+            )
+        await session.commit()
+        break
 
 
 @pytest.fixture
@@ -48,6 +87,9 @@ async def test_chat_streaming(app, httpx_mock):
         headers={"Content-Type": "text/event-stream"},
     )
 
+    # P0-4: /chat requires config.workspace_id and a WorkspaceMember row.
+    await _seed_chat_membership()
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         async with client.stream(
@@ -55,6 +97,7 @@ async def test_chat_streaming(app, httpx_mock):
             "/api/v1/chat",
             json={
                 "messages": [{"role": "user", "content": "Hello"}],
+                "config": {"workspace_id": "ws-test-chat"},
             },
             headers={"Authorization": f"Bearer {_token()}"},
         ) as resp:
@@ -128,6 +171,9 @@ async def test_chat_creates_request_log(app, httpx_mock):
         headers={"Content-Type": "text/event-stream"},
     )
 
+    # P0-4: /chat requires config.workspace_id and a WorkspaceMember row.
+    await _seed_chat_membership()
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         async with client.stream(
@@ -135,6 +181,7 @@ async def test_chat_creates_request_log(app, httpx_mock):
             "/api/v1/chat",
             json={
                 "messages": [{"role": "user", "content": "Hello"}],
+                "config": {"workspace_id": "ws-test-chat"},
             },
             headers={"Authorization": f"Bearer {_token()}"},
         ) as resp:

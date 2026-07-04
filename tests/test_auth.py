@@ -12,7 +12,6 @@ class TestJWT:
             "tenant_id": "tenant-1",
             "email": "test@example.com",
             "role": "member",
-            "workspace_ids": ["ws-1"],
         }
         token = create_jwt(user)
         claims = decode_jwt(token)
@@ -21,9 +20,29 @@ class TestJWT:
         assert claims["tenant_id"] == "tenant-1"
         assert claims["email"] == "test@example.com"
         assert claims["role"] == "member"
-        assert claims["workspace_ids"] == ["ws-1"]
         assert "exp" in claims
         assert "iat" in claims
+
+    def test_jwt_does_not_contain_workspace_ids(self):
+        """P0-4: JWT must NOT carry workspace_ids — query WorkspaceMember at runtime.
+
+        Even if the caller passes ``workspace_ids`` in the user dict, the
+        encoded JWT must omit it. New tokens only carry sub/tenant_id/email/role/exp/iat.
+        """
+        user = {
+            "id": "user-1",
+            "tenant_id": "tenant-1",
+            "email": "test@example.com",
+            "role": "member",
+            "workspace_ids": ["ws-1"],  # must be ignored by create_jwt
+        }
+        token = create_jwt(user)
+        claims = decode_jwt(token)
+        assert claims is not None
+        assert "workspace_ids" not in claims
+        # Standard claims still present
+        for key in ("sub", "tenant_id", "email", "role", "exp", "iat"):
+            assert key in claims
 
     def test_decode_invalid_token(self):
         assert decode_jwt("invalid.token.here") is None

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infra.db.session import get_db
 from src.infra.db.models import AuditLog as AuditLogModel
-from src.gateway.auth.roles import has_permission
+from src.gateway.auth.rbac import get_workspace_member_role
 
 router = APIRouter(tags=["audit"])
 
@@ -25,10 +25,8 @@ async def workspace_audit_log(
     db: AsyncSession = Depends(get_db),
 ):
     user: dict = request.state.user
-    user_roles = user.get("workspace_ids", [])
-    is_tenant_admin = user.get("role") == "tenant_admin"
-    is_member = workspace_id in user_roles or is_tenant_admin
-    if not is_member:
+    member_role = await get_workspace_member_role(workspace_id, user, db)
+    if member_role is None:
         return JSONResponse(status_code=403, content={"error": {"code": "FORBIDDEN", "message": "Insufficient permissions"}})
 
     query = select(AuditLogModel).where(AuditLogModel.workspace_id == workspace_id)

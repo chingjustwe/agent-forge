@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { fetchUsers, updateUser, deleteUser, inviteUser, AdminUser } from "../api";
+import { fetchUsers, updateUser, deleteUser, inviteUser, fetchAdminWorkspaces, AdminUser, AdminWorkspace } from "../api";
 
 export default function AdminUsers() {
   const [users, setUsers] = useState<AdminUser[]>([]);
@@ -12,6 +12,8 @@ export default function AdminUsers() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
   const [message, setMessage] = useState("");
+  const [workspaces, setWorkspaces] = useState<AdminWorkspace[]>([]);
+  const [inviteWsId, setInviteWsId] = useState<string>("");
 
   const load = () => {
     setLoading(true);
@@ -20,7 +22,10 @@ export default function AdminUsers() {
       .finally(() => setLoading(false));
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    fetchAdminWorkspaces().then(setWorkspaces).catch(() => {});
+  }, []);
 
   const handleSearch = () => load();
 
@@ -46,9 +51,11 @@ export default function AdminUsers() {
 
   const handleInvite = async () => {
     try {
-      await inviteUser({ email: inviteEmail, role: inviteRole });
+      await inviteUser({ email: inviteEmail, role: inviteRole, workspace_id: inviteWsId || undefined });
       setShowInvite(false);
       setInviteEmail("");
+      setInviteWsId("");
+      setMessage(`Invitation sent to ${inviteEmail}`);
       load();
     } catch (e: unknown) {
       setMessage(String(e));
@@ -95,9 +102,16 @@ export default function AdminUsers() {
             <label className="form-label">Role</label>
             <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)}>
               <option value="member">Member</option>
-              <option value="workspace_admin">Workspace Admin</option>
-              <option value="workspace_owner">Workspace Owner</option>
-              <option value="viewer">Viewer</option>
+              <option value="tenant_admin">Tenant Admin</option>
+            </select>
+          </div>
+          <div className="form-group" style={{ margin: 0 }}>
+            <label className="form-label">Workspace</label>
+            <select value={inviteWsId} onChange={(e) => setInviteWsId(e.target.value)}>
+              <option value="">(Default)</option>
+              {workspaces.map((ws) => (
+                <option key={ws.id} value={ws.id}>{ws.name}</option>
+              ))}
             </select>
           </div>
           <div className="btn-group">
@@ -131,10 +145,7 @@ export default function AdminUsers() {
                     {editingId === u.id ? (
                       <select value={editRole} onChange={(e) => setEditRole(e.target.value)}>
                         <option value="tenant_admin">Tenant Admin</option>
-                        <option value="workspace_owner">Workspace Owner</option>
-                        <option value="workspace_admin">Workspace Admin</option>
                         <option value="member">Member</option>
-                        <option value="viewer">Viewer</option>
                       </select>
                     ) : (
                       <span className="badge badge-primary">{u.role}</span>

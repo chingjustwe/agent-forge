@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { loginUser, registerUser } from "../api";
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -21,7 +22,9 @@ export default function LoginPage() {
       } else {
         await registerUser(email, password, name);
       }
-      navigate("/");
+      // P2-1: honor ?redirect= so invitees return to the accept page after login.
+      const redirect = searchParams.get("redirect");
+      navigate(redirect || "/");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {

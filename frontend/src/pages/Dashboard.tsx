@@ -1,21 +1,36 @@
 import { useEffect, useState } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, LineChart, Line, PieChart, Pie, Cell, ResponsiveContainer } from "recharts";
 import { getObservabilitySummary, getTokenDaily, getLatency, getErrors, ObservabilitySummary, DailyToken, LatencyData, ErrorGroup } from "../api";
+import { useWorkspace } from "../context/WorkspaceContext";
 
 const COLORS = ["#6C5CE7", "#00D2FF", "#00E676", "#FFD600", "#FF5252", "#448AFF"];
 
-export default function Dashboard({ wsId }: { wsId: string }) {
+export default function Dashboard() {
+  const { currentWorkspaceId } = useWorkspace();
   const [summary, setSummary] = useState<ObservabilitySummary | null>(null);
   const [tokens, setTokens] = useState<DailyToken[]>([]);
   const [latency, setLatency] = useState<LatencyData | null>(null);
   const [errors, setErrors] = useState<ErrorGroup[]>([]);
 
   useEffect(() => {
-    getObservabilitySummary(wsId).then(setSummary);
-    getTokenDaily(wsId).then(setTokens);
-    getLatency(wsId).then(setLatency);
-    getErrors(wsId).then(setErrors);
-  }, [wsId]);
+    if (!currentWorkspaceId) return;
+    getObservabilitySummary(currentWorkspaceId).then(setSummary);
+    getTokenDaily(currentWorkspaceId).then(setTokens);
+    getLatency(currentWorkspaceId).then(setLatency);
+    getErrors(currentWorkspaceId).then(setErrors);
+  }, [currentWorkspaceId]);
+
+  if (!currentWorkspaceId) {
+    return (
+      <div>
+        <div className="page-header">
+          <h1 className="page-title">Dashboard</h1>
+          <p className="page-subtitle">Observability and usage metrics for your workspace</p>
+        </div>
+        <div className="alert alert-info">No workspace selected. Please select a workspace from the top bar.</div>
+      </div>
+    );
+  }
 
   return (
     <div>

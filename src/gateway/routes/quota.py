@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.gateway.auth.roles import has_permission
+from src.gateway.auth.rbac import require_workspace_role
 from src.infra.db.engine import async_session
 from src.infra.db.models import Workspace
+from src.infra.db.session import get_db
 from src.infra.telemetry.quota import QuotaGuardrail
 
 router = APIRouter()
@@ -16,13 +18,13 @@ class QuotaUpdate(BaseModel):
 
 
 @router.get("/api/v1/workspaces/{ws_id}/quota")
-async def get_quota(request: Request, ws_id: str):
-    user = getattr(request.state, "user", None)
-    if not user:
-        return JSONResponse(status_code=401, content={"error": {"code": "UNAUTHORIZED", "message": "Not authenticated"}})
-    if not has_permission(user.get("role", "viewer"), "member"):
-        return JSONResponse(status_code=403, content={"error": {"code": "FORBIDDEN", "message": "Insufficient permissions"}})
-
+async def get_quota(
+    request: Request,
+    ws_id: str,
+    _ctx=Depends(
+        require_workspace_role("ws_id", "member", "workspace_admin", "workspace_owner")
+    ),
+):
     guardrail = QuotaGuardrail()
     usage = await guardrail.get_usage(ws_id)
     return {
@@ -35,17 +37,21 @@ async def get_quota(request: Request, ws_id: str):
 
 
 @router.put("/api/v1/workspaces/{ws_id}/quota")
-async def update_quota(request: Request, ws_id: str, body: QuotaUpdate):
-    user = getattr(request.state, "user", None)
-    if not user:
-        return JSONResponse(status_code=401, content={"error": {"code": "UNAUTHORIZED", "message": "Not authenticated"}})
-    if not has_permission(user.get("role", "viewer"), "workspace_admin"):
-        return JSONResponse(status_code=403, content={"error": {"code": "FORBIDDEN", "message": "Workspace admin role required"}})
-
+async def update_quota(
+    request: Request,
+    ws_id: str,
+    body: QuotaUpdate,
+    _ctx=Depends(
+        require_workspace_role("ws_id", "workspace_admin", "workspace_owner")
+    ),
+):
     async with async_session() as session:
         ws = await session.get(Workspace, ws_id)
         if not ws:
-            return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "Workspace not found"}})
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"code": "NOT_FOUND", "message": "Workspace not found"}},
+            )
 
         if body.max_tokens_per_day is not None:
             ws.max_tokens_per_day = body.max_tokens_per_day

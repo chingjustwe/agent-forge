@@ -1,19 +1,34 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { getObservabilityRequests, RequestLog } from "../api";
+import { useWorkspace } from "../context/WorkspaceContext";
 
-export default function RequestList({ wsId }: { wsId: string }) {
+export default function RequestList() {
+  const { currentWorkspaceId } = useWorkspace();
   const [requests, setRequests] = useState<RequestLog[]>([]);
   const [filter, setFilter] = useState("");
   const navigate = useNavigate();
 
   useEffect(() => {
-    getObservabilityRequests(wsId, { limit: 100 }).then(setRequests);
-  }, [wsId]);
+    if (!currentWorkspaceId) return;
+    getObservabilityRequests(currentWorkspaceId, { limit: 100 }).then(setRequests);
+  }, [currentWorkspaceId]);
 
   const filtered = requests.filter(r =>
     !filter || r.model?.includes(filter) || r.status_code === Number(filter)
   );
+
+  if (!currentWorkspaceId) {
+    return (
+      <div>
+        <div className="page-header">
+          <h1 className="page-title">Request List</h1>
+          <p className="page-subtitle">Browse and inspect API requests to your agents</p>
+        </div>
+        <div className="alert alert-info">No workspace selected. Please select a workspace from the top bar.</div>
+      </div>
+    );
+  }
 
   return (
     <div>

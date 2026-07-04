@@ -8,7 +8,7 @@ export interface User {
   id: string;
   email: string;
   name: string;
-  role: string;
+  role: string;  // P0-2: 仅 tenant_admin / member（tenant 级）。workspace 级角色查 WorkspaceMember
   workspaces?: string[];
   workspace_ids?: string[];
   workspace_count?: number;
@@ -17,8 +17,20 @@ export interface User {
 export interface Workspace {
   id: string;
   name: string;
+  slug?: string;
+  description?: string;
+  icon?: string;
+  owner_id?: string;
   member_count?: number;
   created_at: string;
+  updated_at?: string;
+}
+
+export interface WorkspaceMembership {
+  id: string;
+  name: string;
+  role: string;  // workspace 级角色: member/viewer/workspace_admin/workspace_owner
+  created_at?: string;
 }
 
 export interface AuthResponse {
@@ -34,10 +46,13 @@ export function getToken(): string | null {
 
 export function setToken(token: string): void {
   localStorage.setItem(TOKEN_KEY, token);
+  // 通知 WorkspaceProvider 等 token 消费方重新拉取数据
+  window.dispatchEvent(new CustomEvent("auth:token-changed"));
 }
 
 export function clearToken(): void {
   localStorage.removeItem(TOKEN_KEY);
+  window.dispatchEvent(new CustomEvent("auth:token-changed"));
 }
 
 function authHeaders(): Record<string, string> {
@@ -91,6 +106,30 @@ export async function registerUser(email: string, password: string, name: string
   return data;
 }
 
+export async function getInvite(token: string): Promise<InviteInfo> {
+  const resp = await fetch(`/api/v1/auth/invite?token=${encodeURIComponent(token)}`);
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error?.message || "Invalid invite link");
+  }
+  return resp.json();
+}
+
+export async function acceptInvite(data: AcceptInviteRequest): Promise<AuthResponse> {
+  const resp = await fetch("/api/v1/auth/accept-invite", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const err = await resp.json();
+    throw new Error(err.error?.message || "Failed to accept invite");
+  }
+  const result = await resp.json();
+  setToken(result.token);
+  return result;
+}
+
 export async function loginUser(email: string, password: string): Promise<AuthResponse> {
   const resp = await fetch("/api/v1/auth/login", {
     method: "POST",
@@ -112,17 +151,26 @@ export async function getCurrentUser(): Promise<User> {
   return resp.json();
 }
 
+export async function listMyWorkspaces(): Promise<WorkspaceMembership[]> {
+  const resp = await apiFetch("/api/v1/me/workspaces");
+  if (!resp.ok) throw new Error("Failed to fetch my workspaces");
+  return resp.json();
+}
+
 export async function listWorkspaces(): Promise<Workspace[]> {
   const resp = await apiFetch("/api/v1/workspaces");
   if (!resp.ok) throw new Error("Failed to list workspaces");
   return resp.json();
 }
 
-export async function createWorkspace(name: string): Promise<Workspace> {
+export async function createWorkspace(
+  name: string,
+  options?: { slug?: string; description?: string; icon?: string },
+): Promise<Workspace> {
   const resp = await apiFetch("/api/v1/workspaces", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, ...(options || {}) }),
   });
   if (!resp.ok) throw new Error("Failed to create workspace");
   return resp.json();
@@ -297,11 +345,22 @@ export async function updateTenant(id: string, data: Partial<Tenant>): Promise<T
 
 // ─── Admin: Users ─────────────────────────────────────────────────────────
 
+export interface InviteInfo {
+  email: string;
+  role: string;
+}
+
+export interface AcceptInviteRequest {
+  token: string;
+  password: string;
+  name: string;
+}
+
 export interface AdminUser {
   id: string;
   email: string;
   name: string;
-  role: string;
+  role: string;  // P0-2: 仅 tenant_admin / member（tenant 级）。workspace 级角色查 WorkspaceMember
   workspaces: string[];
   last_login: string | null;
   created_at: string;
@@ -318,6 +377,7 @@ export async function fetchUsers(params?: { search?: string; role?: string; work
 }
 
 export async function updateUser(id: string, data: { role?: string; workspace_ids?: string[] }): Promise<AdminUser> {
+  // P0-2: role 仅接受 tenant_admin / member（tenant 级）。workspace 级角色通过 WorkspaceMember 接口管理。
   const resp = await apiFetch(`/api/v1/admin/users/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
@@ -347,10 +407,16 @@ export async function inviteUser(data: { email: string; role: string; workspace_
 export interface AdminWorkspace {
   id: string;
   name: string;
+  slug?: string;
+  description?: string;
+  icon?: string;
+  owner_id?: string;
   member_count: number;
   agent_count: number;
   owner: string;
+  is_default: boolean;
   created_at: string;
+  updated_at?: string;
 }
 
 export async function fetchAdminWorkspaces(): Promise<AdminWorkspace[]> {
@@ -359,19 +425,89 @@ export async function fetchAdminWorkspaces(): Promise<AdminWorkspace[]> {
   return resp.json();
 }
 
-export async function updateAdminWorkspace(id: string, data: { name?: string; settings?: Record<string, unknown>; max_tokens_per_day?: number; max_cost_per_month?: number }): Promise<AdminWorkspace> {
+export async function createAdminWorkspace(
+  name: string,
+  options?: { slug?: string; description?: string; icon?: string },
+): Promise<AdminWorkspace> {
+  const resp = await apiFetch("/api/v1/admin/workspaces", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, ...(options || {}) }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to create workspace");
+  }
+  return resp.json();
+}
+
+export async function updateAdminWorkspace(
+  id: string,
+  data: {
+    name?: string;
+    slug?: string;
+    description?: string;
+    icon?: string;
+    settings?: Record<string, unknown>;
+    max_tokens_per_day?: number;
+    max_cost_per_month?: number;
+  },
+): Promise<AdminWorkspace> {
   const resp = await apiFetch(`/api/v1/admin/workspaces/${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
   });
-  if (!resp.ok) throw new Error("Failed to update workspace");
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to update workspace");
+  }
   return resp.json();
 }
 
 export async function archiveWorkspace(id: string): Promise<void> {
   const resp = await apiFetch(`/api/v1/admin/workspaces/${id}`, { method: "DELETE" });
-  if (!resp.ok) throw new Error("Failed to archive workspace");
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to archive workspace");
+  }
+}
+
+// ─── Workspace Members ─────────────────────────────────────────────────────
+
+export interface WorkspaceMember {
+  user_id: string;
+  email: string;
+  name: string;
+  role: string;
+}
+
+export async function fetchWorkspaceMembers(workspaceId: string): Promise<WorkspaceMember[]> {
+  const resp = await apiFetch(`/api/v1/workspaces/${workspaceId}/members`);
+  if (!resp.ok) throw new Error("Failed to fetch members");
+  return resp.json();
+}
+
+export async function addWorkspaceMember(workspaceId: string, userId: string, role: string = "member"): Promise<void> {
+  const resp = await apiFetch(`/api/v1/workspaces/${workspaceId}/members`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId, role }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to add member");
+  }
+}
+
+export async function removeWorkspaceMember(workspaceId: string, userId: string): Promise<void> {
+  const resp = await apiFetch(`/api/v1/workspaces/${workspaceId}/members/${userId}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to remove member");
+  }
 }
 
 // ─── Admin: Audit ─────────────────────────────────────────────────────────
@@ -439,11 +575,15 @@ export async function fetchUsage(params?: { tenant_id?: string; since?: string; 
 export async function* streamChat(
   messages: { role: string; content: string }[],
   config?: Record<string, unknown>,
+  sessionId?: string,
 ): AsyncGenerator<StreamEvent> {
+  const fullConfig: Record<string, unknown> = { ...(config || {}) };
+  if (sessionId) fullConfig.session_id = sessionId;
+
   const response = await apiFetch("/api/v1/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, config }),
+    body: JSON.stringify({ messages, config: fullConfig }),
   });
 
   if (!response.ok) {
@@ -470,5 +610,320 @@ export async function* streamChat(
         yield JSON.parse(payload) as StreamEvent;
       }
     }
+  }
+}
+
+// ─── Chat Sessions (P1-1) ─────────────────────────────────────────────────
+
+export interface ChatSessionInfo {
+  id: string;
+  workspace_id: string;
+  owner_id: string;
+  title: string;
+  visibility: "private" | "workspace";
+  agent_name: string | null;
+  archived: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatMessageInfo {
+  id: string;
+  session_id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  tokens: number;
+  created_at: string;
+}
+
+export async function listSessions(wsId: string): Promise<ChatSessionInfo[]> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/sessions`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to list sessions");
+  }
+  return resp.json();
+}
+
+export async function createSession(
+  wsId: string,
+  data: { title?: string; visibility?: string; agent_name?: string },
+): Promise<ChatSessionInfo> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to create session");
+  }
+  return resp.json();
+}
+
+export async function getSession(
+  wsId: string,
+  sessionId: string,
+): Promise<{ session: ChatSessionInfo; messages: ChatMessageInfo[] }> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/sessions/${sessionId}`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to fetch session");
+  }
+  return resp.json();
+}
+
+export async function updateSession(
+  wsId: string,
+  sessionId: string,
+  data: { title?: string; visibility?: string },
+): Promise<ChatSessionInfo> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/sessions/${sessionId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to update session");
+  }
+  return resp.json();
+}
+
+export async function deleteSession(wsId: string, sessionId: string): Promise<void> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/sessions/${sessionId}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok && resp.status !== 204) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to delete session");
+  }
+}
+
+// ─── Workspace Invitations (P2-1) ──────────────────────────────────────────
+
+export interface WorkspaceInvitation {
+  id: string;
+  workspace_id: string;
+  workspace_name?: string | null;
+  email: string | null;
+  role: string;
+  token: string;
+  invited_by: string;
+  expires_at: string;
+  accepted_at: string | null;
+  accepted_by: string | null;
+  created_at: string;
+  is_expired: boolean;
+  is_accepted: boolean;
+}
+
+export interface WorkspaceInvitationPreview {
+  id: string;
+  workspace_id: string;
+  workspace_name: string | null;
+  email: string | null;
+  role: string;
+  expires_at: string;
+  accepted_at: string | null;
+  accepted_by: string | null;
+  created_at: string;
+  is_expired: boolean;
+  is_accepted: boolean;
+}
+
+export async function listWorkspaceInvitations(wsId: string): Promise<WorkspaceInvitation[]> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/invitations`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to list invitations");
+  }
+  return resp.json();
+}
+
+export async function createWorkspaceInvitation(
+  wsId: string,
+  data: { email?: string | null; role?: string; expires_in_days?: number },
+): Promise<WorkspaceInvitation> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/invitations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to create invitation");
+  }
+  return resp.json();
+}
+
+export async function revokeWorkspaceInvitation(wsId: string, invitationId: string): Promise<void> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/invitations/${invitationId}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok && resp.status !== 204) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to revoke invitation");
+  }
+}
+
+/** Public preview — uses plain fetch (no auth header) so logged-out users can
+ * see what they were invited to before signing in. */
+export async function getInvitationPreview(token: string): Promise<WorkspaceInvitationPreview> {
+  const resp = await fetch(`/api/v1/invitations/${encodeURIComponent(token)}`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Invitation not found");
+  }
+  return resp.json();
+}
+
+export async function acceptWorkspaceInvitation(token: string): Promise<{ workspace_id: string; role: string; already_member: boolean }> {
+  const resp = await apiFetch(`/api/v1/invitations/${encodeURIComponent(token)}/accept`, {
+    method: "POST",
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to accept invitation");
+  }
+  return resp.json();
+}
+
+// ─── Agents (P2-2) ─────────────────────────────────────────────────────────
+
+export type AgentFramework = "direct_llm" | "adk" | "langgraph";
+
+export interface AgentConfig {
+  id: string;
+  workspace_id: string;
+  name: string;
+  framework: AgentFramework;
+  config: Record<string, unknown>;
+  created_by: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export async function listAgents(wsId: string): Promise<AgentConfig[]> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/agents`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to list agents");
+  }
+  return resp.json();
+}
+
+export async function getAgent(wsId: string, agentId: string): Promise<AgentConfig> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/agents/${agentId}`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to fetch agent");
+  }
+  return resp.json();
+}
+
+export async function createAgent(
+  wsId: string,
+  data: { name: string; framework: AgentFramework; config?: Record<string, unknown> },
+): Promise<AgentConfig> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/agents`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: data.name, framework: data.framework, config: data.config || {} }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to create agent");
+  }
+  return resp.json();
+}
+
+export async function updateAgent(
+  wsId: string,
+  agentId: string,
+  data: { name?: string; framework?: AgentFramework; config?: Record<string, unknown> },
+): Promise<AgentConfig> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/agents/${agentId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to update agent");
+  }
+  return resp.json();
+}
+
+export async function deleteAgent(wsId: string, agentId: string): Promise<void> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/agents/${agentId}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok && resp.status !== 204) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to delete agent");
+  }
+}
+
+// ─── API Keys (P2-3) ───────────────────────────────────────────────────────
+
+export type ApiKeyScope = "chat:write" | "quota:read" | "sessions:read" | "sessions:write";
+
+export const API_KEY_SCOPES: { value: ApiKeyScope; label: string }[] = [
+  { value: "chat:write", label: "Chat (write)" },
+  { value: "quota:read", label: "Quota (read)" },
+  { value: "sessions:read", label: "Sessions (read)" },
+  { value: "sessions:write", label: "Sessions (write)" },
+];
+
+/** List response — never contains the plaintext key. */
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  key_prefix: string;
+  scopes: ApiKeyScope[];
+  expires_at: string | null;
+  last_used_at: string | null;
+  revoked: boolean;
+  created_at: string;
+}
+
+/** Create response — includes the plaintext key exactly once. */
+export interface ApiKeyCreated extends ApiKeyInfo {
+  key: string;
+}
+
+export async function listApiKeys(wsId: string): Promise<ApiKeyInfo[]> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/api-keys`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to list API keys");
+  }
+  return resp.json();
+}
+
+export async function createApiKey(
+  wsId: string,
+  data: { name: string; scopes?: ApiKeyScope[]; expires_in_days?: number },
+): Promise<ApiKeyCreated> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/api-keys`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to create API key");
+  }
+  return resp.json();
+}
+
+export async function revokeApiKey(wsId: string, keyId: string): Promise<void> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/api-keys/${keyId}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok && resp.status !== 204) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to revoke API key");
   }
 }

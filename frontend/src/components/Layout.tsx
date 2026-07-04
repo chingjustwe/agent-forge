@@ -1,13 +1,17 @@
 import { useState, useEffect } from "react";
 import { useNavigate, useLocation, Link } from "react-router-dom";
 import { getCurrentUser, clearToken, User } from "../api";
+import WorkspaceSwitcher from "./WorkspaceSwitcher";
 
 const NAV_ITEMS = [
   { section: "Main", items: [
-    { path: "/", label: "Chat", icon: "💬" },
+    { path: "/sessions", label: "Sessions", icon: "🗂️" },
     { path: "/dashboard", label: "Dashboard", icon: "📊" },
     { path: "/requests", label: "Requests", icon: "📋" },
     { path: "/quota", label: "Quota", icon: "📦" },
+    { path: "/agents", label: "Agents", icon: "🤖" },
+    { path: "/invitations", label: "Invitations", icon: "✉️" },
+    { path: "/api-keys", label: "API Keys", icon: "🔑" },
     { path: "/settings", label: "Settings", icon: "⚙️" },
   ]},
 ];
@@ -28,7 +32,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     navigate("/login");
   }
 
-  const isAdmin = user?.role === "tenant_admin" || user?.role === "workspace_admin";
+  // Sidebar Admin entry: tenant-level admin only.
+  // Workspace-level admin entries (if any) are handled inside business pages.
+  const isAdmin = user?.role === "tenant_admin";
   const initials = user?.name
     ? user.name.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2)
     : user?.email?.slice(0, 2).toUpperCase() || "??";
@@ -39,6 +45,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         <div className="sidebar-brand">
           <div className="sidebar-brand-icon">A</div>
           <span className="sidebar-brand-text">Agent Platform</span>
+        </div>
+
+        <div className="sidebar-workspace">
+          <WorkspaceSwitcher />
         </div>
 
         <nav className="sidebar-nav">
@@ -103,9 +113,11 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
 
-      <main className="main-content">
-        {children}
-      </main>
+      <div className="main-area">
+        <main className="main-content">
+          {children}
+        </main>
+      </div>
     </div>
   );
 }
