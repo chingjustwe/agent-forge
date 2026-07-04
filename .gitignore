@@ -12,3 +12,6 @@ frontend/*.tsbuildinfo
 .venv/
 *.egg-info/
 .pytest_cache/
+.opencode/
+.codebuddy/
+docs/
