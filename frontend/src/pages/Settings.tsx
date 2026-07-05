@@ -1,17 +1,18 @@
 import { useEffect, useState } from "react";
 import { getOtelSettings, updateOtelSettings, OTelConfig } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
+import { useToast } from "../components/Toast";
 
 export default function Settings() {
   const { currentWorkspaceId, currentRole } = useWorkspace();
+  const toast = useToast();
   const [config, setConfig] = useState<OTelConfig>({ enabled: false, endpoint: "", headers: {} });
   const [headersText, setHeadersText] = useState("{}");
-  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // Workspace-level admin (or tenant_admin) can edit settings.
   const canEdit =
-    currentRole === "workspace_admin" ||
-    currentRole === "workspace_owner";
+    currentRole === "workspace_admin";
 
   useEffect(() => {
     if (!currentWorkspaceId) return;
@@ -25,11 +26,17 @@ export default function Settings() {
     if (!currentWorkspaceId) return;
     try {
       const headers = JSON.parse(headersText);
+      setSaving(true);
       await updateOtelSettings(currentWorkspaceId, { ...config, headers });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch {
-      alert("Invalid JSON in headers");
+      toast.success("Settings saved", "OpenTelemetry configuration has been updated.");
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        toast.error("Invalid JSON", "The headers field contains invalid JSON. Please fix the syntax and try again.");
+      } else {
+        toast.error("Save failed", e instanceof Error ? e.message : "Failed to save settings");
+      }
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -37,8 +44,8 @@ export default function Settings() {
     return (
       <div>
         <div className="page-header">
-          <h1 className="page-title">Settings</h1>
-          <p className="page-subtitle">Configure workspace integrations and preferences</p>
+          <h1 className="page-title">Observability</h1>
+          <p className="page-subtitle">Configure OpenTelemetry export and monitoring</p>
         </div>
         <div className="alert alert-info">No workspace selected. Please select a workspace from the top bar.</div>
       </div>
@@ -48,8 +55,8 @@ export default function Settings() {
   return (
     <div>
       <div className="page-header">
-        <h1 className="page-title">Settings</h1>
-        <p className="page-subtitle">Configure workspace integrations and preferences</p>
+        <h1 className="page-title">Observability</h1>
+        <p className="page-subtitle">Configure OpenTelemetry export and monitoring</p>
       </div>
 
       <div className="card settings-section">
@@ -92,8 +99,8 @@ export default function Settings() {
         </div>
 
         {canEdit && (
-          <button className="btn btn-primary" onClick={handleSave}>
-            {saved ? "Saved!" : "Save Settings"}
+          <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+            {saving ? "Saving..." : "Save"}
           </button>
         )}
       </div>

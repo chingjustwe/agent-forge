@@ -3,7 +3,18 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, LineChart, Line, P
 import { getObservabilitySummary, getTokenDaily, getLatency, getErrors, ObservabilitySummary, DailyToken, LatencyData, ErrorGroup } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
 
-const COLORS = ["#6C5CE7", "#00D2FF", "#00E676", "#FFD600", "#FF5252", "#448AFF"];
+// New design-system color palette for charts
+const CHART_COLORS = ["#2563ef", "#3a81f6", "#91c5ff", "#f59e0b", "#ef4444", "#8b5cf6"];
+// Recharts-compatible hardcoded dark colors
+const CHART_TEXT = "#fafafa";
+const CHART_MUTED = "#737373";
+const CHART_GRID = "#262626";
+const CHART_TOOLTIP_STYLE = {
+  background: "#1a1a1a",
+  border: "1px solid #333",
+  borderRadius: 8,
+  color: CHART_TEXT,
+};
 
 export default function Dashboard() {
   const { currentWorkspaceId } = useWorkspace();
@@ -65,14 +76,12 @@ export default function Dashboard() {
           <h3 className="chart-card-title">Token Usage (Daily)</h3>
           <ResponsiveContainer width="100%" height={260}>
             <BarChart data={tokens}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#2A2A3E" />
-              <XAxis dataKey="date" tick={{ fill: "#8888A0", fontSize: 12 }} />
-              <YAxis tick={{ fill: "#8888A0", fontSize: 12 }} />
-              <Tooltip
-                contentStyle={{ background: "#1A1A2E", border: "1px solid #2A2A3E", borderRadius: 8, color: "#E8E8F0" }}
-              />
-              <Bar dataKey="input_tokens" fill="#6C5CE7" name="Input" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="output_tokens" fill="#00D2FF" name="Output" radius={[4, 4, 0, 0]} />
+              <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID} />
+              <XAxis dataKey="date" tick={{ fill: CHART_MUTED, fontSize: 12 }} />
+              <YAxis tick={{ fill: CHART_MUTED, fontSize: 12 }} />
+              <Tooltip contentStyle={CHART_TOOLTIP_STYLE} />
+              <Bar dataKey="input_tokens" fill="#2563ef" name="Input" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="output_tokens" fill="#3a81f6" name="Output" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -85,15 +94,13 @@ export default function Dashboard() {
             </div>
             <ResponsiveContainer width="100%" height={220}>
               <LineChart data={latency.over_time}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#2A2A3E" />
-                <XAxis dataKey="bucket" tick={{ fill: "#8888A0", fontSize: 12 }} />
-                <YAxis tick={{ fill: "#8888A0", fontSize: 12 }} />
-                <Tooltip
-                  contentStyle={{ background: "#1A1A2E", border: "1px solid #2A2A3E", borderRadius: 8, color: "#E8E8F0" }}
-                />
-                <Line type="monotone" dataKey="p50" stroke="#6C5CE7" name="p50" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="p95" stroke="#00D2FF" name="p95" strokeWidth={2} dot={false} />
-                <Line type="monotone" dataKey="p99" stroke="#FF5252" name="p99" strokeWidth={2} dot={false} />
+                <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID} />
+                <XAxis dataKey="bucket" tick={{ fill: CHART_MUTED, fontSize: 12 }} />
+                <YAxis tick={{ fill: CHART_MUTED, fontSize: 12 }} />
+                <Tooltip contentStyle={CHART_TOOLTIP_STYLE} />
+                <Line type="monotone" dataKey="p50" stroke="#2563ef" name="p50" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="p95" stroke="#3a81f6" name="p95" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="p99" stroke="#ef4444" name="p99" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -112,13 +119,11 @@ export default function Dashboard() {
                   cy="50%"
                   outerRadius={90}
                   label={({ error_type, count }) => `${error_type} (${count})`}
-                  labelLine={{ stroke: "#2A2A3E" }}
+                  labelLine={{ stroke: CHART_GRID }}
                 >
-                  {errors.map((_, idx) => <Cell key={idx} fill={COLORS[idx % COLORS.length]} />)}
+                  {errors.map((_, idx) => <Cell key={idx} fill={CHART_COLORS[idx % CHART_COLORS.length]} />)}
                 </Pie>
-                <Tooltip
-                  contentStyle={{ background: "#1A1A2E", border: "1px solid #2A2A3E", borderRadius: 8, color: "#E8E8F0" }}
-                />
+                <Tooltip contentStyle={CHART_TOOLTIP_STYLE} />
               </PieChart>
             </ResponsiveContainer>
           </div>

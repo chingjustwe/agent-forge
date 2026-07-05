@@ -11,6 +11,12 @@ import {
   revokeWorkspaceInvitation,
 } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
+import { useToast } from "../components/Toast";
+import { Modal } from "../components/Modal";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { EmptyState } from "../components/EmptyState";
+import { Dropdown } from "../components/Dropdown";
+import { SkeletonTable } from "../components/Skeleton";
 
 export default function WorkspaceInvitations() {
   const { token } = useParams<{ token?: string }>();
@@ -26,29 +32,26 @@ export default function WorkspaceInvitations() {
 // ---------------------------------------------------------------------------
 function ManageInvitationsPage() {
   const { currentWorkspaceId, currentRole } = useWorkspace();
+  const toast = useToast();
   const [invitations, setInvitations] = useState<WorkspaceInvitation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [messageType, setMessageType] = useState<"error" | "success">("error");
 
-  // Create-form state
-  const [showForm, setShowForm] = useState(false);
+  // Create-form modal state
+  const [showCreateModal, setShowCreateModal] = useState(false);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("member");
   const [expiresInDays, setExpiresInDays] = useState(7);
   const [creating, setCreating] = useState(false);
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
 
+  // Confirm dialog for revoke
+  const [revokeTarget, setRevokeTarget] = useState<WorkspaceInvitation | null>(null);
+  const [revoking, setRevoking] = useState(false);
+
   const canManage =
     currentRole === "workspace_admin" ||
-    currentRole === "workspace_owner" ||
     currentRole === "tenant_admin";
-
-  function showMsg(msg: string, type: "error" | "success" = "error") {
-    setMessage(msg);
-    setMessageType(type);
-  }
 
   async function refresh() {
     if (!currentWorkspaceId) return;
@@ -69,12 +72,10 @@ function ManageInvitationsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentWorkspaceId]);
 
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleCreate() {
     if (!currentWorkspaceId) return;
     setCreating(true);
     setError(null);
-    setMessage(null);
     try {
       const trimmedEmail = email.trim();
       const inv = await createWorkspaceInvitation(currentWorkspaceId, {
@@ -82,28 +83,31 @@ function ManageInvitationsPage() {
         role,
         expires_in_days: expiresInDays,
       });
-      showMsg(`Invitation created: ${invitationLink(inv.token)}`, "success");
+      toast.success("Invitation created", invitationLink(inv.token));
       setEmail("");
       setRole("member");
       setExpiresInDays(7);
-      setShowForm(false);
+      setShowCreateModal(false);
       await refresh();
     } catch (e: unknown) {
-      showMsg(e instanceof Error ? e.message : "Failed to create invitation");
+      toast.error("Create failed", e instanceof Error ? e.message : "Failed to create invitation");
     } finally {
       setCreating(false);
     }
   }
 
-  async function handleRevoke(inv: WorkspaceInvitation) {
-    if (!currentWorkspaceId) return;
-    if (!confirm(`Revoke invitation for ${inv.email || "anyone"}? The link will stop working immediately.`)) return;
+  async function handleRevokeConfirm() {
+    if (!currentWorkspaceId || !revokeTarget) return;
+    setRevoking(true);
     try {
-      await revokeWorkspaceInvitation(currentWorkspaceId, inv.id);
-      setInvitations(prev => prev.filter(x => x.id !== inv.id));
-      showMsg("Invitation revoked", "success");
+      await revokeWorkspaceInvitation(currentWorkspaceId, revokeTarget.id);
+      setInvitations(prev => prev.filter(x => x.id !== revokeTarget.id));
+      toast.success("Invitation revoked");
+      setRevokeTarget(null);
     } catch (e: unknown) {
-      showMsg(e instanceof Error ? e.message : "Failed to revoke invitation");
+      toast.error("Revoke failed", e instanceof Error ? e.message : "Failed to revoke invitation");
+    } finally {
+      setRevoking(false);
     }
   }
 
@@ -112,9 +116,9 @@ function ManageInvitationsPage() {
     try {
       await navigator.clipboard.writeText(link);
       setCopiedToken(inv.token);
+      toast.success("Link copied", "Invite link has been copied to clipboard.");
       setTimeout(() => setCopiedToken(null), 2000);
     } catch {
-      // Fallback: open the link in a new window for manual copy.
       window.prompt("Copy this link:", link);
     }
   }
@@ -152,67 +156,24 @@ function ManageInvitationsPage() {
           <h1 className="page-title">Invitations</h1>
           <p className="page-subtitle">Generate shareable links to invite people to this workspace</p>
         </div>
-        <button className="btn btn-primary" onClick={() => setShowForm(s => !s)}>
-          {showForm ? "Cancel" : "+ New Invitation"}
+        <button className="btn btn-primary" onClick={() => setShowCreateModal(true)}>
+          + New Invitation
         </button>
       </div>
 
-      {message && <div className={`alert alert-${messageType}`}>{message}</div>}
       {error && <div className="alert alert-error">{error}</div>}
 
-      {showForm && (
-        <div className="card" style={{ marginBottom: 20 }}>
-          <div className="card-header">
-            <h3 className="card-title">Create Invitation</h3>
-          </div>
-          <form onSubmit={handleCreate} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <div className="form-group">
-              <label className="form-label">Email (optional — leave blank for a generic "anyone with link" invite)</label>
-              <input
-                type="email"
-                value={email}
-                onChange={e => setEmail(e.target.value)}
-                placeholder="invitee@example.com"
-              />
-            </div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <div className="form-group" style={{ flex: 1 }}>
-                <label className="form-label">Role</label>
-                <select value={role} onChange={e => setRole(e.target.value)}>
-                  <option value="member">Member</option>
-                  <option value="workspace_admin">Workspace Admin</option>
-                  <option value="workspace_owner">Workspace Owner</option>
-                </select>
-              </div>
-              <div className="form-group" style={{ width: 160 }}>
-                <label className="form-label">Expires in (days)</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={365}
-                  value={expiresInDays}
-                  onChange={e => setExpiresInDays(Number(e.target.value))}
-                />
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button type="submit" className="btn btn-primary" disabled={creating}>
-                {creating ? "Creating..." : "Create Invitation"}
-              </button>
-              <button type="button" className="btn btn-secondary" onClick={() => setShowForm(false)}>
-                Cancel
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
       {loading ? (
-        <div className="alert alert-info">Loading invitations...</div>
+        <SkeletonTable rows={5} cols={6} />
       ) : invitations.length === 0 ? (
-        <div className="alert alert-info">
-          No invitations yet. Click <strong>+ New Invitation</strong> to create one.
-        </div>
+        <EmptyState
+          title="No invitations yet"
+          description="Create an invitation link to invite people to this workspace."
+          action={{
+            label: "+ New Invitation",
+            onClick: () => setShowCreateModal(true),
+          }}
+        />
       ) : (
         <div className="table-container">
           <table>
@@ -223,7 +184,7 @@ function ManageInvitationsPage() {
                 <th>Status</th>
                 <th>Expires</th>
                 <th>Created</th>
-                <th style={{ width: 1 }}>Actions</th>
+                <th style={{ width: 1 }}></th>
               </tr>
             </thead>
             <tbody>
@@ -238,6 +199,7 @@ function ManageInvitationsPage() {
                   : inv.is_expired
                   ? "badge-error"
                   : "badge-warning";
+                const isDisabled = inv.is_accepted || inv.is_expired;
                 return (
                   <tr key={inv.id}>
                     <td>{inv.email || <em style={{ color: "var(--text-muted)" }}>Anyone with link</em>}</td>
@@ -250,26 +212,21 @@ function ManageInvitationsPage() {
                       {formatDate(inv.created_at)}
                     </td>
                     <td>
-                      <div style={{ display: "flex", gap: 6 }}>
-                        <button
-                          className="btn btn-secondary"
-                          style={{ padding: "4px 10px", fontSize: "0.78rem" }}
-                          onClick={() => handleCopyLink(inv)}
-                          disabled={inv.is_accepted || inv.is_expired}
-                          title="Copy invite link"
-                        >
-                          {copiedToken === inv.token ? "Copied!" : "Copy link"}
-                        </button>
-                        <button
-                          className="btn btn-danger"
-                          style={{ padding: "4px 10px", fontSize: "0.78rem" }}
-                          onClick={() => handleRevoke(inv)}
-                          disabled={inv.is_accepted}
-                          title="Revoke invitation"
-                        >
-                          Revoke
-                        </button>
-                      </div>
+                      <Dropdown
+                        items={[
+                          {
+                            label: copiedToken === inv.token ? "Copied!" : "Copy link",
+                            onClick: () => handleCopyLink(inv),
+                            disabled: isDisabled,
+                          },
+                          {
+                            label: "Revoke",
+                            onClick: () => setRevokeTarget(inv),
+                            variant: "danger" as const,
+                            disabled: inv.is_accepted,
+                          },
+                        ]}
+                      />
                     </td>
                   </tr>
                 );
@@ -278,6 +235,75 @@ function ManageInvitationsPage() {
           </table>
         </div>
       )}
+
+      {/* Create Invitation Modal */}
+      <Modal
+        open={showCreateModal}
+        onClose={() => setShowCreateModal(false)}
+        title="Create Invitation"
+        width="md"
+        footer={
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button
+              className="btn btn-secondary"
+              onClick={() => setShowCreateModal(false)}
+              disabled={creating}
+            >
+              Cancel
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={handleCreate}
+              disabled={creating}
+            >
+              {creating ? "Creating..." : "Create Invitation"}
+            </button>
+          </div>
+        }
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div className="form-group">
+            <label className="form-label">Email (optional -- leave blank for a generic "anyone with link" invite)</label>
+            <input
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="invitee@example.com"
+            />
+          </div>
+          <div style={{ display: "flex", gap: 12 }}>
+            <div className="form-group" style={{ flex: 1 }}>
+              <label className="form-label">Role</label>
+              <select value={role} onChange={e => setRole(e.target.value)}>
+                <option value="member">Member</option>
+                <option value="workspace_admin">Workspace Admin</option>
+              </select>
+            </div>
+            <div className="form-group" style={{ width: 160 }}>
+              <label className="form-label">Expires in (days)</label>
+              <input
+                type="number"
+                min={1}
+                max={365}
+                value={expiresInDays}
+                onChange={e => setExpiresInDays(Number(e.target.value))}
+              />
+            </div>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Revoke Confirm Dialog */}
+      <ConfirmDialog
+        open={!!revokeTarget}
+        onClose={() => setRevokeTarget(null)}
+        onConfirm={handleRevokeConfirm}
+        title="Revoke Invitation"
+        description={`Revoke invitation for ${revokeTarget?.email || "anyone"}? The link will stop working immediately.`}
+        confirmText="Revoke"
+        variant="danger"
+        loading={revoking}
+      />
     </div>
   );
 }

@@ -68,7 +68,7 @@ async def test_list_workspaces_returns_real_member_count(app):
 
 
 async def test_admin_list_workspaces_returns_owner_email(app):
-    """`/api/v1/admin/workspaces` must populate owner with the workspace_owner's email."""
+    """`/api/v1/admin/workspaces` must populate owner with the workspace_admin's email."""
     from src.infra.db.engine import async_session
     from src.infra.db.models import Tenant, Workspace, User, WorkspaceMember
 
@@ -84,7 +84,7 @@ async def test_admin_list_workspaces_returns_owner_email(app):
         session.add(User(id=owner_id, tenant_id=tid, email=owner_email, name="Owner"))
         session.add(
             WorkspaceMember(
-                workspace_id=ws_id, user_id=owner_id, role="workspace_owner"
+                workspace_id=ws_id, user_id=owner_id, role="workspace_admin"
             )
         )
         await session.commit()
@@ -101,7 +101,7 @@ async def test_admin_list_workspaces_returns_owner_email(app):
 
 
 async def test_admin_list_workspaces_no_owner_returns_empty(app):
-    """A workspace with no workspace_owner member must return owner == ''."""
+    """A workspace with no workspace_admin member must return owner == ''."""
     from src.infra.db.engine import async_session
     from src.infra.db.models import Tenant, Workspace, User, WorkspaceMember
 
@@ -112,7 +112,7 @@ async def test_admin_list_workspaces_no_owner_returns_empty(app):
     async with async_session() as session:
         session.add(Tenant(id=tid, name="T", domain=f"{tid}.test"))
         session.add(Workspace(id=ws_id, tenant_id=tid, name="WS No Owner"))
-        # Add only a plain member — no workspace_owner row
+        # Add only a plain member — no workspace_admin row
         uid = f"u-no-{suffix}"
         session.add(User(id=uid, tenant_id=tid, email=f"{uid}@test.com", name=uid))
         session.add(WorkspaceMember(workspace_id=ws_id, user_id=uid, role="member"))

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchTenants, fetchUsers, fetchAdminWorkspaces, fetchUsage, Tenant, AdminUser, AdminWorkspace, UsageData } from "../api";
+import { SkeletonTable, SkeletonText } from "../components/Skeleton";
 
 export default function AdminDashboard() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
@@ -23,7 +24,24 @@ export default function AdminDashboard() {
     });
   }, []);
 
-  if (loading) return <div className="loading">Loading admin dashboard</div>;
+  if (loading) {
+    return (
+      <div>
+        <div className="page-header">
+          <h1 className="page-title">Admin Dashboard</h1>
+          <p className="page-subtitle">Platform-wide overview and management</p>
+        </div>
+        <div className="stat-grid">
+          {[1, 2, 3, 4].map(i => (
+            <div key={i} className="stat-card">
+              <SkeletonText lines={2} />
+            </div>
+          ))}
+        </div>
+        <SkeletonTable rows={5} cols={4} />
+      </div>
+    );
+  }
 
   const totalUsers = users.length;
   const totalWorkspaces = workspaces.length;
@@ -83,13 +101,6 @@ export default function AdminDashboard() {
           </div>
         </div>
       )}
-
-      <div className="admin-nav">
-        <a href="/admin/users" className="admin-nav-link">👥 Manage Users</a>
-        <a href="/admin/workspaces" className="admin-nav-link">🏢 Manage Workspaces</a>
-        <a href="/admin/audit" className="admin-nav-link">📝 Audit Log</a>
-        <a href="/admin/usage" className="admin-nav-link">📈 Usage</a>
-      </div>
     </div>
   );
 }

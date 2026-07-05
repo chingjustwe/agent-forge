@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infra.db.models import Workspace, WorkspaceMember
 from src.infra.db.session import get_db
+from src.gateway.auth.permissions import get_role_permissions, get_frontend_tabs, get_api_key_scopes
 
 
 def _order_by_activity():
@@ -47,7 +48,7 @@ async def list_my_workspaces(request: Request, db: AsyncSession = Depends(get_db
     """List workspaces the current user is a member of, with their role in each.
 
     - ``tenant_admin`` sees every non-archived workspace in their tenant,
-      each reported as ``workspace_owner``.
+      each reported as ``workspace_admin``.
     - Other users see only the workspaces where they have a
       ``WorkspaceMember`` row, with their per-workspace role.
     - Archived workspaces are always excluded.
@@ -88,7 +89,9 @@ async def list_my_workspaces(request: Request, db: AsyncSession = Depends(get_db
             {
                 "id": w.id,
                 "name": w.name,
-                "role": "workspace_owner",
+                "slug": w.slug,
+                "icon": w.icon,
+                "role": "workspace_admin",
                 "created_at": w.created_at.isoformat() if w.created_at else None,
             }
             for w in workspaces
@@ -110,6 +113,8 @@ async def list_my_workspaces(request: Request, db: AsyncSession = Depends(get_db
             {
                 "id": ws.id,
                 "name": ws.name,
+                "slug": ws.slug,
+                "icon": ws.icon,
                 "role": role,
                 "created_at": ws.created_at.isoformat() if ws.created_at else None,
             }
@@ -118,3 +123,35 @@ async def list_my_workspaces(request: Request, db: AsyncSession = Depends(get_db
 
     _workspace_cache[user_id] = (now, body)
     return body
+
+
+@router.get("/api/v1/permissions")
+async def get_my_permissions(request: Request, db: AsyncSession = Depends(get_db)):
+    """Return current user's permissions and frontend tab visibility."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"code": "UNAUTHORIZED", "message": "Not authenticated"}},
+        )
+
+    user_role = user.get("role", "")
+    permissions = get_role_permissions(user_role)
+
+    # Filter frontend tabs based on user's permissions
+    all_tabs = get_frontend_tabs()
+    visible_tabs = {}
+    if "*" in permissions:
+        # tenant_admin sees all tabs
+        visible_tabs = dict(all_tabs)
+    else:
+        for path, required_perm in all_tabs.items():
+            if required_perm is None or required_perm in permissions:
+                visible_tabs[path] = required_perm
+
+    return {
+        "role": user_role,
+        "permissions": permissions,
+        "frontend_tabs": visible_tabs,
+        "api_key_scopes": get_api_key_scopes(),
+    }

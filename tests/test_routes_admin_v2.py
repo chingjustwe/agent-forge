@@ -27,10 +27,10 @@ async def tenant_admin_token():
     })
 
 
-async def _seed_workspace_owner(
+async def _seed_workspace_admin(
     ws_id: str = "ws-1",
     user_id: str = "owner-uuid",
-    role: str = "workspace_owner",
+    role: str = "workspace_admin",
     email: str = "owner@test.com",
 ) -> str:
     """Seed a workspace + WorkspaceMember(owner) and return a JWT."""
@@ -44,6 +44,7 @@ async def _seed_workspace_owner(
             tenant_id="tenant-uuid",
             user_id=user_id,
             user_role=role,
+            tenant_role=role,
             email=email,
             name=user_id,
         )
@@ -52,8 +53,8 @@ async def _seed_workspace_owner(
 
 
 @pytest.fixture
-async def workspace_owner_token():
-    return await _seed_workspace_owner()
+async def workspace_admin_token():
+    return await _seed_workspace_admin()
 
 
 @pytest.fixture
@@ -252,7 +253,7 @@ async def test_invite_full_flow(app, tenant_admin_token):
     """
     raw_tokens: list[str] = []
 
-    def _capture_token(email: str, invite_url: str) -> None:
+    def _capture_token(email: str, invite_url: str, expires_in_days: int = 7) -> None:
         match = re.search(r"token=([^&\s]+)", invite_url)
         if match:
             raw_tokens.append(match.group(1))
@@ -264,7 +265,7 @@ async def test_invite_full_flow(app, tenant_admin_token):
             resp = await ac.post(
                 "/api/v1/admin/users/invite",
                 headers={"Authorization": f"Bearer {tenant_admin_token}"},
-                json={"email": "full-flow@test.com", "role": "workspace_owner"},
+                json={"email": "full-flow@test.com", "role": "workspace_admin"},
             )
             assert resp.status_code == 201
 
@@ -276,7 +277,7 @@ async def test_invite_full_flow(app, tenant_admin_token):
         assert resp.status_code == 200
         info = resp.json()
         assert info["email"] == "full-flow@test.com"
-        assert info["role"] == "workspace_owner"
+        assert info["role"] == "workspace_admin"
 
         # 3) Accept the invite
         resp = await ac.post(
@@ -288,7 +289,7 @@ async def test_invite_full_flow(app, tenant_admin_token):
         assert "token" in body
         assert body["user"]["email"] == "full-flow@test.com"
         assert body["user"]["name"] == "Full Flow User"
-        assert body["user"]["role"] == "workspace_owner"
+        assert body["user"]["role"] == "workspace_admin"
 
         # 4) Log in with the new password
         resp = await ac.post(
@@ -298,7 +299,7 @@ async def test_invite_full_flow(app, tenant_admin_token):
         assert resp.status_code == 200
         body = resp.json()
         assert "token" in body
-        assert body["user"]["role"] == "workspace_owner"
+        assert body["user"]["role"] == "workspace_admin"
 
         # 5) Reusing the token should fail (marked used_at)
         resp = await ac.get(f"/api/v1/auth/invite?token={token}")
@@ -386,7 +387,7 @@ async def test_invite_after_delete(app, tenant_admin_token):
     """Deleting a user then re-inviting the same email should succeed (re-activate)."""
     mock_calls: list[str] = []
 
-    def _capture(email: str, invite_url: str) -> None:
+    def _capture(email: str, invite_url: str, expires_in_days: int = 7) -> None:
         mock_calls.append(email)
 
     transport = ASGITransport(app=app)
@@ -420,17 +421,17 @@ async def test_invite_after_delete(app, tenant_admin_token):
             assert data["email"] == "delete-then-reinvite@test.com"
             assert data["role"] == "workspace_admin"
 
-        # 4) Ensure the user is listed (not archived)
+        # 4) Ensure the user is in pending invitations (not active users yet)
         resp = await ac.get(
-            "/api/v1/admin/users",
+            "/api/v1/admin/pending-invitations",
             headers={"Authorization": f"Bearer {tenant_admin_token}"},
         )
-        active_emails = [u["email"] for u in resp.json()]
-        assert "delete-then-reinvite@test.com" in active_emails
+        pending_emails = [p["email"] for p in resp.json()]
+        assert "delete-then-reinvite@test.com" in pending_emails
 
 
 async def test_list_workspaces_requires_tenant_admin(app, member_token):
-    """P0-2: list_workspaces is now tenant_admin-only (was workspace_owner)."""
+    """P0-2: list_workspaces is now tenant_admin-only (was workspace_admin)."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/api/v1/admin/workspaces", headers={"Authorization": f"Bearer {member_token}"})
@@ -447,38 +448,38 @@ async def test_list_workspaces_as_tenant_admin(app, tenant_admin_token):
         assert isinstance(data, list)
 
 
-async def test_update_workspace_not_found(app, workspace_owner_token):
-    """Workspace owner of nonexistent ws gets 404 (after RBAC passes via short-circuit...).
+async def test_update_workspace_not_found(app, workspace_admin_token):
+    """Workspace admin of nonexistent ws gets 404 (after RBAC passes via short-circuit...).
 
     Note: 'nonexistent' workspace has no WorkspaceMember row for this user,
     so RBAC returns 403 — but the test still asserts the request fails.
-    Update: P0-2 requires workspace_owner membership. Since 'nonexistent'
+    Update: P0-2 requires workspace_admin membership. Since 'nonexistent'
     has no membership row, we expect 403 (not 404).
     """
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.put(
             "/api/v1/admin/workspaces/nonexistent",
-            headers={"Authorization": f"Bearer {workspace_owner_token}"},
+            headers={"Authorization": f"Bearer {workspace_admin_token}"},
             json={"name": "Updated WS"},
         )
         # 'nonexistent' has no WorkspaceMember row for this user → 403
         assert resp.status_code == 403
 
 
-async def test_archive_workspace_not_found(app, workspace_owner_token):
+async def test_archive_workspace_not_found(app, workspace_admin_token):
     """Same as above — nonexistent workspace yields 403 (no membership)."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.delete(
             "/api/v1/admin/workspaces/nonexistent",
-            headers={"Authorization": f"Bearer {workspace_owner_token}"},
+            headers={"Authorization": f"Bearer {workspace_admin_token}"},
         )
         assert resp.status_code == 403
 
 
 async def test_usage_as_tenant_admin(app, tenant_admin_token):
-    """P0-2: /admin/usage is now tenant_admin-only (was workspace_owner)."""
+    """P0-2: /admin/usage is now tenant_admin-only (was workspace_admin)."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/api/v1/admin/usage", headers={"Authorization": f"Bearer {tenant_admin_token}"})
@@ -517,13 +518,13 @@ async def test_audit_log_with_filters(app, tenant_admin_token):
         assert resp.status_code == 200
 
 
-async def test_quota_update_not_member(app, workspace_owner_token):
-    """'nonexistent' workspace — owner has no WorkspaceMember row → 403."""
+async def test_quota_update_not_member(app, workspace_admin_token):
+    """'nonexistent' workspace — admin has no WorkspaceMember row → 403."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.put(
             "/api/v1/admin/workspaces/nonexistent/quota",
-            headers={"Authorization": f"Bearer {workspace_owner_token}"},
+            headers={"Authorization": f"Bearer {workspace_admin_token}"},
             json={"max_tokens_per_day": 500000},
         )
         assert resp.status_code == 403
@@ -531,7 +532,7 @@ async def test_quota_update_not_member(app, workspace_owner_token):
 
 async def test_quota_update_as_workspace_admin(app):
     """P0-2: workspace_admin can update quota for their workspace."""
-    token = await _seed_workspace_owner(
+    token = await _seed_workspace_admin(
         ws_id="ws-quota-admin",
         user_id="qadmin-1",
         role="workspace_admin",

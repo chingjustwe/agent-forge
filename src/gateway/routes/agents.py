@@ -18,17 +18,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.gateway.auth.rbac import require_tenant_role, require_workspace_role
+from src.gateway.auth.rbac import require_permission
 from src.infra.db.models import AgentConfig, AuditLog, Workspace
 from src.infra.db.session import get_db
 
 router = APIRouter()
 
 ALLOWED_FRAMEWORKS = ("direct_llm", "adk", "langgraph")
-# All workspace-level roles that may read agent configs. ``tenant_admin``
-# short-circuits in RBAC and is not listed here.
-_READ_ROLES = ("viewer", "member", "workspace_admin", "workspace_owner")
-_WRITE_ROLES = ("workspace_admin", "workspace_owner")
 
 
 class CreateAgentRequest(BaseModel):
@@ -101,7 +97,7 @@ async def create_agent(
     body: CreateAgentRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _ctx=Depends(require_workspace_role("workspace_id", *_WRITE_ROLES)),
+    _ctx=Depends(require_permission("agents:write", workspace_id_param="workspace_id")),
 ):
     """Create a new agent config in this workspace."""
     if body.framework not in ALLOWED_FRAMEWORKS:
@@ -142,7 +138,7 @@ async def list_agents(
     workspace_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _ctx=Depends(require_workspace_role("workspace_id", *_READ_ROLES)),
+    _ctx=Depends(require_permission("agents:read", workspace_id_param="workspace_id")),
 ):
     """List all agent configs in this workspace (newest first)."""
     result = await db.execute(
@@ -160,7 +156,7 @@ async def get_agent(
     agent_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _ctx=Depends(require_workspace_role("workspace_id", *_READ_ROLES)),
+    _ctx=Depends(require_permission("agents:read", workspace_id_param="workspace_id")),
 ):
     """Fetch a single agent config. Cross-workspace lookups return 404."""
     result = await db.execute(
@@ -182,7 +178,7 @@ async def update_agent(
     body: UpdateAgentRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _ctx=Depends(require_workspace_role("workspace_id", *_WRITE_ROLES)),
+    _ctx=Depends(require_permission("agents:write", workspace_id_param="workspace_id")),
 ):
     """Update name / framework / config. Cross-workspace lookups return 404."""
     result = await db.execute(
@@ -233,7 +229,7 @@ async def delete_agent(
     agent_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _ctx=Depends(require_workspace_role("workspace_id", *_WRITE_ROLES)),
+    _ctx=Depends(require_permission("agents:write", workspace_id_param="workspace_id")),
 ):
     """Hard-delete an agent config. Cross-workspace lookups return 404."""
     result = await db.execute(
@@ -274,7 +270,7 @@ async def copy_agent_to(
     target_workspace_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:workspaces:write")),
 ):
     """Copy an agent config from one workspace to another (same tenant).
 

@@ -310,7 +310,7 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
         tenant_role = user.get("role", "member")
         can_write = (
             tenant_role == "tenant_admin"
-            or member_role in ("workspace_owner", "workspace_admin")
+            or member_role in ("workspace_admin",)
             or cs.owner_id == user_id
         )
         if not can_write:

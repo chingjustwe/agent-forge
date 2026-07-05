@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchUsage, UsageData } from "../api";
+import { EmptyState } from "../components/EmptyState";
+import { SkeletonTable, SkeletonText } from "../components/Skeleton";
 
 export default function AdminUsage() {
   const [data, setData] = useState<UsageData | null>(null);
@@ -32,7 +34,16 @@ export default function AdminUsage() {
       </div>
 
       {loading ? (
-        <div className="loading">Loading usage data</div>
+        <>
+          <div className="stat-grid">
+            {[1, 2, 3].map(i => (
+              <div key={i} className="stat-card">
+                <SkeletonText lines={2} />
+              </div>
+            ))}
+          </div>
+          <SkeletonTable rows={5} cols={4} />
+        </>
       ) : data ? (
         <>
           <div className="stat-grid">
@@ -79,9 +90,10 @@ export default function AdminUsage() {
           )}
         </>
       ) : (
-        <div className="card" style={{ textAlign: "center", padding: 40, color: "var(--text-muted)" }}>
-          No usage data available
-        </div>
+        <EmptyState
+          title="No usage data"
+          description="No usage data is available for the selected period."
+        />
       )}
     </div>
   );

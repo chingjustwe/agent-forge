@@ -77,6 +77,7 @@ async def setup_workspace_with_member(
                 email=email,
                 name=name,
                 role=tenant_role,
+                hashed_password="hashed-seed-pw",
             )
         )
         await db_session.flush()

@@ -75,7 +75,7 @@ class TestRoles:
         assert has_permission("viewer", "member") is False
         assert has_permission("viewer", "tenant_admin") is False
         assert has_permission("workspace_admin", "member") is True
-        assert has_permission("workspace_owner", "workspace_admin") is True
+        assert has_permission("tenant_admin", "workspace_admin") is True
         assert has_permission("member", "workspace_admin") is False
 
     def test_role_enum_values(self):

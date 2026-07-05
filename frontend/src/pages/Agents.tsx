@@ -13,6 +13,12 @@ import {
   User,
 } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
+import { Modal } from "../components/Modal";
+import { useToast } from "../components/Toast";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { EmptyState } from "../components/EmptyState";
+import { Dropdown } from "../components/Dropdown";
+import { SkeletonTable } from "../components/Skeleton";
 
 const FRAMEWORK_OPTIONS: { value: AgentFramework; label: string }[] = [
   { value: "direct_llm", label: "Direct LLM" },
@@ -55,16 +61,20 @@ function configFields(config: Record<string, unknown>): { model: string; systemP
 
 export default function Agents() {
   const { currentWorkspaceId, currentRole } = useWorkspace();
+  const toast = useToast();
+
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [messageType, setMessageType] = useState<"error" | "success">("error");
 
-  const [showForm, setShowForm] = useState(false);
+  // Create / edit modal state
+  const [formModalOpen, setFormModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<AgentFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+
+  // Delete confirmation state
+  const [deleteTarget, setDeleteTarget] = useState<AgentConfig | null>(null);
 
   // P3-2: cross-workspace copy (tenant_admin only).
   const [user, setUser] = useState<User | null>(null);
@@ -77,13 +87,7 @@ export default function Agents() {
 
   const canManage =
     currentRole === "workspace_admin" ||
-    currentRole === "workspace_owner" ||
     currentRole === "tenant_admin";
-
-  function showMsg(msg: string, type: "error" | "success" = "error") {
-    setMessage(msg);
-    setMessageType(type);
-  }
 
   async function refresh() {
     if (!currentWorkspaceId) return;
@@ -122,37 +126,30 @@ export default function Agents() {
       setTargetWorkspaces(eligible);
       setTargetWsId(eligible[0]?.id || "");
     } catch (e: unknown) {
-      showMsg(e instanceof Error ? e.message : "Failed to load workspaces");
+      toast.error("Failed to load workspaces", e instanceof Error ? e.message : undefined);
     }
   }
 
   async function handleCopySubmit() {
     if (!copyAgent || !currentWorkspaceId || !targetWsId) return;
     setCopying(true);
-    setMessage(null);
     try {
       await copyAgentToWorkspace(currentWorkspaceId, copyAgent.id, targetWsId);
       const targetName =
         targetWorkspaces.find(w => w.id === targetWsId)?.name || targetWsId;
-      showMsg(`Agent copied to ${targetName}`, "success");
+      toast.success("Agent copied", `Copied to ${targetName}`);
       setCopyAgent(null);
     } catch (err: unknown) {
-      showMsg(err instanceof Error ? err.message : "Failed to copy agent");
+      toast.error("Failed to copy agent", err instanceof Error ? err.message : undefined);
     } finally {
       setCopying(false);
     }
   }
 
-  function resetForm() {
+  function openCreateModal() {
     setForm(EMPTY_FORM);
     setEditingId(null);
-    setShowForm(false);
-  }
-
-  function startCreate() {
-    setForm(EMPTY_FORM);
-    setEditingId(null);
-    setShowForm(true);
+    setFormModalOpen(true);
   }
 
   function startEdit(agent: AgentConfig) {
@@ -165,18 +162,20 @@ export default function Agents() {
       temperature: cfg.temperature,
     });
     setEditingId(agent.id);
-    setShowForm(true);
+    setFormModalOpen(true);
   }
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  function openDeleteConfirm(agent: AgentConfig) {
+    setDeleteTarget(agent);
+  }
+
+  async function handleFormSubmit() {
     if (!currentWorkspaceId) return;
     if (!form.name.trim()) {
-      showMsg("Name is required");
+      toast.error("Validation error", "Name is required");
       return;
     }
     setSaving(true);
-    setMessage(null);
     try {
       const config = formToConfig(form);
       if (editingId) {
@@ -185,33 +184,35 @@ export default function Agents() {
           framework: form.framework,
           config,
         });
-        showMsg("Agent updated", "success");
+        toast.success("Agent updated");
       } else {
         await createAgent(currentWorkspaceId, {
           name: form.name.trim(),
           framework: form.framework,
           config,
         });
-        showMsg("Agent created", "success");
+        toast.success("Agent created");
       }
-      resetForm();
+      setFormModalOpen(false);
+      setEditingId(null);
+      setForm(EMPTY_FORM);
       await refresh();
     } catch (err: unknown) {
-      showMsg(err instanceof Error ? err.message : "Failed to save agent");
+      toast.error("Failed to save agent", err instanceof Error ? err.message : undefined);
     } finally {
       setSaving(false);
     }
   }
 
-  async function handleDelete(agent: AgentConfig) {
-    if (!currentWorkspaceId) return;
-    if (!confirm(`Delete agent "${agent.name}"? This cannot be undone.`)) return;
+  async function handleDeleteConfirm() {
+    if (!deleteTarget || !currentWorkspaceId) return;
     try {
-      await deleteAgent(currentWorkspaceId, agent.id);
-      setAgents(prev => prev.filter(a => a.id !== agent.id));
-      showMsg("Agent deleted", "success");
+      await deleteAgent(currentWorkspaceId, deleteTarget.id);
+      setAgents(prev => prev.filter(a => a.id !== deleteTarget.id));
+      toast.success("Agent deleted");
+      setDeleteTarget(null);
     } catch (err: unknown) {
-      showMsg(err instanceof Error ? err.message : "Failed to delete agent");
+      toast.error("Failed to delete agent", err instanceof Error ? err.message : undefined);
     }
   }
 
@@ -222,7 +223,10 @@ export default function Agents() {
           <h1 className="page-title">Agents</h1>
           <p className="page-subtitle">Workspace-scoped agent configurations</p>
         </div>
-        <div className="alert alert-info">No workspace selected. Pick one from the sidebar.</div>
+        <EmptyState
+          title="No workspace selected"
+          description="Pick one from the sidebar."
+        />
       </div>
     );
   }
@@ -235,90 +239,25 @@ export default function Agents() {
           <p className="page-subtitle">Manage agent configurations bound to this workspace</p>
         </div>
         {canManage && (
-          <button className="btn btn-primary" onClick={() => (showForm ? resetForm() : startCreate())}>
-            {showForm && !editingId ? "Cancel" : "+ New Agent"}
+          <button className="btn btn-primary" onClick={openCreateModal}>
+            + New Agent
           </button>
         )}
       </div>
 
-      {message && <div className={`alert alert-${messageType}`}>{message}</div>}
-      {error && <div className="alert alert-error">{error}</div>}
+      {error && <EmptyState title="Error loading agents" description={error} />}
 
-      {showForm && canManage && (
-        <div className="card" style={{ marginBottom: 20 }}>
-          <div className="card-header">
-            <h3 className="card-title">{editingId ? "Edit Agent" : "Create Agent"}</h3>
-          </div>
-          <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <div className="form-group">
-              <label className="form-label">Name</label>
-              <input
-                type="text"
-                value={form.name}
-                onChange={e => setForm({ ...form, name: e.target.value })}
-                maxLength={100}
-                placeholder="e.g. Support Bot"
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Framework</label>
-              <select
-                value={form.framework}
-                onChange={e => setForm({ ...form, framework: e.target.value as AgentFramework })}
-              >
-                {FRAMEWORK_OPTIONS.map(o => (
-                  <option key={o.value} value={o.value}>{o.label}</option>
-                ))}
-              </select>
-            </div>
-            <div className="form-group">
-              <label className="form-label">Model</label>
-              <input
-                type="text"
-                value={form.model}
-                onChange={e => setForm({ ...form, model: e.target.value })}
-                placeholder="e.g. deepseek-chat, gpt-4"
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label">System Prompt</label>
-              <textarea
-                value={form.systemPrompt}
-                onChange={e => setForm({ ...form, systemPrompt: e.target.value })}
-                rows={4}
-                placeholder="You are a helpful assistant."
-              />
-            </div>
-            <div className="form-group" style={{ width: 160 }}>
-              <label className="form-label">Temperature</label>
-              <input
-                type="number"
-                step="0.1"
-                min="0"
-                max="2"
-                value={form.temperature}
-                onChange={e => setForm({ ...form, temperature: e.target.value })}
-              />
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button type="submit" className="btn btn-primary" disabled={saving}>
-                {saving ? "Saving..." : editingId ? "Update Agent" : "Create Agent"}
-              </button>
-              <button type="button" className="btn btn-secondary" onClick={resetForm}>
-                Cancel
-              </button>
-            </div>
-          </form>
-        </div>
+      {!error && loading && <SkeletonTable rows={5} cols={5} />}
+
+      {!error && !loading && agents.length === 0 && (
+        <EmptyState
+          title="No agents yet"
+          description={canManage ? "Create your first agent to get started." : "No agents have been configured for this workspace."}
+          action={canManage ? { label: "+ New Agent", onClick: openCreateModal } : undefined}
+        />
       )}
 
-      {loading ? (
-        <div className="alert alert-info">Loading agents...</div>
-      ) : agents.length === 0 ? (
-        <div className="alert alert-info">
-          No agents yet. {canManage && "Create your first agent."}
-        </div>
-      ) : (
+      {!error && !loading && agents.length > 0 && (
         <div className="table-container">
           <table>
             <thead>
@@ -327,7 +266,7 @@ export default function Agents() {
                 <th>Framework</th>
                 <th>Model</th>
                 <th>Created</th>
-                <th style={{ width: 1 }}>Actions</th>
+                {canManage && <th style={{ width: 1 }}>Actions</th>}
               </tr>
             </thead>
             <tbody>
@@ -337,42 +276,19 @@ export default function Agents() {
                   <tr key={agent.id}>
                     <td>{agent.name}</td>
                     <td><span className="badge badge-primary">{agent.framework}</span></td>
-                    <td>{model || <em style={{ color: "var(--text-muted)" }}>—</em>}</td>
+                    <td>{model || <em style={{ color: "var(--text-muted)" }}>&mdash;</em>}</td>
                     <td style={{ fontSize: "0.82rem", color: "var(--text-secondary)" }}>
                       {formatDate(agent.created_at)}
                     </td>
-                    <td>
-                      {canManage ? (
-                        <div style={{ display: "flex", gap: 6 }}>
-                          <button
-                            className="btn btn-secondary"
-                            style={{ padding: "4px 10px", fontSize: "0.78rem" }}
-                            onClick={() => startEdit(agent)}
-                          >
-                            Edit
-                          </button>
-                          {isTenantAdmin && (
-                            <button
-                              className="btn btn-secondary"
-                              style={{ padding: "4px 10px", fontSize: "0.78rem" }}
-                              onClick={() => openCopyModal(agent)}
-                              title="Copy this agent to another workspace"
-                            >
-                              Copy to...
-                            </button>
-                          )}
-                          <button
-                            className="btn btn-danger"
-                            style={{ padding: "4px 10px", fontSize: "0.78rem" }}
-                            onClick={() => handleDelete(agent)}
-                          >
-                            Delete
-                          </button>
-                        </div>
-                      ) : (
-                        <em style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>read-only</em>
-                      )}
-                    </td>
+                    {canManage && (
+                      <td>
+                        <Dropdown items={[
+                          { label: "Edit", onClick: () => startEdit(agent) },
+                          ...(isTenantAdmin ? [{ label: "Copy to...", onClick: () => openCopyModal(agent) }] : []),
+                          { label: "Delete", onClick: () => openDeleteConfirm(agent), variant: "danger" },
+                        ]} />
+                      </td>
+                    )}
                   </tr>
                 );
               })}
@@ -381,52 +297,131 @@ export default function Agents() {
         </div>
       )}
 
-      {copyAgent && (
-        <div className="modal-backdrop" onClick={() => !copying && setCopyAgent(null)}>
-          <div className="card modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 480 }}>
-            <div className="card-header">
-              <h3 className="card-title">Copy agent to…</h3>
-            </div>
-            <p style={{ color: "var(--text-secondary)", fontSize: "0.88rem", margin: "4px 0 12px" }}>
-              Copies <strong>{copyAgent.name}</strong> into the selected workspace. The original is left untouched.
-            </p>
-            <div className="form-group">
-              <label className="form-label">Target workspace</label>
-              {targetWorkspaces.length === 0 ? (
-                <div className="alert alert-info" style={{ margin: 0 }}>
-                  No other workspaces available to copy to.
-                </div>
-              ) : (
-                <select
-                  value={targetWsId}
-                  onChange={e => setTargetWsId(e.target.value)}
-                  autoFocus
-                >
-                  {targetWorkspaces.map(w => (
-                    <option key={w.id} value={w.id}>{w.name}</option>
-                  ))}
-                </select>
-              )}
-            </div>
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <button
-                className="btn btn-primary"
-                onClick={handleCopySubmit}
-                disabled={copying || !targetWsId}
-              >
-                {copying ? "Copying..." : "Copy"}
-              </button>
-              <button
-                className="btn btn-secondary"
-                onClick={() => setCopyAgent(null)}
-                disabled={copying}
-              >
-                Cancel
-              </button>
-            </div>
+      {/* Create / Edit Modal */}
+      <Modal
+        open={formModalOpen}
+        onClose={() => setFormModalOpen(false)}
+        title={editingId ? "Edit Agent" : "Create Agent"}
+        width="md"
+        footer={
+          <>
+            <button className="btn btn-secondary" onClick={() => setFormModalOpen(false)} disabled={saving}>
+              Cancel
+            </button>
+            <button className="btn btn-primary" onClick={handleFormSubmit} disabled={saving}>
+              {saving ? "Saving..." : editingId ? "Update Agent" : "Create Agent"}
+            </button>
+          </>
+        }
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div className="form-group">
+            <label className="form-label">Name</label>
+            <input
+              type="text"
+              value={form.name}
+              onChange={e => setForm({ ...form, name: e.target.value })}
+              maxLength={100}
+              placeholder="e.g. Support Bot"
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Framework</label>
+            <select
+              value={form.framework}
+              onChange={e => setForm({ ...form, framework: e.target.value as AgentFramework })}
+            >
+              {FRAMEWORK_OPTIONS.map(o => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Model</label>
+            <input
+              type="text"
+              value={form.model}
+              onChange={e => setForm({ ...form, model: e.target.value })}
+              placeholder="e.g. deepseek-chat, gpt-4"
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">System Prompt</label>
+            <textarea
+              value={form.systemPrompt}
+              onChange={e => setForm({ ...form, systemPrompt: e.target.value })}
+              rows={4}
+              placeholder="You are a helpful assistant."
+            />
+          </div>
+          <div className="form-group" style={{ width: 160 }}>
+            <label className="form-label">Temperature</label>
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              max="2"
+              value={form.temperature}
+              onChange={e => setForm({ ...form, temperature: e.target.value })}
+            />
           </div>
         </div>
-      )}
+      </Modal>
+
+      {/* Delete Confirmation */}
+      <ConfirmDialog
+        open={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDeleteConfirm}
+        title="Delete Agent"
+        description={`Delete agent "${deleteTarget?.name}"? This cannot be undone.`}
+        confirmText="Delete"
+        variant="danger"
+      />
+
+      {/* Cross-workspace Copy Modal */}
+      <Modal
+        open={!!copyAgent}
+        onClose={() => !copying && setCopyAgent(null)}
+        title="Copy Agent"
+        width="sm"
+        footer={
+          <>
+            <button className="btn btn-secondary" onClick={() => setCopyAgent(null)} disabled={copying}>
+              Cancel
+            </button>
+            <button
+              className="btn btn-primary"
+              onClick={handleCopySubmit}
+              disabled={copying || !targetWsId}
+            >
+              {copying ? "Copying..." : "Copy"}
+            </button>
+          </>
+        }
+      >
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.88rem", marginBottom: 12 }}>
+          Copies <strong>{copyAgent?.name}</strong> into the selected workspace. The original is left untouched.
+        </p>
+        <div className="form-group">
+          <label className="form-label">Target workspace</label>
+          {targetWorkspaces.length === 0 ? (
+            <div style={{ color: "var(--text-secondary)", fontSize: "0.88rem" }}>
+              No other workspaces available to copy to.
+            </div>
+          ) : (
+            <select
+              value={targetWsId}
+              onChange={e => setTargetWsId(e.target.value)}
+              autoFocus
+            >
+              {targetWorkspaces.map(w => (
+                <option key={w.id} value={w.id}>{w.name}</option>
+              ))}
+            </select>
+          )}
+        </div>
+      </Modal>
     </div>
   );
 }

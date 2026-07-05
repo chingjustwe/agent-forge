@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchAdminAudit, AuditEntry, AuditResponse } from "../api";
+import { EmptyState } from "../components/EmptyState";
+import { SkeletonTable } from "../components/Skeleton";
 
 const ACTIONS = [
   "",
@@ -61,7 +63,7 @@ export default function AdminAuditLog() {
       </div>
 
       {loading ? (
-        <div className="loading">Loading audit log</div>
+        <SkeletonTable rows={8} cols={5} />
       ) : (
         <>
           <div className="table-container">
@@ -76,39 +78,43 @@ export default function AdminAuditLog() {
                 </tr>
               </thead>
               <tbody>
-                {data?.items.map((entry: AuditEntry) => (
-                  <>
-                    <tr
-                      key={entry.id}
-                      onClick={() => setExpandedId(expandedId === entry.id ? null : entry.id)}
-                      className="clickable"
-                    >
-                      <td style={{ fontSize: "0.82rem", color: "var(--text-secondary)" }}>
-                        {new Date(entry.created_at).toLocaleString()}
-                      </td>
-                      <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>{entry.user_id}</td>
-                      <td><span className="badge badge-info">{entry.action}</span></td>
-                      <td style={{ fontSize: "0.82rem" }}>{entry.target_type}:{entry.target_id}</td>
-                      <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.78rem", color: "var(--text-muted)" }}>
-                        {entry.ip_address}
-                      </td>
-                    </tr>
-                    {expandedId === entry.id && (
-                      <tr className="expanded-row">
-                        <td colSpan={5}>
-                          <div className="expanded-content">
-                            <strong>Details</strong>
-                            <pre>{JSON.stringify(entry.details, null, 2)}</pre>
-                          </div>
+                {data?.items.length ? (
+                  data.items.map((entry: AuditEntry) => (
+                    <>
+                      <tr
+                        key={entry.id}
+                        onClick={() => setExpandedId(expandedId === entry.id ? null : entry.id)}
+                        className="clickable"
+                      >
+                        <td style={{ fontSize: "0.82rem", color: "var(--text-secondary)" }}>
+                          {new Date(entry.created_at).toLocaleString()}
+                        </td>
+                        <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>{entry.user_id}</td>
+                        <td><span className="badge badge-info">{entry.action}</span></td>
+                        <td style={{ fontSize: "0.82rem" }}>{entry.target_type}:{entry.target_id}</td>
+                        <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                          {entry.ip_address}
                         </td>
                       </tr>
-                    )}
-                  </>
-                ))}
-                {(!data?.items || data.items.length === 0) && (
+                      {expandedId === entry.id && (
+                        <tr className="expanded-row">
+                          <td colSpan={5}>
+                            <div className="expanded-content">
+                              <strong>Details</strong>
+                              <pre>{JSON.stringify(entry.details, null, 2)}</pre>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </>
+                  ))
+                ) : (
                   <tr>
-                    <td colSpan={5} style={{ textAlign: "center", padding: 32, color: "var(--text-muted)" }}>
-                      No audit entries found
+                    <td colSpan={5}>
+                      <EmptyState
+                        title="No audit entries found"
+                        description="Try adjusting your filters or check back later."
+                      />
                     </td>
                   </tr>
                 )}

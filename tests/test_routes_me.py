@@ -24,7 +24,7 @@ async def test_list_my_workspaces_requires_auth(app):
 @pytest.mark.asyncio
 async def test_list_my_workspaces_as_tenant_admin(app):
     """tenant_admin sees all (non-archived) workspaces in their tenant,
-    each with role=workspace_owner.
+    each with role=workspace_admin.
     """
     suffix = uuid.uuid4().hex[:8]
     tid = f"t-ta-{suffix}"
@@ -64,9 +64,9 @@ async def test_list_my_workspaces_as_tenant_admin(app):
         assert ws2 in ids
         # archived workspace must NOT appear
         assert ws_archived not in ids
-        # tenant_admin sees every workspace as workspace_owner
+        # tenant_admin sees every workspace as workspace_admin
         for w in body:
-            assert w["role"] == "workspace_owner"
+            assert w["role"] == "workspace_admin"
         # names are populated
         names = {w["name"] for w in body}
         assert {"WS One", "WS Two"}.issubset(names)
@@ -186,7 +186,7 @@ async def test_list_my_workspaces_member_multiple(app):
             WorkspaceMember(
                 workspace_id="ws-multi-2",
                 user_id="mem-multi-1",
-                role="workspace_owner",
+                role="workspace_admin",
             )
         )
         await session.commit()
@@ -202,7 +202,7 @@ async def test_list_my_workspaces_member_multiple(app):
         body = resp.json()
         by_id = {w["id"]: w["role"] for w in body}
         assert by_id.get("ws-multi-1") == "member"
-        assert by_id.get("ws-multi-2") == "workspace_owner"
+        assert by_id.get("ws-multi-2") == "workspace_admin"
 
 
 @pytest.mark.asyncio

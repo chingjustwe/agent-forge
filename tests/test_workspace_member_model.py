@@ -243,7 +243,7 @@ class TestWorkspaceMemberMigration:
             assert len(rows) == 2
             for ws_id, user_id, role in rows:
                 assert user_id == "u-1"
-                assert role == "workspace_owner"
+                assert role == "workspace_admin"
         finally:
             _dispose(engine, path)
 

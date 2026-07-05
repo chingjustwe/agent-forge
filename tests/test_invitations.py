@@ -47,10 +47,12 @@ async def _seed_workspace_with_admin(
     tenant_id: str,
     admin_id: str,
     admin_role: str = "workspace_admin",
-    tenant_role: str = "member",
+    tenant_role: str | None = None,
     email: str | None = None,
 ) -> str:
     """Seed tenant + workspace + user + WorkspaceMember(admin). Returns JWT."""
+    if tenant_role is None:
+        tenant_role = admin_role
     async with async_session() as session:
         if not await session.get(Tenant, tenant_id):
             session.add(Tenant(id=tenant_id, name="T", domain=f"{tenant_id}.test"))
@@ -170,12 +172,12 @@ class TestCreateInvitation:
             assert body["is_expired"] is False
 
     @pytest.mark.asyncio
-    async def test_create_as_workspace_owner(self, app):
+    async def test_create_as_workspace_admin(self, app):
         suffix = _uuid.uuid4().hex[:8]
         ws_id = f"ws-co-{suffix}"
         tid = f"t-co-{suffix}"
         token = await _seed_workspace_with_admin(
-            ws_id, tid, f"owner-{suffix}", admin_role="workspace_owner"
+            ws_id, tid, f"owner-{suffix}", admin_role="workspace_admin"
         )
 
         transport = ASGITransport(app=app)

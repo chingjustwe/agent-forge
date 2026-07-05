@@ -42,9 +42,11 @@ async def _seed(
     tenant_id: str,
     user_id: str,
     ws_role: str = "workspace_admin",
-    tenant_role: str = "member",
+    tenant_role: str | None = None,
     email: str | None = None,
 ) -> str:
+    if tenant_role is None:
+        tenant_role = ws_role
     async with async_session() as session:
         if not await session.get(Tenant, tenant_id):
             session.add(Tenant(id=tenant_id, name="T", domain=f"{tenant_id}.test"))
@@ -165,9 +167,9 @@ class TestCopyAgentTo:
         tid = f"t-cp-wa-{suffix}"
         ws_src = f"ws-src-{suffix}"
         ws_dst = f"ws-dst-{suffix}"
-        # workspace_admin only (tenant_role=member)
+        # workspace_admin tenant_role can create agents but cannot copy (needs admin:workspaces:write)
         tok = await _seed(ws_src, tid, f"wa-{suffix}", ws_role="workspace_admin",
-                          tenant_role="member")
+                          tenant_role="workspace_admin")
         async with async_session() as session:
             session.add(Workspace(id=ws_dst, tenant_id=tid, name="Dst"))
             await session.commit()

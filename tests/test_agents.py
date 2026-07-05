@@ -47,10 +47,12 @@ async def _seed(
     tenant_id: str,
     user_id: str,
     ws_role: str = "workspace_admin",
-    tenant_role: str = "member",
+    tenant_role: str | None = None,
     email: str | None = None,
 ) -> str:
     """Seed tenant + workspace + user + WorkspaceMember. Returns JWT."""
+    if tenant_role is None:
+        tenant_role = ws_role
     async with async_session() as session:
         if not await session.get(Tenant, tenant_id):
             session.add(Tenant(id=tenant_id, name="T", domain=f"{tenant_id}.test"))
@@ -155,7 +157,7 @@ class TestCreateAgent:
     @pytest.mark.asyncio
     async def test_owner_can_create(self, app):
         suffix = _uuid.uuid4().hex[:8]
-        tok = await _seed(f"ws-{suffix}", f"t-{suffix}", f"owner-{suffix}", ws_role="workspace_owner")
+        tok = await _seed(f"ws-{suffix}", f"t-{suffix}", f"owner-{suffix}", ws_role="workspace_admin")
         resp = await _create_agent_via_api(app, tok, f"ws-{suffix}")
         assert resp.status_code == 201
 

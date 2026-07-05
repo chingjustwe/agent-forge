@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.gateway.auth.rbac import require_workspace_role
+from src.gateway.auth.rbac import require_permission
 from src.gateway.routes.me import invalidate_workspace_cache
 from src.infra.db.models import (
     AuditLog,
@@ -34,7 +34,7 @@ from src.infra.db.session import get_db
 router = APIRouter()
 
 DEFAULT_EXPIRES_DAYS = 7
-ALLOWED_INVITE_ROLES = ("member", "workspace_admin", "workspace_owner")
+ALLOWED_INVITE_ROLES = ("member", "workspace_admin")
 
 
 class CreateInvitationRequest(BaseModel):
@@ -103,7 +103,7 @@ async def create_invitation(
     request: Request,
     db: AsyncSession = Depends(get_db),
     _ctx=Depends(
-        require_workspace_role("workspace_id", "workspace_admin", "workspace_owner")
+        require_permission("invitations:write", workspace_id_param="workspace_id")
     ),
 ):
     """Create a new invitation link for this workspace."""
@@ -181,7 +181,7 @@ async def list_invitations(
     request: Request,
     db: AsyncSession = Depends(get_db),
     _ctx=Depends(
-        require_workspace_role("workspace_id", "workspace_admin", "workspace_owner")
+        require_permission("invitations:write", workspace_id_param="workspace_id")
     ),
 ):
     """List all invitations for this workspace (newest first)."""
@@ -201,7 +201,7 @@ async def revoke_invitation(
     request: Request,
     db: AsyncSession = Depends(get_db),
     _ctx=Depends(
-        require_workspace_role("workspace_id", "workspace_admin", "workspace_owner")
+        require_permission("invitations:write", workspace_id_param="workspace_id")
     ),
 ):
     """Revoke (physically delete) an invitation."""

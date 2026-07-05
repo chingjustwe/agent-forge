@@ -47,8 +47,12 @@ class TestGetSender:
 
     def test_returns_console_when_no_smtp(self):
         """With default settings (no SMTP), get_sender() returns ConsoleEmailSender."""
-        sender = get_sender()
-        assert isinstance(sender, ConsoleEmailSender)
+        from src.infra.settings import settings
+
+        with patch.object(settings, "smtp_host", ""):
+            _snd._INSTANCE = None
+            sender = get_sender()
+            assert isinstance(sender, ConsoleEmailSender)
 
     def test_returns_console_when_smtp_host_empty(self):
         """Explicitly empty SMTP settings → ConsoleEmailSender."""

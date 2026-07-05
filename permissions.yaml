@@ -1,0 +1,81 @@
+# ============================================================================
+# Agent Forge 权限配置 — 唯一真相源
+#
+# 修改规则：
+#   - 在 roles.<name>.permissions 中增删权限即可调整角色能力
+#   - 新增角色只需添加一行，分配权限即可
+#   - tenant_admin 的 super_admin: true 自动拥有所有权限
+#   - frontend_tabs 控制前端 sidebar 可见性
+# ============================================================================
+
+roles:
+  viewer:
+    label: "只读成员"
+    permissions:
+      - sessions:read
+      - agents:read
+      - quota:read
+
+  member:
+    label: "普通成员"
+    permissions:
+      - sessions:read
+      - sessions:write
+      - agents:read
+      - quota:read
+
+  workspace_admin:
+    label: "工作区管理员"
+    permissions:
+      - sessions:read
+      - sessions:write
+      - sessions:delete
+      - agents:read
+      - agents:write
+      - quota:read
+      - quota:write
+      - invitations:read
+      - invitations:write
+      - api_keys:read
+      - api_keys:write
+      - settings:read
+      - settings:write
+      - members:read
+      - members:write
+      - workspace:delete
+      - workspace:archive
+      # scoped admin — 仅能看到自己管理的工作区数据
+      - admin:workspaces:read
+      - admin:users:read
+      - admin:audit:read
+      - admin:usage:read
+
+  tenant_admin:
+    label: "租户超级管理员"
+    super_admin: true
+
+# ── 前端 Tab 可见性 ──
+# path → 所需权限（null = 所有人可见）
+frontend_tabs:
+  /sessions:         sessions:read
+  /dashboard:        null
+  /requests:         null
+  /quota:            quota:read
+  /agents:           agents:read
+  /api-keys:         api_keys:read
+  /admin:            admin:workspaces:read
+  /admin/users:      admin:users:read
+  /admin/workspaces: admin:workspaces:read
+  /admin/observability: settings:read
+  /admin/audit:      admin:audit:read
+  /admin/usage:      admin:usage:read
+
+# ── API Key 可用 Scope ──
+# 自动从所有非 admin 角色权限的并集生成。
+# 如需显式覆盖，取消注释下方配置：
+# api_key_scopes:
+#   - chat:write
+#   - quota:read
+#   - sessions:read
+#   - sessions:write
+#   - agents:read

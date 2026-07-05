@@ -137,6 +137,7 @@ async def test_list_members_as_workspace_admin(app):
             tenant_id="t-list-2",
             user_id="admin-1",
             user_role="workspace_admin",
+            tenant_role="workspace_admin",
             email="admin1@test.com",
         )
         break
@@ -206,6 +207,7 @@ async def test_list_members_non_member_forbidden(app):
             tenant_id=tid,
             user_id=f"iso-{suffix}",
             user_role="workspace_admin",
+            tenant_role="workspace_admin",
             email=f"iso-{suffix}@test.com",
         )
         # Create ws-B without this user

@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.gateway.auth.rbac import require_workspace_role
+from src.gateway.auth.rbac import require_permission
 from src.infra.db.engine import async_session
 from src.infra.db.models import Workspace
 from src.infra.db.session import get_db
@@ -22,7 +22,7 @@ async def get_quota(
     request: Request,
     ws_id: str,
     _ctx=Depends(
-        require_workspace_role("ws_id", "member", "workspace_admin", "workspace_owner")
+        require_permission("quota:read", workspace_id_param="ws_id")
     ),
 ):
     guardrail = QuotaGuardrail()
@@ -42,7 +42,7 @@ async def update_quota(
     ws_id: str,
     body: QuotaUpdate,
     _ctx=Depends(
-        require_workspace_role("ws_id", "workspace_admin", "workspace_owner")
+        require_permission("quota:write", workspace_id_param="ws_id")
     ),
 ):
     async with async_session() as session:

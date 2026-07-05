@@ -1,18 +1,21 @@
 import { useEffect, useState } from "react";
 import { getQuota, updateQuota, QuotaInfo } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
+import { useToast } from "../components/Toast";
+import { Modal } from "../components/Modal";
 
 export default function QuotaPage() {
   const { currentWorkspaceId, currentRole } = useWorkspace();
+  const toast = useToast();
   const [quota, setQuota] = useState<QuotaInfo | null>(null);
   const [editTokens, setEditTokens] = useState(0);
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   // Workspace-level admin (or tenant_admin) can edit quota.
   const canEdit =
-    currentRole === "workspace_admin" ||
-    currentRole === "workspace_owner";
+    currentRole === "workspace_admin";
 
   useEffect(() => {
     if (!currentWorkspaceId) {
@@ -30,15 +33,24 @@ export default function QuotaPage() {
       });
   }, [currentWorkspaceId]);
 
+  const openEditModal = () => {
+    setEditTokens(quota?.max_tokens_per_day ?? 0);
+    setEditing(true);
+  };
+
   const handleSave = async () => {
     if (!currentWorkspaceId) return;
+    setSaving(true);
     try {
       await updateQuota(currentWorkspaceId, { max_tokens_per_day: editTokens });
       setEditing(false);
       const data = await getQuota(currentWorkspaceId);
       setQuota(data);
+      toast.success("Quota updated", "Token limit has been saved successfully.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to update quota");
+      toast.error("Save failed", err instanceof Error ? err.message : "Failed to update quota");
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -100,32 +112,41 @@ export default function QuotaPage() {
           <div className="card-header">
             <h3 className="card-title">Configuration</h3>
           </div>
-          {editing ? (
-            <div>
-              <div className="form-group">
-                <label className="form-label">Max Tokens Per Day</label>
-                <input
-                  type="number"
-                  value={editTokens}
-                  onChange={e => setEditTokens(Number(e.target.value))}
-                />
-              </div>
-              <div className="btn-group">
-                <button className="btn btn-primary" onClick={handleSave}>Save</button>
-                <button className="btn btn-secondary" onClick={() => setEditing(false)}>Cancel</button>
-              </div>
-            </div>
-          ) : (
-            <div className="quota-config">
-              <p>Max tokens/day: <strong>{quota.max_tokens_per_day.toLocaleString()}</strong></p>
-              <p>Max cost/month: <strong>${quota.max_cost_per_month.toFixed(2)}</strong></p>
-              <button className="btn btn-secondary btn-sm" onClick={() => setEditing(true)} style={{ marginTop: 8 }}>
-                Edit Limits
-              </button>
-            </div>
-          )}
+          <div className="quota-config">
+            <p>Max tokens/day: <strong>{quota.max_tokens_per_day.toLocaleString()}</strong></p>
+            <p>Max cost/month: <strong>${quota.max_cost_per_month.toFixed(2)}</strong></p>
+            <button className="btn btn-secondary btn-sm" onClick={openEditModal} style={{ marginTop: 8 }}>
+              Edit Limits
+            </button>
+          </div>
         </div>
       )}
+
+      <Modal
+        open={editing}
+        onClose={() => setEditing(false)}
+        title="Edit Quota Limits"
+        width="sm"
+        footer={
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button className="btn btn-secondary" onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+            <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
+              {saving ? "Saving..." : "Save"}
+            </button>
+          </div>
+        }
+      >
+        <div className="form-group">
+          <label className="form-label">Max Tokens Per Day</label>
+          <input
+            type="number"
+            value={editTokens}
+            onChange={e => setEditTokens(Number(e.target.value))}
+          />
+        </div>
+      </Modal>
     </div>
   );
 }

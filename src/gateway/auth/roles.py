@@ -7,7 +7,6 @@ class Role(str, Enum):
     VIEWER = "viewer"
     MEMBER = "member"
     WORKSPACE_ADMIN = "workspace_admin"
-    WORKSPACE_OWNER = "workspace_owner"
     TENANT_ADMIN = "tenant_admin"
 
 
@@ -15,8 +14,7 @@ ROLE_HIERARCHY: dict[Role, int] = {
     Role.VIEWER: 0,
     Role.MEMBER: 1,
     Role.WORKSPACE_ADMIN: 2,
-    Role.WORKSPACE_OWNER: 3,
-    Role.TENANT_ADMIN: 4,
+    Role.TENANT_ADMIN: 3,
 }
 
 
@@ -46,14 +44,12 @@ class WorkspaceRole(str, Enum):
     VIEWER = "viewer"
     MEMBER = "member"
     WORKSPACE_ADMIN = "workspace_admin"
-    WORKSPACE_OWNER = "workspace_owner"
 
 
 WORKSPACE_ROLE_HIERARCHY: dict[str, int] = {
     "viewer": 0,
     "member": 1,
     "workspace_admin": 2,
-    "workspace_owner": 3,
 }
 
 

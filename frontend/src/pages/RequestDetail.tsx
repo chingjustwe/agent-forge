@@ -3,6 +3,7 @@ import { useParams } from "react-router-dom";
 import { getObservabilityRequests, getRequestDetail } from "../api";
 import TraceTimeline from "../components/TraceTimeline";
 import { useWorkspace } from "../context/WorkspaceContext";
+import { SkeletonText } from "../components/Skeleton";
 
 interface SpanData {
   span_id: string;
@@ -37,9 +38,11 @@ export default function RequestDetail() {
   const { currentWorkspaceId } = useWorkspace();
   const { traceId } = useParams<{ traceId: string }>();
   const [detail, setDetail] = useState<RequestDetailData | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     if (!currentWorkspaceId || !traceId) return;
+    setLoading(true);
     (async () => {
       const requests = await getObservabilityRequests(currentWorkspaceId);
       const found = requests.find(r => r.trace_id === traceId);
@@ -51,6 +54,7 @@ export default function RequestDetail() {
           // apiFetch handles 401 redirect; other errors ignored
         }
       }
+      setLoading(false);
     })();
   }, [currentWorkspaceId, traceId]);
 
@@ -66,7 +70,32 @@ export default function RequestDetail() {
     );
   }
 
-  if (!detail) return <div className="loading">Loading request details</div>;
+  if (loading) {
+    return (
+      <div>
+        <div className="page-header">
+          <h1 className="page-title">Request Detail</h1>
+          <p className="page-subtitle">Trace: {traceId}</p>
+        </div>
+        <div className="detail-section">
+          <h2 className="detail-section-title">Request Data</h2>
+          <SkeletonText lines={8} />
+        </div>
+      </div>
+    );
+  }
+
+  if (!detail) {
+    return (
+      <div>
+        <div className="page-header">
+          <h1 className="page-title">Request Detail</h1>
+          <p className="page-subtitle">Trace: {traceId}</p>
+        </div>
+        <div className="alert alert-error">Request not found or failed to load.</div>
+      </div>
+    );
+  }
 
   return (
     <div>

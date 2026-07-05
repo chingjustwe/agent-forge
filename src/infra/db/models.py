@@ -197,7 +197,7 @@ class ChatSessionShare(Base):
 
     Visibility matrix (``_can_see_session`` in sessions.py):
     - tenant_admin → sees everything
-    - workspace_admin/owner → sees everything in their workspace
+    - workspace_admin → sees everything in their workspace
     - owner → sees their own sessions
     - shared user (ChatSessionShare.user_id == self) → sees the session
     - otherwise → only non-private sessions
@@ -229,7 +229,7 @@ class InviteToken(Base):
 class WorkspaceInvitation(Base):
     """P2-1: workspace-scoped invitation links.
 
-    A workspace_admin/owner generates a token-bearing link. A registered
+    A workspace_admin generates a token-bearing link. A registered
     user clicks it, hits ``/api/v1/invitations/{token}/accept`` and is
     added to the workspace as a ``WorkspaceMember``. ``email=None`` means
     a generic link any logged-in user can accept.

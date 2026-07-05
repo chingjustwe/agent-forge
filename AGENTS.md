@@ -49,6 +49,66 @@ Tech stack: Python 3.11+, FastAPI, SQLAlchemy async (SQLite), React 18, Vite, Ty
 
 ---
 
+## Permission Model
+
+### Configuration
+
+The permission model is defined in [`permissions.yaml`](permissions.yaml) at the project root — this is the **single source of truth**. All route-level permission checks use `require_permission("resource:action")` which reads from this YAML file. The old `require_workspace_role` and `require_tenant_role` APIs are deprecated.
+
+### Roles
+
+| Role | Scope | Description |
+|------|-------|-------------|
+| `viewer` | Workspace | Read-only access |
+| `member` | Workspace | Normal member, can chat |
+| `workspace_admin` | Workspace | Full workspace management (members, settings, API keys, invitations, archive/delete) |
+| `tenant_admin` | Tenant | Super admin — all permissions, all workspaces |
+
+### Permission Matrix
+
+```
+                                  viewer  member  ws_admin  tenant_admin
+──────────────────────────────────────────────────────────────────────────
+sessions:read                       ✓       ✓        ✓           ✓
+sessions:write                      ✗       ✓        ✓           ✓
+sessions:delete                     ✗       ✗        ✓           ✓
+agents:read                         ✓       ✓        ✓           ✓
+agents:write                        ✗       ✗        ✓           ✓
+quota:read                          ✓       ✓        ✓           ✓
+quota:write                         ✗       ✗        ✓           ✓
+invitations:read                    ✗       ✗        ✓           ✓
+invitations:write                   ✗       ✗        ✓           ✓
+api_keys:read                       ✗       ✗        ✓           ✓
+api_keys:write                      ✗       ✗        ✓           ✓
+settings:read                       ✗       ✗        ✓           ✓
+settings:write                      ✗       ✗        ✓           ✓
+members:read                        ✗       ✗        ✓           ✓
+members:write                       ✗       ✗        ✓           ✓
+workspace:delete                    ✗       ✗        ✓           ✓
+workspace:archive                   ✗       ✗        ✓           ✓
+admin:workspaces:read               ✗       ✗     ✓(scoped)      ✓
+admin:users:read                    ✗       ✗     ✓(scoped)      ✓
+admin:audit:read                    ✗       ✗     ✓(scoped)      ✓
+admin:usage:read                    ✗       ✗     ✓(scoped)      ✓
+admin:workspaces:write              ✗       ✗        ✗           ✓
+admin:users:write                   ✗       ✗        ✗           ✓
+admin:tenant:write                  ✗       ✗        ✗           ✓
+──────────────────────────────────────────────────────────────────────────
+Admin sidebar visible               ✗       ✗        ✓           ✓
+```
+
+**Scoped admin** means `workspace_admin` can see the Admin section but data is limited to workspaces they manage. `tenant_admin` sees all data across all workspaces.
+
+### How to add a new permission
+
+1. Add the permission name to `permissions.yaml` under the appropriate role(s)
+2. Use `Depends(require_permission("new:perm"))` in the route handler
+3. If the permission controls a frontend tab, add it to `frontend_tabs` in `permissions.yaml`
+
+No code changes needed beyond those three steps.
+
+---
+
 ## Agent Development Workflow
 
 ### Agent Architecture

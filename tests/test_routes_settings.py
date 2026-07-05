@@ -18,6 +18,7 @@ async def _seed_membership(
             tenant_id=tenant_id,
             user_id=user_id,
             user_role=role,
+            tenant_role=role,
             email=f"{user_id}@test.com",
             name=user_id,
         )
@@ -51,7 +52,7 @@ async def test_get_otel_settings_requires_auth(app):
 
 @pytest.mark.asyncio
 async def test_get_otel_returns_defaults(app):
-    token = await _seed_membership("ws-otel-1", "otel-user-1", "member")
+    token = await _seed_membership("ws-otel-1", "otel-user-1", "workspace_admin")
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -63,6 +64,20 @@ async def test_get_otel_returns_defaults(app):
         data = resp.json()
         assert data["enabled"] is False
         assert data["endpoint"] == ""
+
+
+@pytest.mark.asyncio
+async def test_get_otel_requires_admin(app):
+    """A plain member cannot read otel settings either."""
+    token = await _seed_membership("ws-otel-1b", "otel-user-1b", "member")
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/v1/workspaces/ws-otel-1b/settings/otel",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 403
 
 
 @pytest.mark.asyncio

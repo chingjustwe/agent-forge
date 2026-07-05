@@ -11,7 +11,7 @@ async def get_summary(
     request: Request,
     ws_id: str,
     _ctx=Depends(
-        require_workspace_role("ws_id", "member", "workspace_admin", "workspace_owner")
+        require_workspace_role("ws_id", "member", "workspace_admin")
     ),
 ):
     since = request.query_params.get("since")
@@ -25,7 +25,7 @@ async def get_requests(
     request: Request,
     ws_id: str,
     _ctx=Depends(
-        require_workspace_role("ws_id", "member", "workspace_admin", "workspace_owner")
+        require_workspace_role("ws_id", "member", "workspace_admin")
     ),
 ):
     limit = int(request.query_params.get("limit", 50))
@@ -49,7 +49,7 @@ async def get_request_detail(
     ws_id: str,
     trace_id: str,
     _ctx=Depends(
-        require_workspace_role("ws_id", "member", "workspace_admin", "workspace_owner")
+        require_workspace_role("ws_id", "member", "workspace_admin")
     ),
 ):
     collector = TelemetryCollector()
@@ -68,7 +68,7 @@ async def get_token_daily(
     request: Request,
     ws_id: str,
     _ctx=Depends(
-        require_workspace_role("ws_id", "member", "workspace_admin", "workspace_owner")
+        require_workspace_role("ws_id", "member", "workspace_admin")
     ),
 ):
     since = request.query_params.get("since")
@@ -84,7 +84,7 @@ async def get_latency(
     request: Request,
     ws_id: str,
     _ctx=Depends(
-        require_workspace_role("ws_id", "member", "workspace_admin", "workspace_owner")
+        require_workspace_role("ws_id", "member", "workspace_admin")
     ),
 ):
     since = request.query_params.get("since")
@@ -100,7 +100,7 @@ async def get_errors(
     request: Request,
     ws_id: str,
     _ctx=Depends(
-        require_workspace_role("ws_id", "member", "workspace_admin", "workspace_owner")
+        require_workspace_role("ws_id", "member", "workspace_admin")
     ),
 ):
     since = request.query_params.get("since")

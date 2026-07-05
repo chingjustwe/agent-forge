@@ -20,6 +20,7 @@ async def _seed_membership(
             tenant_id=tenant_id,
             user_id=user_id,
             user_role=role,
+            tenant_role=role,
             email=f"{user_id}@test.com",
             name=user_id,
         )

@@ -46,7 +46,7 @@ function SessionList() {
             return false;
         if (user.role === "tenant_admin")
             return true;
-        if (currentRole === "workspace_admin" || currentRole === "workspace_owner")
+        if (currentRole === "workspace_admin")
             return true;
         return s.owner_id === user.id;
     }
@@ -155,7 +155,6 @@ function SessionDetail({ sessionId }) {
         !!user &&
         (user.role === "tenant_admin" ||
             currentRole === "workspace_admin" ||
-            currentRole === "workspace_owner" ||
             session.owner_id === user.id);
     const sendMessage = useCallback(async () => {
         if (!input.trim() || streaming || !currentWorkspaceId || !session)

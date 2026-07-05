@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.gateway.auth.rbac import require_tenant_role, require_workspace_role
+from src.gateway.auth.rbac import require_permission
 from src.gateway.routes.me import invalidate_workspace_cache
 from src.infra.db.models import User, Workspace, WorkspaceMember
 from src.infra.db.session import get_db
@@ -29,7 +29,7 @@ class AddMemberRequest(BaseModel):
 async def list_workspaces(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:workspaces:read")),
 ):
     result = await db.execute(select(Workspace))
     workspaces = result.scalars().all()
@@ -67,7 +67,7 @@ async def create_workspace(
     request: Request,
     body: CreateWorkspaceRequest,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:workspaces:write")),
 ):
     tenant_id = request.state.user.get("tenant_id", "")
     user_id = request.state.user.get("sub") or request.state.user.get("id")
@@ -106,7 +106,7 @@ async def list_members(
     request: Request,
     db: AsyncSession = Depends(get_db),
     _ctx=Depends(
-        require_workspace_role("workspace_id", "workspace_admin", "workspace_owner")
+        require_permission("members:read", workspace_id_param="workspace_id")
     ),
 ):
     result = await db.execute(
@@ -133,7 +133,7 @@ async def add_member(
     body: AddMemberRequest,
     db: AsyncSession = Depends(get_db),
     _ctx=Depends(
-        require_workspace_role("workspace_id", "workspace_admin", "workspace_owner")
+        require_permission("members:write", workspace_id_param="workspace_id")
     ),
 ):
     result = await db.execute(select(User).where(User.id == body.user_id))
@@ -167,7 +167,7 @@ async def remove_member(
     request: Request,
     db: AsyncSession = Depends(get_db),
     _ctx=Depends(
-        require_workspace_role("workspace_id", "workspace_admin", "workspace_owner")
+        require_permission("members:write", workspace_id_param="workspace_id")
     ),
 ):
     member = await db.get(WorkspaceMember, (workspace_id, user_id))

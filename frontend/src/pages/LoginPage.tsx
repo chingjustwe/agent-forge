@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { loginUser, registerUser } from "../api";
+import { useToast } from "../components/Toast";
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -9,12 +10,11 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
-  const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const toast = useToast();
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    setError("");
     setLoading(true);
     try {
       if (mode === "login") {
@@ -22,11 +22,13 @@ export default function LoginPage() {
       } else {
         await registerUser(email, password, name);
       }
-      // P2-1: honor ?redirect= so invitees return to the accept page after login.
       const redirect = searchParams.get("redirect");
       navigate(redirect || "/");
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "An error occurred");
+      toast.error(
+        mode === "login" ? "Sign in failed" : "Registration failed",
+        err instanceof Error ? err.message : "An error occurred",
+      );
     } finally {
       setLoading(false);
     }
@@ -36,15 +38,13 @@ export default function LoginPage() {
     <div className="login-page">
       <div className="login-card">
         <div className="login-brand">
-          <div className="login-brand-icon">A</div>
+          <div className="login-brand-icon">AP</div>
           <span className="login-brand-text">Agent Platform</span>
         </div>
 
         <h1 className="login-title">
           {mode === "login" ? "Sign in to your account" : "Create an account"}
         </h1>
-
-        {error && <div className="alert alert-error">{error}</div>}
 
         <form className="login-form" onSubmit={handleSubmit}>
           {mode === "register" && (
@@ -70,7 +70,7 @@ export default function LoginPage() {
             placeholder="Password"
             required
           />
-          <button type="submit" className="btn btn-primary" disabled={loading}>
+          <button type="submit" className="btn btn-primary login-submit-btn" disabled={loading}>
             {loading ? "Please wait..." : mode === "login" ? "Sign In" : "Register"}
           </button>
         </form>
@@ -78,7 +78,7 @@ export default function LoginPage() {
         <div className="login-toggle">
           {mode === "login" ? (
             <>
-              Don't have an account?{" "}
+              Don&apos;t have an account?{" "}
               <button onClick={() => setMode("register")}>Register</button>
             </>
           ) : (
@@ -89,9 +89,9 @@ export default function LoginPage() {
           )}
         </div>
 
-        <hr className="login-divider" />
+        <div className="login-divider" />
 
-        <div className="login-sso-label">Single sign-on</div>
+        <div className="login-sso-label">Or continue with</div>
         <div className="login-sso-buttons">
           <a href="/api/v1/auth/login?provider=google" className="login-sso-btn">Google</a>
           <a href="/api/v1/auth/login?provider=azure" className="login-sso-btn">Azure AD</a>

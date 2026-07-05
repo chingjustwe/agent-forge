@@ -48,11 +48,13 @@ async def _seed_workspace_with_owner(
     ws_id: str,
     tenant_id: str,
     owner_id: str,
-    owner_role: str = "workspace_owner",
-    tenant_role: str = "member",
+    owner_role: str = "workspace_admin",
+    tenant_role: str | None = None,
     email: str | None = None,
 ) -> str:
     """Seed tenant + workspace + user + WorkspaceMember(owner). Returns JWT."""
+    if tenant_role is None:
+        tenant_role = owner_role
     async with async_session() as session:
         if not await session.get(Tenant, tenant_id):
             session.add(Tenant(id=tenant_id, name="T", domain=f"{tenant_id}.test"))

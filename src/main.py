@@ -304,6 +304,15 @@ def _migrate_schema(sync_conn):
             "ON api_keys (key_hash)"
         )
 
+    # M11: Merge workspace_owner into workspace_admin
+    try:
+        sync_conn.exec_driver_sql(
+            "UPDATE workspace_members SET role = 'workspace_admin' "
+            "WHERE role = 'workspace_owner'"
+        )
+    except Exception:
+        pass
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

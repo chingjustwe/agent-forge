@@ -1,13 +1,19 @@
 import { useEffect, useState } from "react";
 import {
-  API_KEY_SCOPES,
   ApiKeyInfo,
   ApiKeyScope,
   createApiKey,
+  fetchPermissions,
   listApiKeys,
   revokeApiKey,
 } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
+import { Modal } from "../components/Modal";
+import { useToast } from "../components/Toast";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { EmptyState } from "../components/EmptyState";
+import { Dropdown } from "../components/Dropdown";
+import { SkeletonTable } from "../components/Skeleton";
 
 interface CreateFormState {
   name: string;
@@ -21,30 +27,35 @@ const EMPTY_FORM: CreateFormState = {
   expiresInDays: "",
 };
 
+function scopeLabel(scope: string): string {
+  const [resource, action] = scope.split(":");
+  return `${resource} (${action})`;
+}
+
 export default function ApiKeys() {
   const { currentWorkspaceId, currentRole } = useWorkspace();
+  const toast = useToast();
+
   const [keys, setKeys] = useState<ApiKeyInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const [messageType, setMessageType] = useState<"error" | "success">("error");
 
-  const [showForm, setShowForm] = useState(false);
+  // Create modal state
+  const [formModalOpen, setFormModalOpen] = useState(false);
   const [form, setForm] = useState<CreateFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+
   // Plaintext key from a freshly-created API key — shown once in a modal.
   const [newKey, setNewKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [availableScopes, setAvailableScopes] = useState<string[]>([]);
+
+  // Revoke confirmation state
+  const [revokeTarget, setRevokeTarget] = useState<ApiKeyInfo | null>(null);
 
   const canManage =
     currentRole === "workspace_admin" ||
-    currentRole === "workspace_owner" ||
     currentRole === "tenant_admin";
-
-  function showMsg(msg: string, type: "error" | "success" = "error") {
-    setMessage(msg);
-    setMessageType(type);
-  }
 
   async function refresh() {
     if (!currentWorkspaceId) return;
@@ -65,9 +76,15 @@ export default function ApiKeys() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentWorkspaceId]);
 
-  function resetForm() {
+  useEffect(() => {
+    fetchPermissions()
+      .then(resp => setAvailableScopes(resp.api_key_scopes || []))
+      .catch(() => {});
+  }, []);
+
+  function openCreateModal() {
     setForm(EMPTY_FORM);
-    setShowForm(false);
+    setFormModalOpen(true);
   }
 
   function toggleScope(scope: ApiKeyScope) {
@@ -79,26 +96,24 @@ export default function ApiKeys() {
     }));
   }
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleCreateSubmit() {
     if (!currentWorkspaceId) return;
     if (!form.name.trim()) {
-      showMsg("Name is required");
+      toast.error("Validation error", "Name is required");
       return;
     }
     if (form.scopes.length === 0) {
-      showMsg("Select at least one scope");
+      toast.error("Validation error", "Select at least one scope");
       return;
     }
     const days = form.expiresInDays.trim();
     const expiresInDays = days === "" ? undefined : parseInt(days, 10);
     if (expiresInDays !== undefined && (isNaN(expiresInDays) || expiresInDays < 1 || expiresInDays > 365)) {
-      showMsg("Expires in days must be between 1 and 365 (or leave blank for no expiry)");
+      toast.error("Validation error", "Expires in days must be between 1 and 365 (or leave blank for no expiry)");
       return;
     }
 
     setSaving(true);
-    setMessage(null);
     try {
       const created = await createApiKey(currentWorkspaceId, {
         name: form.name.trim(),
@@ -107,11 +122,12 @@ export default function ApiKeys() {
       });
       setNewKey(created.key);
       setCopied(false);
-      resetForm();
+      setFormModalOpen(false);
+      setForm(EMPTY_FORM);
       await refresh();
-      showMsg("API key created", "success");
+      toast.success("API key created");
     } catch (err: unknown) {
-      showMsg(err instanceof Error ? err.message : "Failed to create API key");
+      toast.error("Failed to create API key", err instanceof Error ? err.message : undefined);
     } finally {
       setSaving(false);
     }
@@ -129,15 +145,19 @@ export default function ApiKeys() {
     }
   }
 
-  async function handleRevoke(key: ApiKeyInfo) {
-    if (!currentWorkspaceId) return;
-    if (!confirm(`Revoke API key "${key.name}"? It will stop working immediately.`)) return;
+  function openRevokeConfirm(key: ApiKeyInfo) {
+    setRevokeTarget(key);
+  }
+
+  async function handleRevokeConfirm() {
+    if (!revokeTarget || !currentWorkspaceId) return;
     try {
-      await revokeApiKey(currentWorkspaceId, key.id);
-      setKeys(prev => prev.filter(k => k.id !== key.id));
-      showMsg("API key revoked", "success");
+      await revokeApiKey(currentWorkspaceId, revokeTarget.id);
+      setKeys(prev => prev.filter(k => k.id !== revokeTarget.id));
+      toast.success("API key revoked");
+      setRevokeTarget(null);
     } catch (err: unknown) {
-      showMsg(err instanceof Error ? err.message : "Failed to revoke API key");
+      toast.error("Failed to revoke API key", err instanceof Error ? err.message : undefined);
     }
   }
 
@@ -148,7 +168,10 @@ export default function ApiKeys() {
           <h1 className="page-title">API Keys</h1>
           <p className="page-subtitle">Workspace-scoped API keys for programmatic access</p>
         </div>
-        <div className="alert alert-info">No workspace selected. Pick one from the sidebar.</div>
+        <EmptyState
+          title="No workspace selected"
+          description="Pick one from the sidebar."
+        />
       </div>
     );
   }
@@ -161,76 +184,25 @@ export default function ApiKeys() {
           <p className="page-subtitle">Manage API keys bound to this workspace</p>
         </div>
         {canManage && (
-          <button className="btn btn-primary" onClick={() => (showForm ? resetForm() : setShowForm(true))}>
-            {showForm ? "Cancel" : "+ New API Key"}
+          <button className="btn btn-primary" onClick={openCreateModal}>
+            + New API Key
           </button>
         )}
       </div>
 
-      {message && <div className={`alert alert-${messageType}`}>{message}</div>}
-      {error && <div className="alert alert-error">{error}</div>}
+      {error && <EmptyState title="Error loading API keys" description={error} />}
 
-      {showForm && canManage && (
-        <div className="card" style={{ marginBottom: 20 }}>
-          <div className="card-header">
-            <h3 className="card-title">Create API Key</h3>
-          </div>
-          <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <div className="form-group">
-              <label className="form-label">Name</label>
-              <input
-                type="text"
-                value={form.name}
-                onChange={e => setForm({ ...form, name: e.target.value })}
-                maxLength={100}
-                placeholder="e.g. CI pipeline key"
-              />
-            </div>
-            <div className="form-group">
-              <label className="form-label">Scopes</label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
-                {API_KEY_SCOPES.map(s => (
-                  <label key={s.value} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.9rem" }}>
-                    <input
-                      type="checkbox"
-                      checked={form.scopes.includes(s.value)}
-                      onChange={() => toggleScope(s.value)}
-                    />
-                    {s.label}
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div className="form-group" style={{ width: 200 }}>
-              <label className="form-label">Expires in days (blank = never)</label>
-              <input
-                type="number"
-                min={1}
-                max={365}
-                value={form.expiresInDays}
-                onChange={e => setForm({ ...form, expiresInDays: e.target.value })}
-                placeholder="never"
-              />
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button type="submit" className="btn btn-primary" disabled={saving}>
-                {saving ? "Creating..." : "Create API Key"}
-              </button>
-              <button type="button" className="btn btn-secondary" onClick={resetForm}>
-                Cancel
-              </button>
-            </div>
-          </form>
-        </div>
+      {!error && loading && <SkeletonTable rows={5} cols={7} />}
+
+      {!error && !loading && keys.length === 0 && (
+        <EmptyState
+          title="No API keys yet"
+          description={canManage ? "Create your first key to get started." : "No API keys have been created for this workspace."}
+          action={canManage ? { label: "+ New API Key", onClick: openCreateModal } : undefined}
+        />
       )}
 
-      {loading ? (
-        <div className="alert alert-info">Loading API keys...</div>
-      ) : keys.length === 0 ? (
-        <div className="alert alert-info">
-          No API keys yet. {canManage && "Create your first key."}
-        </div>
-      ) : (
+      {!error && !loading && keys.length > 0 && (
         <div className="table-container">
           <table>
             <thead>
@@ -251,7 +223,7 @@ export default function ApiKeys() {
                 return (
                   <tr key={k.id}>
                     <td>{k.name}</td>
-                    <td><code style={{ fontSize: "0.85rem" }}>{k.key_prefix}…</code></td>
+                    <td><code style={{ fontSize: "0.85rem" }}>{k.key_prefix}&hellip;</code></td>
                     <td>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                         {(k.scopes || []).map(s => (
@@ -274,13 +246,9 @@ export default function ApiKeys() {
                     {canManage && (
                       <td>
                         {!k.revoked && (
-                          <button
-                            className="btn btn-danger"
-                            style={{ padding: "4px 10px", fontSize: "0.78rem" }}
-                            onClick={() => handleRevoke(k)}
-                          >
-                            Revoke
-                          </button>
+                          <Dropdown items={[
+                            { label: "Revoke", onClick: () => openRevokeConfirm(k), variant: "danger" },
+                          ]} />
                         )}
                       </td>
                     )}
@@ -292,35 +260,123 @@ export default function ApiKeys() {
         </div>
       )}
 
-      {newKey && (
-        <div className="modal-backdrop" onClick={() => setNewKey(null)}>
-          <div className="card modal-card" onClick={e => e.stopPropagation()} style={{ maxWidth: 560 }}>
-            <div className="card-header">
-              <h3 className="card-title">Copy your API key</h3>
-            </div>
-            <div className="alert alert-warning" style={{ marginTop: 8 }}>
-              Copy this key now. You won&rsquo;t be able to see it again.
-            </div>
-            <div className="form-group" style={{ marginTop: 12 }}>
-              <textarea
-                readOnly
-                value={newKey}
-                rows={2}
-                style={{ fontFamily: "monospace", fontSize: "0.9rem" }}
-                onFocus={e => e.target.select()}
-              />
-            </div>
-            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-              <button className="btn btn-primary" onClick={copyNewKey}>
-                {copied ? "Copied!" : "Copy"}
-              </button>
-              <button className="btn btn-secondary" onClick={() => setNewKey(null)}>
-                Done
-              </button>
+      {/* Create API Key Modal */}
+      <Modal
+        open={formModalOpen}
+        onClose={() => setFormModalOpen(false)}
+        title="Create API Key"
+        width="md"
+        footer={
+          <>
+            <button className="btn btn-secondary" onClick={() => setFormModalOpen(false)} disabled={saving}>
+              Cancel
+            </button>
+            <button className="btn btn-primary" onClick={handleCreateSubmit} disabled={saving}>
+              {saving ? "Creating..." : "Create API Key"}
+            </button>
+          </>
+        }
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div className="form-group">
+            <label className="form-label">Name</label>
+            <input
+              type="text"
+              value={form.name}
+              onChange={e => setForm({ ...form, name: e.target.value })}
+              maxLength={100}
+              placeholder="e.g. CI pipeline key"
+            />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Scopes</label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+              {availableScopes.map(s => (
+                <label key={s} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.9rem" }}>
+                  <input
+                    type="checkbox"
+                    checked={form.scopes.includes(s)}
+                    onChange={() => toggleScope(s)}
+                  />
+                  {scopeLabel(s)}
+                </label>
+              ))}
             </div>
           </div>
+          <div className="form-group" style={{ width: 200 }}>
+            <label className="form-label">Expires in days (blank = never)</label>
+            <input
+              type="number"
+              min={1}
+              max={365}
+              value={form.expiresInDays}
+              onChange={e => setForm({ ...form, expiresInDays: e.target.value })}
+              placeholder="never"
+            />
+          </div>
         </div>
-      )}
+      </Modal>
+
+      {/* New Key Reveal Modal */}
+      <Modal
+        open={!!newKey}
+        onClose={() => setNewKey(null)}
+        title="Copy Your API Key"
+        width="sm"
+        footer={
+          <>
+            <button className="btn btn-primary" onClick={copyNewKey}>
+              {copied ? "Copied!" : "Copy"}
+            </button>
+            <button className="btn btn-secondary" onClick={() => setNewKey(null)}>
+              Done
+            </button>
+          </>
+        }
+      >
+        <div className="confirm-dialog" style={{ marginBottom: 16 }}>
+          <div className="confirm-dialog-icon">
+            <svg
+              width="24"
+              height="24"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+          </div>
+          <div className="confirm-dialog-title">Save this key now</div>
+          <div className="confirm-dialog-description">
+            Copy this key now. You won&rsquo;t be able to see it again.
+          </div>
+        </div>
+        <div className="form-group">
+          <textarea
+            readOnly
+            value={newKey || ""}
+            rows={2}
+            style={{ fontFamily: "monospace", fontSize: "0.9rem" }}
+            onFocus={e => e.target.select()}
+          />
+        </div>
+      </Modal>
+
+      {/* Revoke Confirmation */}
+      <ConfirmDialog
+        open={!!revokeTarget}
+        onClose={() => setRevokeTarget(null)}
+        onConfirm={handleRevokeConfirm}
+        title="Revoke API Key"
+        description={`Revoke API key "${revokeTarget?.name}"? It will stop working immediately.`}
+        confirmText="Revoke"
+        variant="danger"
+      />
     </div>
   );
 }

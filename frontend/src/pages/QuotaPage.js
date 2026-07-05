@@ -9,8 +9,7 @@ export default function QuotaPage() {
     const [editing, setEditing] = useState(false);
     const [error, setError] = useState(null);
     // Workspace-level admin (or tenant_admin) can edit quota.
-    const canEdit = currentRole === "workspace_admin" ||
-        currentRole === "workspace_owner";
+    const canEdit = currentRole === "workspace_admin";
     useEffect(() => {
         if (!currentWorkspaceId) {
             setError("No workspace selected. Please select a workspace from the top bar.");

@@ -19,16 +19,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.gateway.auth.rbac import require_workspace_role
+from src.gateway.auth.rbac import require_permission
+from src.gateway.auth.permissions import get_api_key_scopes
 from src.infra.db.models import ApiKey, AuditLog
 from src.infra.db.session import get_db
 
 router = APIRouter()
 
-_WRITE_ROLES = ("workspace_admin", "workspace_owner")
-_READ_ROLES = ("viewer", "member", "workspace_admin", "workspace_owner")
 _DEFAULT_SCOPES = ["chat:write"]
-_ALLOWED_SCOPES = ("chat:write", "quota:read", "sessions:read", "sessions:write")
 
 
 class CreateApiKeyRequest(BaseModel):
@@ -113,7 +111,7 @@ async def create_api_key(
     body: CreateApiKeyRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _ctx=Depends(require_workspace_role("workspace_id", *_WRITE_ROLES)),
+    _ctx=Depends(require_permission("api_keys:write", workspace_id_param="workspace_id")),
 ):
     """Create a new API key for this workspace.
 
@@ -121,10 +119,11 @@ async def create_api_key(
     securely, it cannot be retrieved again.
     """
     # Validate scopes
+    allowed_scopes = get_api_key_scopes()
     scopes = body.scopes if body.scopes is not None else list(_DEFAULT_SCOPES)
-    invalid = [s for s in scopes if s not in _ALLOWED_SCOPES]
+    invalid = [s for s in scopes if s not in allowed_scopes]
     if invalid:
-        return _bad_request(f"invalid scopes: {invalid}. allowed: {list(_ALLOWED_SCOPES)}")
+        return _bad_request(f"invalid scopes: {invalid}. allowed: {allowed_scopes}")
 
     # Validate expiry
     expires_at: datetime | None = None
@@ -173,7 +172,7 @@ async def list_api_keys(
     workspace_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _ctx=Depends(require_workspace_role("workspace_id", *_READ_ROLES)),
+    _ctx=Depends(require_permission("api_keys:read", workspace_id_param="workspace_id")),
 ):
     """List all API keys in this workspace (newest first).
 
@@ -194,7 +193,7 @@ async def revoke_api_key(
     key_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _ctx=Depends(require_workspace_role("workspace_id", *_WRITE_ROLES)),
+    _ctx=Depends(require_permission("api_keys:write", workspace_id_param="workspace_id")),
 ):
     """Revoke (soft-delete) an API key. Cross-workspace lookups return 404."""
     result = await db.execute(

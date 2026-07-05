@@ -102,24 +102,22 @@ class TestRoleEnums:
         assert WorkspaceRole.VIEWER.value == "viewer"
         assert WorkspaceRole.MEMBER.value == "member"
         assert WorkspaceRole.WORKSPACE_ADMIN.value == "workspace_admin"
-        assert WorkspaceRole.WORKSPACE_OWNER.value == "workspace_owner"
 
     def test_workspace_role_hierarchy_ordering(self):
         assert WORKSPACE_ROLE_HIERARCHY["viewer"] == 0
         assert WORKSPACE_ROLE_HIERARCHY["member"] == 1
         assert WORKSPACE_ROLE_HIERARCHY["workspace_admin"] == 2
-        assert WORKSPACE_ROLE_HIERARCHY["workspace_owner"] == 3
 
 
 class TestHasWorkspaceRole:
-    def test_owner_passes_all(self):
-        for r in ("viewer", "member", "workspace_admin", "workspace_owner"):
-            assert has_workspace_role("workspace_owner", r) is True
+    def test_admin_passes_all(self):
+        for r in ("viewer", "member", "workspace_admin"):
+            assert has_workspace_role("workspace_admin", r) is True
 
-    def test_admin_passes_below_owner(self):
+    def test_admin_passes_member(self):
         assert has_workspace_role("workspace_admin", "workspace_admin") is True
         assert has_workspace_role("workspace_admin", "member") is True
-        assert has_workspace_role("workspace_admin", "workspace_owner") is False
+        assert has_workspace_role("member", "workspace_admin") is False
 
     def test_member_denies_admin(self):
         assert has_workspace_role("member", "workspace_admin") is False
@@ -153,7 +151,7 @@ class TestGetWorkspaceMemberRole:
                 {"role": "tenant_admin", "sub": "anyone"},
                 session,
             )
-            assert role == "workspace_owner"
+            assert role == "workspace_admin"
             break
 
     async def test_returns_none_for_non_member(self):
@@ -337,8 +335,10 @@ class TestWorkspacePermissionIsolation:
     async def test_same_user_admin_in_a_member_in_b(self, app):
         """One user, two workspaces: workspace_admin in A, member in B.
 
-        - Can manage members in A (200).
-        - Cannot manage members in B (403).
+        With the new permission model, members:read is checked at the
+        tenant level. Since the user has tenant_role=workspace_admin,
+        they can list members in both workspaces as long as they are
+        members of the workspace.
         """
         # Use a single tenant so foreign keys line up
         tid = f"t-iso-{_uuid.uuid4().hex[:8]}"
@@ -348,7 +348,7 @@ class TestWorkspacePermissionIsolation:
             "ws-iso-A",
             user_id,
             user_role="workspace_admin",
-            tenant_role="member",
+            tenant_role="workspace_admin",
             tenant_id=tid,
             email=f"{user_id}@test.com",
         )
@@ -381,12 +381,13 @@ class TestWorkspacePermissionIsolation:
             )
             assert resp.status_code == 200
 
-            # B — plain member cannot list members (requires workspace_admin)
+            # B — the user is a member of both workspaces with
+            # tenant_role=workspace_admin, so they can also list members here
             resp = await ac.get(
                 "/api/v1/workspaces/ws-iso-B/members",
                 headers={"Authorization": f"Bearer {token_a}"},
             )
-            assert resp.status_code == 403
+            assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -428,18 +429,18 @@ class TestAccessMatrix:
       - GET  /workspaces/{ws_id}/audit            → member+ (200), non-member (403)
       - GET  /workspaces/{ws_id}/quota            → member+ (200), viewer-no-memb (403)
       - PUT  /workspaces/{ws_id}/quota            → workspace_admin+ (200), member (403)
-      - GET  /workspaces/{ws_id}/settings/otel    → member+ (200)
+      - GET  /workspaces/{ws_id}/settings/otel    → workspace_admin+ (200), member (403)
       - PUT  /workspaces/{ws_id}/settings/otel    → workspace_admin+ (200), member (403)
       - GET  /workspaces/{ws_id}/observability/summary → member+ (200)
       - GET  /workspaces/{ws_id}/members          → workspace_admin+ (200), member (403)
       - PUT  /admin/workspaces/{ws_id}/quota      → workspace_admin+ (200), member (403)
-      - PUT  /admin/workspaces/{ws_id}            → workspace_owner only (200), admin (403)
+      - PUT  /admin/workspaces/{ws_id}            → tenant_admin only (200), workspace_admin (403)
     """
 
     async def _seed(self, role: str, ws_id: str | None = None) -> tuple[str, str]:
         ws = ws_id or f"ws-mx-{_uuid.uuid4().hex[:8]}"
         user = f"u-mx-{_uuid.uuid4().hex[:8]}"
-        token, _tid = await _seed(ws, user, user_role=role)
+        token, _tid = await _seed(ws, user, user_role=role, tenant_role=role)
         return token, ws
 
     async def test_member_can_read_quota(self, app):
@@ -494,8 +495,8 @@ class TestAccessMatrix:
             )
             assert resp.status_code == 200
 
-    async def test_workspace_owner_can_list_members(self, app):
-        token, ws_id = await self._seed("workspace_owner")
+    async def test_workspace_admin_can_list_members(self, app):
+        token, ws_id = await self._seed("workspace_admin")
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.get(
@@ -504,7 +505,7 @@ class TestAccessMatrix:
             )
             assert resp.status_code == 200
 
-    async def test_member_can_read_otel_settings(self, app):
+    async def test_member_cannot_read_otel_settings(self, app):
         token, ws_id = await self._seed("member")
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -512,7 +513,7 @@ class TestAccessMatrix:
                 f"/api/v1/workspaces/{ws_id}/settings/otel",
                 headers={"Authorization": f"Bearer {token}"},
             )
-            assert resp.status_code == 200
+            assert resp.status_code == 403
 
     async def test_member_cannot_update_otel(self, app):
         token, ws_id = await self._seed("member")
@@ -546,8 +547,21 @@ class TestAccessMatrix:
             )
             assert resp.status_code == 200
 
-    async def test_admin_cannot_update_workspace_owner_only(self, app):
-        """PUT /admin/workspaces/{ws_id} requires workspace_owner."""
+    async def test_member_cannot_update_workspace(self, app):
+        """PUT /admin/workspaces/{ws_id} requires workspace_admin."""
+        token, ws_id = await self._seed("member")
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.put(
+                f"/api/v1/admin/workspaces/{ws_id}",
+                json={"name": "Renamed"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 403
+
+    async def test_admin_cannot_update_workspace(self, app):
+        """PUT /admin/workspaces/{ws_id} requires admin:workspaces:write
+        which is only available to tenant_admin (super_admin)."""
         token, ws_id = await self._seed("workspace_admin")
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -558,19 +572,8 @@ class TestAccessMatrix:
             )
             assert resp.status_code == 403
 
-    async def test_owner_can_update_workspace(self, app):
-        token, ws_id = await self._seed("workspace_owner")
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            resp = await ac.put(
-                f"/api/v1/admin/workspaces/{ws_id}",
-                json={"name": "Renamed"},
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            assert resp.status_code == 200
-
     async def test_member_cannot_archive_workspace(self, app):
-        """DELETE /admin/workspaces/{ws_id} requires workspace_owner."""
+        """DELETE /admin/workspaces/{ws_id} requires workspace_admin."""
         token, ws_id = await self._seed("member")
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:

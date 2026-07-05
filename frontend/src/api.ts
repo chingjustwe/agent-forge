@@ -29,7 +29,9 @@ export interface Workspace {
 export interface WorkspaceMembership {
   id: string;
   name: string;
-  role: string;  // workspace 级角色: member/viewer/workspace_admin/workspace_owner
+  slug?: string;
+  icon?: string;
+  role: string;  // workspace 级角色: member/viewer/workspace_admin
   created_at?: string;
 }
 
@@ -392,7 +394,7 @@ export async function deleteUser(id: string): Promise<void> {
   if (!resp.ok) throw new Error("Failed to delete user");
 }
 
-export async function inviteUser(data: { email: string; role: string; workspace_id?: string }): Promise<AdminUser> {
+export async function inviteUser(data: { email: string; role: string; workspace_id?: string; expires_in_days?: number }): Promise<AdminUser> {
   const resp = await apiFetch("/api/v1/admin/users/invite", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -403,6 +405,29 @@ export async function inviteUser(data: { email: string; role: string; workspace_
 }
 
 // ─── Admin: Workspaces ────────────────────────────────────────────────────
+
+export interface PendingInvitation {
+  user_id: string;
+  email: string;
+  name: string;
+  role: string;
+  invited_at: string;
+  expires_at: string;
+  workspace_id: string | null;
+  workspace_name: string | null;
+  invited_role: string | null;
+}
+
+export async function listPendingInvitations(): Promise<PendingInvitation[]> {
+  const resp = await apiFetch("/api/v1/admin/pending-invitations");
+  if (!resp.ok) throw new Error("Failed to fetch pending invitations");
+  return resp.json();
+}
+
+export async function deletePendingInvitation(userId: string): Promise<void> {
+  const resp = await apiFetch(`/api/v1/admin/pending-invitations/${userId}`, { method: "DELETE" });
+  if (!resp.ok) throw new Error("Failed to delete pending invitation");
+}
 
 export interface AdminWorkspace {
   id: string;
@@ -977,14 +1002,9 @@ export async function copyAgentToWorkspace(
 
 // ─── API Keys (P2-3) ───────────────────────────────────────────────────────
 
-export type ApiKeyScope = "chat:write" | "quota:read" | "sessions:read" | "sessions:write";
+export type ApiKeyScope = string;
 
-export const API_KEY_SCOPES: { value: ApiKeyScope; label: string }[] = [
-  { value: "chat:write", label: "Chat (write)" },
-  { value: "quota:read", label: "Quota (read)" },
-  { value: "sessions:read", label: "Sessions (read)" },
-  { value: "sessions:write", label: "Sessions (write)" },
-];
+export const API_KEY_SCOPES: { value: string; label: string }[] = [];
 
 /** List response — never contains the plaintext key. */
 export interface ApiKeyInfo {
@@ -1036,4 +1056,22 @@ export async function revokeApiKey(wsId: string, keyId: string): Promise<void> {
     const err = await resp.json().catch(() => ({}));
     throw new Error(err.error?.message || "Failed to revoke API key");
   }
+}
+
+// ── Permissions (S5) ──────────────────────────────────────────────────────
+
+export interface PermissionResponse {
+  role: string;
+  permissions: string[];
+  frontend_tabs: Record<string, string | null>;
+  api_key_scopes: string[];
+}
+
+export async function fetchPermissions(): Promise<PermissionResponse> {
+  const resp = await apiFetch("/api/v1/permissions");
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to fetch permissions");
+  }
+  return resp.json();
 }

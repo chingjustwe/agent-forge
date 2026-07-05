@@ -32,6 +32,7 @@ async def _seed(
             tenant_id=tid,
             user_id=user_id,
             user_role=role,
+            tenant_role=role,
             email=f"{user_id}@test.com",
             name=user_id,
         )

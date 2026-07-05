@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from src.gateway.auth.rbac import require_workspace_role
+from src.gateway.auth.rbac import require_permission
 from src.infra.db.engine import async_session
 from src.infra.db.models import OTelSettings
 
@@ -22,7 +22,7 @@ async def get_otel_settings(
     request: Request,
     ws_id: str,
     _ctx=Depends(
-        require_workspace_role("ws_id", "member", "workspace_admin", "workspace_owner")
+        require_permission("settings:read", workspace_id_param="ws_id")
     ),
 ):
     async with async_session() as session:
@@ -43,7 +43,7 @@ async def update_otel_settings(
     ws_id: str,
     body: OTelConfig,
     _ctx=Depends(
-        require_workspace_role("ws_id", "workspace_admin", "workspace_owner")
+        require_permission("settings:write", workspace_id_param="ws_id")
     ),
 ):
     async with async_session() as session:

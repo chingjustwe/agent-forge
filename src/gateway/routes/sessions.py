@@ -107,7 +107,7 @@ def _can_see_session(
     """
     if tenant_role == "tenant_admin":
         return True
-    if role in ("workspace_owner", "workspace_admin"):
+    if role in ("workspace_admin",):
         return True
     if cs.owner_id == user_id:
         return True
@@ -119,7 +119,7 @@ def _can_see_session(
 def _can_mutate(cs: ChatSession, user_id: str, role: str | None, tenant_role: str) -> bool:
     if tenant_role == "tenant_admin":
         return True
-    if role in ("workspace_owner", "workspace_admin"):
+    if role in ("workspace_admin",):
         return True
     return cs.owner_id == user_id
 
@@ -198,7 +198,7 @@ async def list_sessions(
     # P3-5: pre-fetch the set of session_ids shared with the current user so
     # _can_see_session can include shared private sessions in one pass.
     shared_ids: set[str] = set()
-    if tenant_role != "tenant_admin" and role not in ("workspace_owner", "workspace_admin"):
+    if tenant_role != "tenant_admin" and role not in ("workspace_admin",):
         share_rows = await db.execute(
             select(ChatSessionShare.session_id).where(
                 ChatSessionShare.user_id == user_id
@@ -261,7 +261,7 @@ async def get_session(
 
     # P3-5: check if this specific session is shared with the current user.
     shared_ids: set[str] = set()
-    if tenant_role != "tenant_admin" and role not in ("workspace_owner", "workspace_admin") and cs.owner_id != user_id:
+    if tenant_role != "tenant_admin" and role not in ("workspace_admin",) and cs.owner_id != user_id:
         share_row = await db.get(ChatSessionShare, (session_id, user_id))
         if share_row is not None:
             shared_ids.add(session_id)

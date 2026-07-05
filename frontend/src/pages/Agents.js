@@ -51,7 +51,6 @@ export default function Agents() {
     const [copying, setCopying] = useState(false);
     const isTenantAdmin = user?.role === "tenant_admin";
     const canManage = currentRole === "workspace_admin" ||
-        currentRole === "workspace_owner" ||
         currentRole === "tenant_admin";
     function showMsg(msg, type = "error") {
         setMessage(msg);

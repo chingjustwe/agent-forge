@@ -53,13 +53,18 @@ class SmtpEmailSender(EmailSender):
         msg["From"] = self.from_addr
         msg["To"] = to
 
-        with smtplib.SMTP(self.host, self.port, timeout=10) as smtp:
-            if self.port == 587:
-                smtp.starttls()
-            if self.user:
-                smtp.login(self.user, self.password)
-            smtp.sendmail(self.from_addr, [to], msg.as_string())
-        logger.info("Email sent to %s via SMTP (%s:%d)", to, self.host, self.port)
+        try:
+            with smtplib.SMTP(self.host, self.port, timeout=10) as smtp:
+                smtp.ehlo()
+                if self.port == 587:
+                    smtp.starttls()
+                    smtp.ehlo()
+                if self.user:
+                    smtp.login(self.user, self.password)
+                smtp.sendmail(self.from_addr, [to], msg.as_string())
+            logger.info("Email sent to %s via SMTP (%s:%d)", to, self.host, self.port)
+        except Exception as exc:
+            logger.error("Failed to send email to %s via SMTP (%s:%d): %s", to, self.host, self.port, exc)
 
 
 # -- Convenience helpers ------------------------------------------------------
@@ -86,13 +91,13 @@ def get_sender() -> EmailSender:
     return _INSTANCE
 
 
-def send_invite_email(email: str, invite_url: str) -> None:
+def send_invite_email(email: str, invite_url: str, expires_in_days: int = 7) -> None:
     """Send an invitation email to *email* with the link *invite_url*."""
     subject = "You've been invited to Agent Platform"
     text = (
         f"You've been invited to join Agent Platform.\n\n"
         f"Click the link below to accept the invitation and set up your account:\n{invite_url}\n\n"
-        f"This invitation expires in 7 days.\n"
+        f"This invitation expires in {expires_in_days} day(s).\n"
     )
     html = (
         "<html><body style='font-family: sans-serif; padding: 20px;'>"
@@ -103,7 +108,10 @@ def send_invite_email(email: str, invite_url: str) -> None:
         f"style='background: #2563eb; color: #fff; padding: 12px 32px; "
         f"border-radius: 6px; text-decoration: none; display: inline-block;'>"
         f"Accept Invitation</a></p>"
-        f"<p style='color: #888; font-size: 0.85rem;'>This invitation expires in 7 days.</p>"
+        f"<p style='color: #888; font-size: 0.85rem;'>This invitation expires in {expires_in_days} day(s).</p>"
         f"</body></html>"
     )
-    get_sender().send(to=email, subject=subject, text=text, html=html)
+    try:
+        get_sender().send(to=email, subject=subject, text=text, html=html)
+    except Exception as exc:
+        logger.error("send_invite_email failed for %s: %s", email, exc)

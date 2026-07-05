@@ -10,11 +10,7 @@ import sqlalchemy
 from sqlalchemy import select, func, or_, delete, text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.gateway.auth.rbac import (
-    get_workspace_member_role,
-    require_tenant_role,
-    require_workspace_role,
-)
+from src.gateway.auth.rbac import get_admin_workspace_ids, require_permission
 from src.gateway.email.sender import send_invite_email
 from src.infra.db.models import (
     AgentConfig,
@@ -48,7 +44,7 @@ admin_router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 async def list_tenants(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:tenant:write")),
 ):
     result = await db.execute(
         select(
@@ -84,7 +80,7 @@ async def update_tenant(
     body: dict,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:tenant:write")),
 ):
     tenant = await db.get(Tenant, tenant_id)
     if not tenant:
@@ -118,7 +114,7 @@ async def get_tenant_quota(
     tenant_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:tenant:write")),
 ):
     """View tenant-level daily token quota and aggregated usage for today."""
     from datetime import date as date_type
@@ -153,7 +149,7 @@ async def update_tenant_quota(
     body: dict,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:tenant:write")),
 ):
     """Update tenant-level daily token quota (max_total_tokens_per_day).
 
@@ -196,9 +192,17 @@ async def list_users(
     role: Optional[str] = Query(None),
     workspace_id: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:users:read")),
 ):
-    query = select(User).where(User.archived == 0)
+    user = request.state.user
+    admin_ws_ids = await get_admin_workspace_ids(user, db)
+    query = select(User).where(User.archived == 0, User.hashed_password.isnot(None))
+    if admin_ws_ids is not None:
+        # workspace_admin: only see users in their workspaces
+        member_subq = select(WorkspaceMember.user_id).where(
+            WorkspaceMember.workspace_id.in_(admin_ws_ids)
+        ).subquery()
+        query = query.where(User.id.in_(select(member_subq.c.user_id)))
     if search:
         query = query.where(or_(User.email.ilike(f"%{search}%"), User.name.ilike(f"%{search}%")))
     if role:
@@ -211,19 +215,27 @@ async def list_users(
     result = await db.execute(query)
     users = result.scalars().all()
 
-    # Build workspace_ids per user from WorkspaceMember rows
+    # Build workspace names per user from WorkspaceMember rows
+    user_ids = [u.id for u in users]
+    wm_name_map: dict[str, list[str]] = {uid: [] for uid in user_ids}
+    if user_ids:
+        wm_rows = await db.execute(
+            select(WorkspaceMember.user_id, Workspace.name)
+            .select_from(WorkspaceMember)
+            .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+            .where(WorkspaceMember.user_id.in_(user_ids))
+        )
+        for user_id, ws_name in wm_rows.all():
+            wm_name_map[user_id].append(ws_name)
+
     out = []
     for u in users:
-        wm_rows = await db.execute(
-            select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == u.id)
-        )
-        ws_ids = [r[0] for r in wm_rows.all()]
         out.append({
             "id": u.id,
             "email": u.email,
             "name": u.name,
             "role": u.role,
-            "workspaces": ws_ids,
+            "workspaces": wm_name_map.get(u.id, []),
             "last_login": u.last_login.isoformat() if u.last_login else None,
             "created_at": u.created_at.isoformat(),
         })
@@ -236,7 +248,7 @@ async def update_user(
     body: dict,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:users:write")),
 ):
     user = await db.get(User, user_id)
     if not user:
@@ -259,15 +271,18 @@ async def update_user(
     await db.refresh(user)
 
     wm_rows = await db.execute(
-        select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == user.id)
+        select(Workspace.name)
+        .select_from(WorkspaceMember)
+        .join(Workspace, Workspace.id == WorkspaceMember.workspace_id)
+        .where(WorkspaceMember.user_id == user.id)
     )
-    ws_ids = [r[0] for r in wm_rows.all()]
+    ws_names = [r[0] for r in wm_rows.all()]
     return {
         "id": user.id,
         "email": user.email,
         "name": user.name,
         "role": user.role,
-        "workspaces": ws_ids,
+        "workspaces": ws_names,
         "created_at": user.created_at.isoformat(),
     }
 
@@ -277,7 +292,7 @@ async def delete_user(
     user_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:users:write")),
 ):
     user = await db.get(User, user_id)
     if not user:
@@ -291,70 +306,83 @@ async def invite_user(
     body: dict,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:users:write")),
 ):
     email = body.get("email", "")
+    invited_role = body.get("role", "member")
+    workspace_id = body.get("workspace_id")
+    expires_in_days = body.get("expires_in_days", 7)
+    if not isinstance(expires_in_days, int) or expires_in_days < 1 or expires_in_days > 365:
+        expires_in_days = 7
 
     # Check for non-archived user with this email
     existing = await db.execute(select(User).where(User.email == email, User.archived == 0))
     if existing.scalar_one_or_none():
         return JSONResponse(status_code=409, content={"error": {"code": "CONFLICT", "message": "User already exists"}})
 
-    workspace_id = body.get("workspace_id")
+    inviter_id = _user.get("sub") or _user.get("id", "")
+    tenant_id = request.state.user["tenant_id"]
+
     # If there's an archived user, re-activate it instead of creating a new one
     archived = await db.execute(select(User).where(User.email == email, User.archived == 1))
     archived_user = archived.scalar_one_or_none()
     if archived_user:
         user = archived_user
         user.archived = 0
-        user.role = body.get("role", "member")
+        user.role = invited_role
         user.hashed_password = None
         user.name = email.split("@")[0]
-        if workspace_id:
-            # Re-activate membership in this workspace
-            existing_membership = await db.get(WorkspaceMember, (workspace_id, user.id))
-            if not existing_membership:
-                db.add(
-                    WorkspaceMember(
-                        workspace_id=workspace_id,
-                        user_id=user.id,
-                        role="member",
-                    )
-                )
         # Remove any previous unused invite tokens
         await db.execute(
-            sqlalchemy.text("DELETE FROM invite_tokens WHERE user_id = :uid AND used_at IS NULL"),
+            sa_text("DELETE FROM invite_tokens WHERE user_id = :uid AND used_at IS NULL"),
             {"uid": user.id},
         )
     else:
         # Create new user (no password yet — will be set on invite acceptance)
         user = User(
-            tenant_id=request.state.user["tenant_id"],
+            tenant_id=tenant_id,
             email=email,
             name=email.split("@")[0],
-            role=body.get("role", "member"),
+            role=invited_role,
             auth_provider="builtin",
         )
         db.add(user)
         await db.flush()
-        if workspace_id:
-            db.add(
-                WorkspaceMember(
-                    workspace_id=workspace_id,
-                    user_id=user.id,
-                    role="member",
+
+    # ── Do NOT add WorkspaceMember immediately ──
+    # The user is added to the workspace only when they accept the invitation.
+    # Instead, create a WorkspaceInvitation (if workspace_id is provided).
+    ws_name = None
+    if workspace_id:
+        ws = await db.get(Workspace, workspace_id)
+        if ws and ws.tenant_id == tenant_id:
+            ws_name = ws.name
+            # Remove previous unaccepted invitations for this email+workspace
+            await db.execute(
+                delete(WorkspaceInvitation).where(
+                    WorkspaceInvitation.workspace_id == workspace_id,
+                    WorkspaceInvitation.email == email,
+                    WorkspaceInvitation.accepted_at.is_(None),
                 )
             )
+            db.add(WorkspaceInvitation(
+                workspace_id=workspace_id,
+                email=email,
+                role=invited_role,
+                token=secrets.token_urlsafe(32),
+                invited_by=inviter_id,
+                expires_at=datetime.now(timezone.utc) + timedelta(days=expires_in_days),
+            ))
 
     await db.flush()
 
-    # Generate invite token (valid for 7 days)
+    # Generate invite token
     raw_token = secrets.token_urlsafe(32)
     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
     invite = InviteToken(
         user_id=user.id,
         token_hash=token_hash,
-        expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+        expires_at=datetime.now(timezone.utc) + timedelta(days=expires_in_days),
     )
     db.add(invite)
     await db.commit()
@@ -363,24 +391,92 @@ async def invite_user(
     # Send invitation email
     base_url = settings.app_base_url.rstrip("/")
     invite_url = f"{base_url}/invite?token={raw_token}"
-    send_invite_email(email=email, invite_url=invite_url)
-
-    # Build workspace_ids from WorkspaceMember for the response
-    wm_rows = await db.execute(
-        select(WorkspaceMember.workspace_id).where(WorkspaceMember.user_id == user.id)
-    )
-    ws_ids = [r[0] for r in wm_rows.all()]
+    send_invite_email(email=email, invite_url=invite_url, expires_in_days=expires_in_days)
 
     return {
         "id": user.id,
         "email": user.email,
         "role": user.role,
-        "workspace_ids": ws_ids,
+        "workspaces": [ws_name] if ws_name else [],
         "created_at": user.created_at.isoformat(),
+        "invited_workspace_id": workspace_id,
+        "invited_workspace_name": ws_name,
+        "expires_at": invite.expires_at.isoformat(),
     }
 
 
-# ─── Workspaces ──────────────────────────────────────────────────────────────
+@admin_router.get("/pending-invitations")
+async def list_pending_invitations(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_permission("admin:users:read")),
+):
+    """List pending invitations: users who haven't accepted yet."""
+    rows = await db.execute(
+        select(
+            User.id,
+            User.email,
+            User.name,
+            User.role,
+            User.created_at,
+            InviteToken.expires_at,
+            WorkspaceInvitation.workspace_id,
+            Workspace.name,
+            WorkspaceInvitation.role,
+        )
+        .join(InviteToken, InviteToken.user_id == User.id)
+        .outerjoin(WorkspaceInvitation, WorkspaceInvitation.email == User.email)
+        .outerjoin(Workspace, Workspace.id == WorkspaceInvitation.workspace_id)
+        .where(
+            User.tenant_id == request.state.user["tenant_id"],
+            User.archived == 0,
+            User.hashed_password.is_(None),
+            InviteToken.used_at.is_(None),
+        )
+        .order_by(User.created_at.desc())
+    )
+    out = []
+    for r in rows.all():
+        out.append({
+            "user_id": r[0],
+            "email": r[1],
+            "name": r[2],
+            "role": r[3],
+            "invited_at": r[4].isoformat() if r[4] else None,
+            "expires_at": r[5].isoformat() if r[5] else None,
+            "workspace_id": r[6],
+            "workspace_name": r[7],
+            "invited_role": r[8],
+        })
+    return out
+
+
+@admin_router.delete("/pending-invitations/{user_id}", status_code=204)
+async def delete_pending_invitation(
+    user_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_permission("admin:users:write")),
+):
+    """Delete a pending invitation and the associated unactivated user."""
+    tenant_id = request.state.user["tenant_id"]
+    user = await db.get(User, user_id)
+    if not user or user.tenant_id != tenant_id:
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "User not found"}})
+    if user.hashed_password is not None:
+        return JSONResponse(status_code=400, content={"error": {"code": "ALREADY_ACTIVATED", "message": "User has already activated their account"}})
+
+    # Delete WorkspaceInvitation records
+    await db.execute(
+        delete(WorkspaceInvitation).where(WorkspaceInvitation.email == user.email)
+    )
+    # Delete InviteToken records
+    await db.execute(
+        delete(InviteToken).where(InviteToken.user_id == user_id)
+    )
+    # Soft-delete the user
+    user.archived = 1
+    await db.commit()
 
 
 @admin_router.get("/workspaces")
@@ -388,11 +484,15 @@ async def list_workspaces(
     request: Request,
     include_archived: bool = False,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:workspaces:read")),
 ):
+    user = request.state.user
+    admin_ws_ids = await get_admin_workspace_ids(user, db)
     # P3-3 前端集成：默认隐藏 archived workspace；传 include_archived=true
     # 时返回全部（含 archived），用于 Purge 操作入口。
     query = select(Workspace)
+    if admin_ws_ids is not None:
+        query = query.where(Workspace.id.in_(admin_ws_ids))
     if not include_archived:
         query = query.where(Workspace.archived == 0)
     result = await db.execute(query)
@@ -422,12 +522,12 @@ async def list_workspaces(
         for ws_id, cnt in agent_cnt_result.all():
             agent_counts[ws_id] = cnt
 
-        # Batch-lookup each workspace's workspace_owner email
+        # Batch-lookup each workspace's workspace_admin email
         owner_result = await db.execute(
             select(WorkspaceMember.workspace_id, User.email)
             .join(User, User.id == WorkspaceMember.user_id)
             .where(
-                WorkspaceMember.role == "workspace_owner",
+                WorkspaceMember.role == "workspace_admin",
                 WorkspaceMember.workspace_id.in_(ws_ids),
             )
         )
@@ -469,7 +569,7 @@ async def admin_create_workspace(
     body: CreateWorkspaceBody,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:workspaces:write")),
 ):
     tenant_id = request.state.user.get("tenant_id", "")
     user_id = request.state.user.get("sub") or request.state.user.get("id")
@@ -507,7 +607,7 @@ async def update_workspace(
     body: dict,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _ctx=Depends(require_workspace_role("workspace_id", "workspace_owner")),
+    _ctx=Depends(require_permission("admin:workspaces:write", workspace_id_param="workspace_id")),
 ):
     ws = await db.get(Workspace, workspace_id)
     if not ws:
@@ -563,7 +663,7 @@ async def archive_workspace(
     workspace_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _ctx=Depends(require_workspace_role("workspace_id", "workspace_owner")),
+    _ctx=Depends(require_permission("admin:workspaces:write", workspace_id_param="workspace_id")),
 ):
     ws = await db.get(Workspace, workspace_id)
     if not ws:
@@ -614,7 +714,7 @@ async def purge_workspace(
     workspace_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("workspace:delete")),
 ):
     """Hard-delete an archived workspace AND all of its associated data.
 
@@ -768,7 +868,7 @@ async def set_default_workspace(
     workspace_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:workspaces:write")),
 ):
     """Atomically transfer the ``is_default`` flag to ``workspace_id``.
 
@@ -841,13 +941,27 @@ async def get_usage(
     tenant_id: Optional[str] = Query(None),
     since: Optional[str] = Query(None),
     until: Optional[str] = Query(None),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_permission("admin:usage:read")),
 ):
+    user = request.state.user
+    admin_ws_ids = await get_admin_workspace_ids(user, db)
     tid = tenant_id or request.state.user.get("tenant_id")
     since_dt = datetime.fromisoformat(since) if since else None
     until_dt = datetime.fromisoformat(until) if until else None
     collector = TelemetryCollector()
-    return await collector.get_tenant_usage(tid, since_dt, until_dt)
+    result = await collector.get_tenant_usage(tid, since_dt, until_dt)
+    if admin_ws_ids is not None:
+        # workspace_admin: only return usage for their workspaces
+        filtered = [
+            ws for ws in result.get("by_workspace", [])
+            if ws["workspace_id"] in admin_ws_ids
+        ]
+        result["by_workspace"] = filtered
+        result["total_requests"] = sum(ws["total_requests"] for ws in filtered)
+        result["total_tokens"] = sum(ws["total_tokens"] for ws in filtered)
+        result["total_cost"] = sum(ws["total_cost"] for ws in filtered)
+    return result
 
 
 # ─── Quota ───────────────────────────────────────────────────────────────────
@@ -860,7 +974,7 @@ async def update_quota(
     request: Request,
     db: AsyncSession = Depends(get_db),
     _ctx=Depends(
-        require_workspace_role("workspace_id", "workspace_admin", "workspace_owner")
+        require_permission("quota:write", workspace_id_param="workspace_id")
     ),
 ):
     ws = await db.get(Workspace, workspace_id)
@@ -891,11 +1005,15 @@ async def list_audit_logs(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_tenant_role("tenant_admin")),
+    _user=Depends(require_permission("admin:audit:read")),
 ):
+    user = request.state.user
+    admin_ws_ids = await get_admin_workspace_ids(user, db)
     query = select(AuditLogModel)
     tid = tenant_id or request.state.user.get("tenant_id")
     query = query.where(AuditLogModel.tenant_id == tid)
+    if admin_ws_ids is not None:
+        query = query.where(AuditLogModel.workspace_id.in_(admin_ws_ids))
     if action:
         query = query.where(AuditLogModel.action == action)
     if user_id:

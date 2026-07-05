@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.gateway.auth.jwt import create_jwt
 from src.gateway.auth.password import hash_password, verify_password
 from src.gateway.auth.oidc import get_authorize_url
-from src.infra.db.models import InviteToken, Tenant, User, Workspace, WorkspaceMember
+from src.infra.db.models import InviteToken, Tenant, User, Workspace, WorkspaceInvitation, WorkspaceMember
 from src.infra.db.session import get_db
 
 router = APIRouter()
@@ -155,6 +155,25 @@ async def accept_invite(body: AcceptInviteRequest, db: AsyncSession = Depends(ge
     user.name = body.name
     user.hashed_password = hash_password(body.password)
     invite.used_at = datetime.now(timezone.utc)
+
+    # Process pending workspace invitations for this email
+    ws_invites = await db.execute(
+        select(WorkspaceInvitation).where(
+            WorkspaceInvitation.email == user.email,
+            WorkspaceInvitation.accepted_at.is_(None),
+        )
+    )
+    for ws_invite in ws_invites.scalars().all():
+        # Add user to workspace with the invited role
+        existing = await db.get(WorkspaceMember, (ws_invite.workspace_id, user.id))
+        if not existing:
+            db.add(WorkspaceMember(
+                workspace_id=ws_invite.workspace_id,
+                user_id=user.id,
+                role=ws_invite.role,
+            ))
+        ws_invite.accepted_at = datetime.now(timezone.utc)
+
     await db.commit()
     await db.refresh(user)
 

@@ -55,10 +55,12 @@ async def _seed(
     tenant_id: str,
     user_id: str,
     ws_role: str = "workspace_admin",
-    tenant_role: str = "member",
+    tenant_role: str | None = None,
     email: str | None = None,
 ) -> str:
     """Seed tenant + workspace + user + WorkspaceMember. Returns JWT."""
+    if tenant_role is None:
+        tenant_role = ws_role
     async with async_session() as session:
         if not await session.get(Tenant, tenant_id):
             session.add(Tenant(id=tenant_id, name="T", domain=f"{tenant_id}.test"))
@@ -184,7 +186,7 @@ class TestCreateApiKey:
     @pytest.mark.asyncio
     async def test_owner_can_create(self, app):
         suffix = _uuid.uuid4().hex[:8]
-        tok = await _seed(f"ws-{suffix}", f"t-{suffix}", f"owner-{suffix}", ws_role="workspace_owner")
+        tok = await _seed(f"ws-{suffix}", f"t-{suffix}", f"owner-{suffix}", ws_role="workspace_admin")
         resp = await _create_key_via_api(app, tok, f"ws-{suffix}")
         assert resp.status_code == 201
 
@@ -334,7 +336,7 @@ class TestListApiKeys:
         assert resp.json() == []
 
     @pytest.mark.asyncio
-    async def test_member_can_list(self, app):
+    async def test_member_cannot_list(self, app):
         suffix = _uuid.uuid4().hex[:8]
         ws = f"ws-{suffix}"
         admin_tok = await _seed(ws, f"t-{suffix}", f"admin-{suffix}", ws_role="workspace_admin")
@@ -349,8 +351,7 @@ class TestListApiKeys:
                 f"/api/v1/workspaces/{ws}/api-keys",
                 headers={"Authorization": f"Bearer {member_tok}"},
             )
-        assert resp.status_code == 200
-        assert len(resp.json()) == 1
+        assert resp.status_code == 403
 
 
 # ---------------------------------------------------------------------------

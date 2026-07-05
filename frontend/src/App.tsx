@@ -18,6 +18,7 @@ import WorkspaceInvitations from "./pages/WorkspaceInvitations";
 import Agents from "./pages/Agents";
 import ApiKeys from "./pages/ApiKeys";
 import Layout from "./components/Layout";
+import { ToastProvider } from "./components/Toast";
 import { WorkspaceProvider } from "./context/WorkspaceContext";
 import { getToken, getCurrentUser } from "./api";
 
@@ -31,6 +32,20 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 function App() {
   const token = getToken();
+
+  // Initialize theme from localStorage before first render
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("agent_platform_theme");
+      if (stored === "light" || stored === "dark") {
+        document.documentElement.dataset.theme = stored;
+      } else {
+        document.documentElement.dataset.theme = "dark";
+      }
+    } catch {
+      document.documentElement.dataset.theme = "dark";
+    }
+  }, []);
 
   // Initial session check (passive: apiFetch redirects to /login on 401)
   useEffect(() => {
@@ -54,30 +69,33 @@ function App() {
   }, [token]);
 
   return (
-    <WorkspaceProvider>
-      <Routes>
-        <Route path="/invite" element={<InviteRegister />} />
-        <Route path="/login" element={token ? <Navigate to="/" replace /> : <LoginPage />} />
-        <Route path="/" element={<Navigate to="/sessions" replace />} />
-        <Route path="/sessions" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
-        <Route path="/sessions/:sessionId" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
-        <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
-        <Route path="/admin/dashboard" element={<ProtectedRoute><AdminDashboard /></ProtectedRoute>} />
-        <Route path="/admin/users" element={<ProtectedRoute><AdminUsers /></ProtectedRoute>} />
-        <Route path="/admin/workspaces" element={<ProtectedRoute><AdminWorkspaces /></ProtectedRoute>} />
-        <Route path="/admin/audit" element={<ProtectedRoute><AdminAuditLog /></ProtectedRoute>} />
-        <Route path="/admin/usage" element={<ProtectedRoute><AdminUsage /></ProtectedRoute>} />
-        <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-        <Route path="/requests" element={<ProtectedRoute><RequestList /></ProtectedRoute>} />
-        <Route path="/requests/:traceId" element={<ProtectedRoute><RequestDetail /></ProtectedRoute>} />
-        <Route path="/quota" element={<ProtectedRoute><QuotaPage /></ProtectedRoute>} />
-        <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
-        <Route path="/invitations" element={<ProtectedRoute><WorkspaceInvitations /></ProtectedRoute>} />
-        <Route path="/invitations/:token" element={<WorkspaceInvitations />} />
-        <Route path="/agents" element={<ProtectedRoute><Agents /></ProtectedRoute>} />
-        <Route path="/api-keys" element={<ProtectedRoute><ApiKeys /></ProtectedRoute>} />
-      </Routes>
-    </WorkspaceProvider>
+    <ToastProvider>
+      <WorkspaceProvider>
+        <Routes>
+          <Route path="/invite" element={<InviteRegister />} />
+          <Route path="/login" element={token ? <Navigate to="/" replace /> : <LoginPage />} />
+          <Route path="/" element={<Navigate to="/sessions" replace />} />
+          <Route path="/sessions" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
+          <Route path="/sessions/:sessionId" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
+          <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
+          <Route path="/admin/dashboard" element={<ProtectedRoute><AdminDashboard /></ProtectedRoute>} />
+          <Route path="/admin/users" element={<ProtectedRoute><AdminUsers /></ProtectedRoute>} />
+          <Route path="/admin/workspaces" element={<ProtectedRoute><AdminWorkspaces /></ProtectedRoute>} />
+          <Route path="/admin/audit" element={<ProtectedRoute><AdminAuditLog /></ProtectedRoute>} />
+          <Route path="/admin/usage" element={<ProtectedRoute><AdminUsage /></ProtectedRoute>} />
+          <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+          <Route path="/requests" element={<ProtectedRoute><RequestList /></ProtectedRoute>} />
+          <Route path="/requests/:traceId" element={<ProtectedRoute><RequestDetail /></ProtectedRoute>} />
+          <Route path="/quota" element={<ProtectedRoute><QuotaPage /></ProtectedRoute>} />
+          <Route path="/settings" element={<Navigate to="/admin/observability" replace />} />
+          <Route path="/admin/observability" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
+          <Route path="/invitations" element={<ProtectedRoute><WorkspaceInvitations /></ProtectedRoute>} />
+          <Route path="/invitations/:token" element={<WorkspaceInvitations />} />
+          <Route path="/agents" element={<ProtectedRoute><Agents /></ProtectedRoute>} />
+          <Route path="/api-keys" element={<ProtectedRoute><ApiKeys /></ProtectedRoute>} />
+        </Routes>
+      </WorkspaceProvider>
+    </ToastProvider>
   );
 }
 
