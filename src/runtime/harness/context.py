@@ -12,7 +12,8 @@ Built by ``HarnessRuntime._build_context`` from the platform
 
 P0 wires the fields the harness needs to actually run; P1 adds
 SandboxManager, HookRegistry, CheckpointStore, PromptAssembler.
-P2/P3 add MemoryStore, SkillRegistry, Scheduler etc.
+P2 adds MemoryStore (MemoryScope) + SkillRegistry.
+P3 will add Scheduler.
 """
 from __future__ import annotations
 
@@ -41,12 +42,13 @@ class HarnessContext:
     # ── Capability systems (scoped to this run) ──
     tool_engine: "ToolEngine"
     guardrails: "GuardrailPipeline"
-    # The following are None in P0; populated by P1 wiring.
+    # The following are None in P0; populated by P1/P2 wiring.
     sandbox: Any | None = None
-    memory: Any | None = None
+    memory: Any | None = None  # P2: MemoryScope
     hooks: Any | None = None
     checkpoint: Any | None = None
     prompt_assembler: Any | None = None
+    skills: Any | None = None  # P2: SkillRegistry
 
     # ── Credentials ──
     secrets: dict[str, str]
@@ -82,6 +84,7 @@ class HarnessContext:
         hooks: Any | None = None,
         checkpoint: Any | None = None,
         prompt_assembler: Any | None = None,
+        skills: Any | None = None,
     ) -> None:
         self.workspace_id = workspace_id
         self.user_id = user_id
@@ -95,6 +98,7 @@ class HarnessContext:
         self.hooks = hooks
         self.checkpoint = checkpoint
         self.prompt_assembler = prompt_assembler
+        self.skills = skills
         self.secrets = secrets or {}
         self.working_memory = {}
         self.workspace_settings = workspace_settings or {}

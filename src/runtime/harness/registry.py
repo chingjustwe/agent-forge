@@ -8,7 +8,7 @@ P0 wires: AgentRegistry, ToolRegistry (+12 builtin tools),
 GuardrailPipeline (+4 builtin guardrails), TelemetryCollector.
 P1 adds: MCPManager, SandboxManager, HookRegistry (+3 builtin hooks),
 CheckpointStore (SQLiteCheckpointStore), PromptAssembler.
-P2 will add: MemoryStore, SkillRegistry.
+P2 adds: MemoryStore (SQLiteMemoryStore), SkillRegistry.
 P3 will add: Scheduler.
 """
 from __future__ import annotations
@@ -33,8 +33,10 @@ from .hooks import (
     TraceHook,
 )
 from .mcp import MCPManager
+from .memory import SQLiteMemoryStore
 from .prompt import PromptAssembler
 from .sandbox import SandboxManager
+from .skills import SkillRegistry
 from .tool_engine import ToolRegistry, tools as _tools_singleton
 
 logger = logging.getLogger(__name__)
@@ -69,9 +71,10 @@ class HarnessRegistry:
         self.hooks = hooks or HookRegistry()
         self.checkpoints = checkpoints or SQLiteCheckpointStore()
         self.prompt_assembler = prompt_assembler or PromptAssembler()
-        # P2+ placeholders
-        self.memory = memory
-        self.skills = skills
+        # P2 components
+        self.memory = memory or SQLiteMemoryStore()
+        self.skills = skills or SkillRegistry()
+        # P3 placeholder
         self.scheduler = scheduler
 
     @classmethod
@@ -81,10 +84,24 @@ class HarnessRegistry:
         - Registers 12 builtin tool definitions into ``ToolRegistry``.
         - Registers 4 builtin guardrails into ``GuardrailPipeline``.
         - Registers 3 builtin hooks into ``HookRegistry``.
+        - Scans ``.agents/skills/`` for skill markdown files (P2).
         - Reuses the module-level ``agents`` / ``tools`` singletons so
           routes can import them directly.
         """
         registry = cls()
+
+        # ── Scan for skill files (P2) ──
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            # We're in an async context — schedule the scan
+            asyncio.ensure_future(registry.skills.scan())
+        else:
+            # Sync context (e.g., tests) — skip auto-scan
+            pass
 
         # ── Register builtin tools ──
         from .tools import BUILTIN_TOOL_DEFINITIONS

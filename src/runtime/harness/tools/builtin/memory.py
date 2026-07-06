@@ -1,12 +1,9 @@
 """save_memory / recall_memory — long-term memory tools.
 
-In P0 these operate on ``ctx.working_memory["memory"]`` (a per-run
-dict) because the ``MemoryStore`` abstraction lands in P2. The handler
-signature is fixed now so adapters can call them; only the backend
-changes later (swap in ``SQLiteMemoryStore`` without touching callers).
-
-The shape of stored records matches ``MemoryRecord`` in the spec so
-the P2 migration is a pure storage swap.
+P2: routes through ``MemoryScope`` (SQLiteMemoryStore + FTS5) when
+available in the context. Falls back to ``ctx.working_memory["memory"]``
+(per-run dict) when no MemoryScope is configured (e.g., in tests or
+when long-term memory is disabled for the agent).
 """
 from __future__ import annotations
 
@@ -36,6 +33,24 @@ async def save(args: dict, ctx: "HarnessContext") -> dict:
         return {"output": "", "error": f"scope must be one of {sorted(_VALID_SCOPES)}"}
 
     key = args.get("key") or ""
+
+    # P2: route through MemoryScope if available
+    if ctx.memory is not None:
+        try:
+            record_id = await ctx.memory.remember(
+                key=key,
+                content=content,
+                scope=scope,  # type: ignore
+                metadata={},
+            )
+            return {
+                "output": f"Saved memory record {record_id} (scope={scope}).",
+                "metadata": {"id": record_id, "scope": scope},
+            }
+        except Exception as exc:
+            return {"output": "", "error": f"Memory store error: {exc}"}
+
+    # Fallback: per-run working_memory (P0 behavior)
     record = {
         "id": uuid.uuid4().hex[:32],
         "scope": scope,
@@ -70,13 +85,39 @@ async def recall(args: dict, ctx: "HarnessContext") -> dict:
         limit = 5
     limit = max(1, min(limit, 50))
 
+    # P2: route through MemoryScope if available
+    if ctx.memory is not None:
+        try:
+            records = await ctx.memory.recall(
+                query=query,
+                scope=scope,  # type: ignore
+                limit=limit,
+            )
+            result = [
+                {
+                    "id": r.id,
+                    "scope": r.scope,
+                    "scope_id": r.scope_id,
+                    "key": r.key,
+                    "content": r.content,
+                    "metadata": r.metadata,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in records
+            ]
+            return {
+                "output": str(result),
+                "metadata": {"count": len(result), "scope": scope},
+            }
+        except Exception as exc:
+            return {"output": "", "error": f"Memory store error: {exc}"}
+
+    # Fallback: per-run working_memory (P0 behavior)
     bucket = _bucket(ctx)
     records = bucket.get(scope, [])
 
-    # P0: naive substring search (case-insensitive). P2 swaps in FTS5.
     q_lower = query.lower()
     matched = [r for r in records if q_lower in r["content"].lower()]
-    # Most recent first.
     matched.sort(key=lambda r: r.get("created_at", 0), reverse=True)
     matched = matched[:limit]
 

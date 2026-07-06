@@ -33,6 +33,7 @@ from src.runtime.models import RuntimeConfig, StreamEvent
 from .agents import AgentDefinition, AgentNotFoundError
 from .context import HarnessContext
 from .checkpoint import CheckpointScope
+from .memory import MemoryScope
 from .registry import HarnessRegistry
 from .retry import CircuitBreaker, CircuitOpenError, RetryPolicy
 from .tool_engine import ToolEngine, ToolError
@@ -92,18 +93,27 @@ class HarnessRuntime(AgentRuntime):
             workspace_root=workspace_root,
         )
 
-        # 2. PromptAssembler.assemble() — P1
+        # 2. Track last user message for memory recall (P2)
+        last_user_msg = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                last_user_msg = msg.get("content", "")
+                break
+        if last_user_msg:
+            ctx.working_memory["last_user_message"] = last_user_msg
+
+        # 3. PromptAssembler.assemble() — P2 (persona + skills + tools + memory + policy)
         if ctx.prompt_assembler is not None:
             try:
                 await ctx.prompt_assembler.assemble(agent, ctx)
             except Exception as exc:
                 logger.warning("PromptAssembler error: %s", exc)
 
-        # 3. Pre-hooks: trigger("run.start")
+        # 4. Pre-hooks: trigger("run.start")
         if ctx.hooks is not None:
             await ctx.hooks.trigger("run.start", {"messages": messages}, ctx)
 
-        # 4. Pre-flight guardrails
+        # 5. Pre-flight guardrails
         try:
             pre = await ctx.guardrails.check_input(messages, ctx)
         except Exception as exc:
@@ -125,12 +135,12 @@ class HarnessRuntime(AgentRuntime):
             pre.modified_messages if pre and pre.modified_messages else messages
         )
 
-        # 5. Adapter execution (with RetryPolicy + CircuitBreaker — P1)
+        # 6. Adapter execution (with RetryPolicy + CircuitBreaker — P1)
         adapter = self._resolve_adapter(agent.adapter, config)
         try:
             async for event in self._run_with_retry(adapter, safe_messages, ctx):
                 if event.type == "tool_call":
-                    # 6. Intercept tool_call → harness-managed execution
+                    # 7. Intercept tool_call → harness-managed execution
                     tool_name = event.data.get("name", "")
                     tool_args = event.data.get("args", {}) or {}
 
@@ -181,7 +191,7 @@ class HarnessRuntime(AgentRuntime):
                 else:
                     yield event
         finally:
-            # 7. Post-hooks + checkpoint commit
+            # 8. Post-hooks + checkpoint commit
             if ctx.hooks is not None:
                 await ctx.hooks.trigger("run.end", {}, ctx)
             if ctx.checkpoint is not None:
@@ -239,7 +249,7 @@ class HarnessRuntime(AgentRuntime):
         workspace_settings: dict,
         workspace_root: str,
     ) -> HarnessContext:
-        """Build a per-run HarnessContext with all P1 subsystems wired."""
+        """Build a per-run HarnessContext with all P1/P2 subsystems wired."""
         from .tools import BUILTIN_HANDLERS
 
         tool_engine = ToolEngine(
@@ -256,6 +266,17 @@ class HarnessRuntime(AgentRuntime):
             checkpoint = CheckpointScope(
                 store=self._registry.checkpoints,
                 session_id=session_id,
+                agent_id=agent.id,
+            )
+
+        # P2: Build per-run MemoryScope (only if agent has memory enabled)
+        memory_scope: MemoryScope | None = None
+        if self._registry.memory is not None and agent.memory and agent.memory.enable_long_term:
+            memory_scope = MemoryScope(
+                store=self._registry.memory,
+                session_id=session_id,
+                user_id=user_id,
+                workspace_id=config.workspace_id,
                 agent_id=agent.id,
             )
 
@@ -276,6 +297,9 @@ class HarnessRuntime(AgentRuntime):
             hooks=self._registry.hooks,
             checkpoint=checkpoint,
             prompt_assembler=self._registry.prompt_assembler,
+            # P2 wiring
+            memory=memory_scope,
+            skills=self._registry.skills,
         )
 
     def _resolve_adapter(

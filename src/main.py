@@ -350,6 +350,32 @@ def _migrate_schema(sync_conn):
             "ON mcp_servers (workspace_id)"
         )
 
+    # Migration M15 (P3b-P2): create memory_records table + FTS5 index.
+    # Stores long-term agent memories scoped to session/user/workspace/agent.
+    if "workspaces" in tables:
+        sync_conn.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS memory_records ("
+            "id VARCHAR(32) NOT NULL PRIMARY KEY,"
+            "scope VARCHAR(20) NOT NULL,"
+            "scope_id VARCHAR(32) NOT NULL,"
+            "key TEXT,"
+            "content TEXT NOT NULL,"
+            "metadata TEXT NOT NULL DEFAULT '{}',"
+            "created_at DATETIME NOT NULL,"
+            "expires_at DATETIME"
+            ")"
+        )
+        sync_conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS idx_memory_scope "
+            "ON memory_records (scope, scope_id)"
+        )
+        # FTS5 virtual table for full-text search on content
+        sync_conn.exec_driver_sql(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS memory_records_fts USING fts5("
+            "content, content='memory_records', content_rowid='rowid'"
+            ")"
+        )
+
     # Migration M12 (P3a): extend agent_configs with structured fields.
     # The legacy ``framework`` + ``config`` JSON columns are kept as-is
     # for backward compat with existing API clients. New structured
