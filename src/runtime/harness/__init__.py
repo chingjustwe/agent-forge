@@ -5,6 +5,7 @@ from src.runtime.harness.mcp import MCPManager, MCPConnection, MCPServerConfig
 from src.runtime.harness.prompt import PromptAssembler
 from src.runtime.harness.retry import CircuitBreaker, CircuitOpenError, RetryPolicy, RetryableError
 from src.runtime.harness.sandbox import SandboxManager, SandboxPolicy, SandboxResult
+from src.runtime.harness.scheduler import ScheduledJob, Scheduler
 from src.runtime.harness.skills import SkillPackage, SkillRegistry
 
 __all__ = [
@@ -27,6 +28,8 @@ __all__ = [
     "SandboxManager",
     "SandboxPolicy",
     "SandboxResult",
+    "ScheduledJob",
+    "Scheduler",
     "SQLiteMemoryStore",
     "SkillPackage",
     "SkillRegistry",

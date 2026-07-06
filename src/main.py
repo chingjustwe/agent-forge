@@ -22,6 +22,7 @@ from src.gateway.routes.mcp import router as mcp_router
 from src.gateway.routes.skills import router as skills_router
 from src.gateway.routes.memory import router as memory_router
 from src.gateway.routes.guardrails import router as guardrails_router
+from src.gateway.routes.scheduler import router as scheduler_router
 from src.gateway.middleware.auth import AuthMiddleware
 from src.gateway.middleware.audit import AuditMiddleware
 from src.infra.db.engine import engine
@@ -355,6 +356,28 @@ def _migrate_schema(sync_conn):
             "ON mcp_servers (workspace_id)"
         )
 
+    # Migration M16 (P3b-P3): create scheduled_jobs table.
+    # Stores cron-based agent invocation jobs.
+    if "workspaces" in tables:
+        sync_conn.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS scheduled_jobs ("
+            "id TEXT NOT NULL PRIMARY KEY,"
+            "workspace_id TEXT NOT NULL,"
+            "agent_id TEXT NOT NULL,"
+            "name TEXT NOT NULL,"
+            "cron TEXT NOT NULL,"
+            "input_messages TEXT NOT NULL DEFAULT '[]',"
+            "enabled INTEGER NOT NULL DEFAULT 1,"
+            "created_at TEXT NOT NULL,"
+            "last_run_at TEXT,"
+            "next_run_at TEXT"
+            ")"
+        )
+        sync_conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_workspace "
+            "ON scheduled_jobs (workspace_id)"
+        )
+
     # Migration M15 (P3b-P2): create memory_records table + FTS5 index.
     # Stores long-term agent memories scoped to session/user/workspace/agent.
     if "workspaces" in tables:
@@ -429,11 +452,14 @@ async def lifespan(app: FastAPI):
     app.state.registry = registry
     app.state.runtime = HarnessRuntime(registry)
     set_runtime(app.state.runtime)
+    # P3: inject runtime into scheduler and start it
+    registry.scheduler.set_runtime(app.state.runtime)
+    await registry.scheduler.start()
 
     yield
 
     # Graceful shutdown: release any held resources (MCP connections,
-    # scheduler, etc.). P0 is a no-op; P1+ subsystems add real cleanup.
+    # scheduler, etc.).
     await registry.shutdown()
 
 
@@ -459,6 +485,7 @@ def create_app() -> FastAPI:
     app.include_router(skills_router)
     app.include_router(memory_router)
     app.include_router(guardrails_router)
+    app.include_router(scheduler_router)
 
     app.add_middleware(AuthMiddleware)
     app.add_middleware(AuditMiddleware)

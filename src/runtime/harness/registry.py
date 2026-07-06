@@ -36,6 +36,7 @@ from .mcp import MCPManager
 from .memory import SQLiteMemoryStore
 from .prompt import PromptAssembler
 from .sandbox import SandboxManager
+from .scheduler import Scheduler
 from .skills import SkillRegistry
 from .tool_engine import ToolRegistry, tools as _tools_singleton
 
@@ -74,8 +75,8 @@ class HarnessRegistry:
         # P2 components
         self.memory = memory or SQLiteMemoryStore()
         self.skills = skills or SkillRegistry()
-        # P3 placeholder
-        self.scheduler = scheduler
+        # P3 component
+        self.scheduler = scheduler or Scheduler()
 
     @classmethod
     def create(cls) -> "HarnessRegistry":
@@ -138,6 +139,9 @@ class HarnessRegistry:
 
     async def shutdown(self) -> None:
         """Release any held resources."""
+        # Shut down scheduler
+        if self.scheduler is not None:
+            await self.scheduler.shutdown()
         # Close MCP connections
         if self.mcp is not None:
             await self.mcp.close_all()
