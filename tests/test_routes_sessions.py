@@ -740,6 +740,7 @@ class TestChatSessionIdPersistence:
         token = await _seed_workspace_with_owner(ws_id, tid, owner_id)
 
         transport = ASGITransport(app=app)
+        new_session_id = None
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             async with client.stream(
                 "POST",
@@ -751,15 +752,27 @@ class TestChatSessionIdPersistence:
                 headers={"Authorization": f"Bearer {token}"},
             ) as resp:
                 assert resp.status_code == 200
-                async for _ in resp.aiter_bytes():
-                    pass
+                events = []
+                async for line in resp.aiter_lines():
+                    if line.startswith("data: "):
+                        events.append(line[len("data: "):])
 
-        # No sessions/messages were created.
+        # Lazy session creation: exactly one ChatSession is created server-side
+        # on the first message, and a `session.created` SSE event is emitted
+        # before any text events.
+        import json as _json
+        first = _json.loads(events[0])
+        assert first["type"] == "session.created"
+        new_session_id = first["data"]["session_id"]
+        assert isinstance(new_session_id, str) and len(new_session_id) > 0
+
         async with async_session() as session:
             from sqlalchemy import select
-            session_count = (
+            session_rows = (
                 await session.execute(
                     select(ChatSession).where(ChatSession.workspace_id == ws_id)
                 )
             ).scalars().all()
-            assert len(session_count) == 0
+            assert len(session_rows) == 1
+            assert session_rows[0].id == new_session_id
+            assert session_rows[0].owner_id == owner_id

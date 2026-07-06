@@ -6,9 +6,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.gateway.auth.rbac import require_permission
 from src.gateway.routes.me import invalidate_workspace_cache
-from src.infra.db.models import User, Workspace, WorkspaceMember
+from src.infra.db.models import AgentConfig, User, Workspace, WorkspaceMember
 from src.infra.db.session import get_db
 from src.utils.slugify import slugify, unique_slug
+
+
+# Default agent seeded into every new workspace so the chat page always
+# has at least one agent to pick. Users can edit or delete it freely.
+_DEFAULT_AGENT_NAME = "Assistant"
+_DEFAULT_AGENT_SYSTEM_PROMPT = "You are a helpful assistant. Be concise and clear."
 
 router = APIRouter()
 
@@ -82,6 +88,21 @@ async def create_workspace(
         owner_id=user_id,
     )
     db.add(ws)
+    await db.flush()  # populate ws.id before referencing it
+
+    # Seed a default agent so the chat page always has something to pick.
+    db.add(AgentConfig(
+        workspace_id=ws.id,
+        name=_DEFAULT_AGENT_NAME,
+        framework="direct_llm",
+        config={},
+        system_prompt=_DEFAULT_AGENT_SYSTEM_PROMPT,
+        model="deepseek-chat",
+        temperature=0.7,
+        max_tokens=4096,
+        created_by=user_id or "",
+    ))
+
     await db.commit()
     await db.refresh(ws)
     return JSONResponse(

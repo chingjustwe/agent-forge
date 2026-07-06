@@ -74,6 +74,38 @@ async def test_create_workspace(app):
 
 
 @pytest.mark.asyncio
+async def test_create_workspace_seeds_default_agent(app):
+    """Creating a workspace should auto-seed a default 'Assistant' agent
+    so the chat page always has at least one agent to pick."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        from src.infra.db.models import Tenant
+        from src.infra.db.engine import async_session
+        async with async_session() as session:
+            session.add(Tenant(name="Test2", domain="test2.com"))
+            await session.commit()
+
+        resp = await client.post(
+            "/api/v1/workspaces",
+            json={"name": "Seeded Workspace"},
+            headers={"Authorization": f"Bearer {_admin_token()}"},
+        )
+        assert resp.status_code == 201
+        ws_id = resp.json()["id"]
+
+        # The workspace should have exactly one agent named "Assistant".
+        agents_resp = await client.get(
+            f"/api/v1/workspaces/{ws_id}/agents",
+            headers={"Authorization": f"Bearer {_admin_token()}"},
+        )
+        assert agents_resp.status_code == 200
+        agents = agents_resp.json()
+        assert len(agents) == 1
+        assert agents[0]["name"] == "Assistant"
+        assert agents[0]["framework"] == "direct_llm"
+
+
+@pytest.mark.asyncio
 async def test_create_workspace_member_forbidden(app):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

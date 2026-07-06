@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
+import secrets
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text as sa_text
 
 from src.gateway.routes.chat import router as chat_router
 from src.gateway.routes.auth import router as auth_router
@@ -468,8 +470,45 @@ def _migrate_schema(sync_conn):
             ")"
         )
 
+    # Migration M19: backfill a default agent for workspaces that have none.
+    # New workspaces get one at creation time (see ``workspaces.py``); this
+    # one-time backfill covers workspaces created before that landed.
+    if "workspaces" in tables and "agent_configs" in tables:
+        from src.gateway.routes.workspaces import (
+            _DEFAULT_AGENT_NAME,
+            _DEFAULT_AGENT_SYSTEM_PROMPT,
+        )
+        cur = sync_conn.exec_driver_sql(
+            "SELECT w.id, w.owner_id FROM workspaces w "
+            "WHERE NOT EXISTS ("
+            "  SELECT 1 FROM agent_configs a WHERE a.workspace_id = w.id"
+            ")"
+        )
+        empty = cur.fetchall()
+        for ws_id, owner_id in empty:
+            sync_conn.execute(
+                sa_text(
+                    "INSERT INTO agent_configs "
+                    "(id, workspace_id, name, framework, config, "
+                    " system_prompt, model, temperature, max_tokens, "
+                    " created_by, created_at, updated_at) "
+                    "VALUES (:id, :ws, :name, 'direct_llm', '{}', "
+                    "        :sys, 'deepseek-chat', 0.7, 4096, "
+                    "        :owner, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ),
+                {
+                    "id": secrets.token_hex(8),
+                    "ws": ws_id,
+                    "name": _DEFAULT_AGENT_NAME,
+                    "sys": _DEFAULT_AGENT_SYSTEM_PROMPT,
+                    "owner": owner_id or "",
+                },
+            )
+        if empty:
+            print(f"[migration] M19 backfilled {len(empty)} workspace(s) with default agent")
 
-@asynccontextmanager
+
+
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

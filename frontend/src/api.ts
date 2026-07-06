@@ -1,5 +1,5 @@
 export interface StreamEvent {
-  type: "text" | "tool_call" | "tool_result" | "error" | "status";
+  type: "text" | "tool_call" | "tool_result" | "error" | "status" | "subagent" | "session.created";
   data: Record<string, unknown>;
   metadata?: Record<string, unknown>;
 }
@@ -916,7 +916,7 @@ export async function acceptWorkspaceInvitation(token: string): Promise<{ worksp
 
 // ─── Agents (P2-2) ─────────────────────────────────────────────────────────
 
-export type AgentFramework = "direct_llm" | "adk" | "langgraph";
+export type AgentFramework = "direct_llm" | "deepagents";
 
 export interface AgentConfig {
   id: string;
@@ -924,6 +924,11 @@ export interface AgentConfig {
   name: string;
   framework: AgentFramework;
   config: Record<string, unknown>;
+  system_prompt?: string;
+  model?: string;
+  temperature?: number;
+  max_tokens?: number;
+  subagents?: Array<{ name: string; description: string; system_prompt?: string; tools?: string[]; model?: string }>;
   created_by: string;
   created_at: string;
   updated_at?: string;

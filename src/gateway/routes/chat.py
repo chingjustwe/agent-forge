@@ -112,6 +112,35 @@ async def _event_stream(
     ws_id = config.workspace_id
     await _touch_workspace_member(ws_id, user_id)
 
+    # Lazy session creation: when no session_id is provided (e.g. the user
+    # clicked "New Session" and hasn't sent a message yet), create the
+    # ChatSession record here, on the first message. Notify the frontend
+    # via a ``session.created`` SSE event so it can update the URL.
+    if not session_id:
+        last_user = next(
+            (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
+            "",
+        )
+        title = _derive_title(last_user) if last_user else "New Chat"
+        try:
+            async with async_session() as db:
+                cs = ChatSession(
+                    workspace_id=ws_id,
+                    owner_id=user_id,
+                    title=title,
+                    visibility="private",
+                )
+                db.add(cs)
+                await db.commit()
+                await db.refresh(cs)
+                session_id = cs.id
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("Failed to create session: %s", exc)
+            session_id = None
+
+        if session_id:
+            yield f"data: {StreamEvent(type='session.created', data={'session_id': session_id, 'title': title}).model_dump_json()}\n\n"
+
     # P1-1: persist the latest user prompt BEFORE streaming starts.
     if session_id:
         last_user = next(

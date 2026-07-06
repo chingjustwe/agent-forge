@@ -86,6 +86,7 @@ function App() {
           <Route path="/login" element={token ? <Navigate to="/" replace /> : <LoginPage />} />
           <Route path="/" element={<Navigate to="/sessions" replace />} />
           <Route path="/sessions" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
+          <Route path="/sessions/new" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
           <Route path="/sessions/:sessionId" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
           <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
           <Route path="/admin/dashboard" element={<ProtectedRoute><AdminDashboard /></ProtectedRoute>} />

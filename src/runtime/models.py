@@ -25,7 +25,7 @@ class Usage(BaseModel):
 
 
 class StreamEvent(BaseModel):
-    type: Literal["text", "tool_call", "tool_result", "error", "status", "subagent"]
+    type: Literal["text", "tool_call", "tool_result", "error", "status", "subagent", "session.created"]
     data: dict
     metadata: dict = {}
     # Phase 4: when True, the runtime must NOT re-execute the tool —

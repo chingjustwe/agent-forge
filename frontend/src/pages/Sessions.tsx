@@ -1,18 +1,19 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
+  AgentConfig,
   ChatMessageInfo,
   ChatSessionInfo,
   SessionShare,
   User,
   WorkspaceMember,
-  createSession,
   createSessionShare,
   deleteSession,
   deleteSessionShare,
   fetchWorkspaceMembers,
   getCurrentUser,
   getSession,
+  listAgents,
   listSessionShares,
   listSessions,
   streamChat,
@@ -44,7 +45,7 @@ function SessionList() {
   const [sessions, setSessions] = useState<ChatSessionInfo[]>([]);
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
+  const [creating] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ChatSessionInfo | null>(null);
   const toast = useToast();
   const navigate = useNavigate();
@@ -88,15 +89,9 @@ function SessionList() {
 
   async function handleCreate() {
     if (!currentWorkspaceId) return;
-    setCreating(true);
-    try {
-      const s = await createSession(currentWorkspaceId, { title: "New Chat" });
-      navigate(`/sessions/${s.id}`);
-    } catch (e: unknown) {
-      toast.error("Create failed", e instanceof Error ? e.message : "Failed to create session");
-    } finally {
-      setCreating(false);
-    }
+    // Lazy creation: don't call createSession here. Navigate to /sessions/new
+    // and let the session be created on the first message.
+    navigate("/sessions/new");
   }
 
   async function confirmDelete() {
@@ -229,19 +224,23 @@ function SessionList() {
 // ---------------------------------------------------------------------------
 function SessionDetail({ sessionId }: { sessionId: string }) {
   const { currentWorkspaceId, currentRole } = useWorkspace();
+  const isNew = sessionId === "new";
   const [session, setSession] = useState<ChatSessionInfo | null>(null);
   const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
   const [user, setUser] = useState<User | null>(null);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!isNew);
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const navigate = useNavigate();
   const toast = useToast();
+
+  // Agent selector state. Workspace must have at least one agent to chat.
+  const [agents, setAgents] = useState<AgentConfig[]>([]);
+  const [selectedAgentName, setSelectedAgentName] = useState("");
 
   // P3-5: session sharing state.
   const [showShareModal, setShowShareModal] = useState(false);
@@ -254,7 +253,7 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
   const [removingUserId, setRemovingUserId] = useState<string | null>(null);
 
   async function loadSession() {
-    if (!currentWorkspaceId) return;
+    if (!currentWorkspaceId || isNew) return;
     setLoading(true);
     try {
       const data = await getSession(currentWorkspaceId, sessionId);
@@ -269,9 +268,29 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
   }
 
   useEffect(() => {
+    if (isNew) {
+      // New session: no need to load from server. Show a blank chat UI.
+      setSession(null);
+      setMessages([]);
+      setLoading(false);
+      return;
+    }
     loadSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentWorkspaceId, sessionId]);
+  }, [currentWorkspaceId, sessionId, isNew]);
+
+  // Load workspace agents for the agent selector.
+  useEffect(() => {
+    if (!currentWorkspaceId) {
+      setAgents([]);
+      return;
+    }
+    listAgents(currentWorkspaceId)
+      .then(setAgents)
+      .catch(() => setAgents([]));
+    // Reset selection when workspace changes.
+    setSelectedAgentName("");
+  }, [currentWorkspaceId]);
 
   useEffect(() => {
     getCurrentUser().then(setUser).catch(() => {});
@@ -281,15 +300,22 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // For new (lazy) sessions, we allow sending as long as the user is logged
+  // in -- the actual ChatSession record is created server-side on the first
+  // message. For existing sessions, the owner/admin checks still apply.
   const canMutate =
-    !!session &&
     !!user &&
-    (user.role === "tenant_admin" ||
-      currentRole === "workspace_admin" ||
-      session.owner_id === user.id);
+    (isNew ||
+      (!!session &&
+        (user.role === "tenant_admin" ||
+          currentRole === "workspace_admin" ||
+          session.owner_id === user.id)));
 
   const sendMessage = useCallback(async () => {
-    if (!input.trim() || streaming || !currentWorkspaceId || !session) return;
+    if (!input.trim() || streaming || !currentWorkspaceId) return;
+    // For existing sessions we need the session record; for new sessions
+    // we intentionally proceed without one.
+    if (!isNew && !session) return;
     const userContent = input;
     setInput("");
     setStreaming(true);
@@ -299,18 +325,22 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
       textareaRef.current.style.height = "auto";
     }
 
+    // Use a placeholder session_id for temp messages on the new-session path;
+    // the real id arrives later via the `session.created` SSE event.
+    const tempSessionId = session?.id ?? "new";
+
     // Optimistic append of the user message.
     const tempId = `tmp-${Date.now()}`;
     setMessages(prev => [
       ...prev,
-      { id: tempId, session_id: session.id, role: "user", content: userContent, tokens: 0, created_at: new Date().toISOString() },
+      { id: tempId, session_id: tempSessionId, role: "user", content: userContent, tokens: 0, created_at: new Date().toISOString() },
     ]);
 
     let assistantContent = "";
     const asstTempId = `tmp-asst-${Date.now()}`;
     setMessages(prev => [
       ...prev,
-      { id: asstTempId, session_id: session.id, role: "assistant", content: "", tokens: 0, created_at: new Date().toISOString() },
+      { id: asstTempId, session_id: tempSessionId, role: "assistant", content: "", tokens: 0, created_at: new Date().toISOString() },
     ]);
 
     try {
@@ -319,7 +349,35 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
         .map(m => ({ role: m.role, content: m.content }));
       history.push({ role: "user", content: userContent });
 
-      for await (const event of streamChat(history, { workspace_id: currentWorkspaceId }, session.id)) {
+      // Build runtime config: agent is required (workspace must have one).
+      const chatConfig: Record<string, unknown> = {
+        workspace_id: currentWorkspaceId,
+        agent: selectedAgentName,
+      };
+
+      // Only forward session_id when we actually have one. When omitted,
+      // the backend creates the ChatSession lazily and emits a
+      // `session.created` event so we can update the URL in place.
+      for await (const event of streamChat(history, chatConfig, session?.id)) {
+        if (event.type === "session.created") {
+          const newSessionId = event.data.session_id as string;
+          const title = (event.data.title as string) || "New Chat";
+          if (newSessionId) {
+            setSession({
+              id: newSessionId,
+              title,
+              workspace_id: currentWorkspaceId,
+              owner_id: user?.id || "",
+              visibility: "private",
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+            } as ChatSessionInfo);
+            // Replace the URL so a refresh keeps the new session id,
+            // without triggering a re-render of the (now stale) new route.
+            navigate(`/sessions/${newSessionId}`, { replace: true });
+          }
+          continue;
+        }
         if (event.type === "text") {
           assistantContent += event.data.content as string;
           setMessages(prev =>
@@ -347,7 +405,7 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
     } finally {
       setStreaming(false);
     }
-  }, [input, streaming, currentWorkspaceId, session, messages, toast]);
+  }, [input, streaming, currentWorkspaceId, session, messages, toast, selectedAgentName, isNew, user, navigate]);
 
   async function handleSaveTitle() {
     if (!session || !currentWorkspaceId) return;
@@ -358,18 +416,6 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
       toast.success("Renamed", "Session title updated.");
     } catch (e: unknown) {
       toast.error("Rename failed", e instanceof Error ? e.message : "Failed to update title");
-    }
-  }
-
-  async function confirmDeleteSession() {
-    if (!session || !currentWorkspaceId) return;
-    try {
-      await deleteSession(currentWorkspaceId, session.id);
-      toast.success("Deleted", `Session "${session.title}" was deleted.`);
-      navigate("/sessions");
-    } catch (e: unknown) {
-      toast.error("Delete failed", e instanceof Error ? e.message : "Failed to delete session");
-      setDeleteConfirmOpen(false);
     }
   }
 
@@ -476,7 +522,10 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
     );
   }
 
-  if (!session) {
+  // For a brand-new (lazy) session we don't have a record yet, but we still
+  // render the chat UI. The "Session not found" branch only fires for an
+  // existing id that failed to load.
+  if (!session && !isNew) {
     return (
       <div>
         <div className="page-header">
@@ -493,7 +542,7 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
     <div className="chat-container">
       <div className="page-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          {editingTitle ? (
+          {editingTitle && session ? (
             <div style={{ display: "flex", gap: 6 }}>
               <input
                 className="chat-input"
@@ -510,9 +559,9 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
           ) : (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <h1 className="page-title" style={{ cursor: "default" }}>
-                {session.title}
+                {session ? session.title : "New Chat"}
               </h1>
-              {canMutate && (
+              {canMutate && session && (
                 <button
                   className="session-rename-btn"
                   onClick={() => setEditingTitle(true)}
@@ -527,14 +576,16 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
             </div>
           )}
           <p className="page-subtitle">
-            <span className={`badge ${session.visibility === "workspace" ? "badge-info" : "badge-warning"}`}>
-              {session.visibility}
-            </span>{" "}
+            {session && (
+              <span className={`badge ${session.visibility === "workspace" ? "badge-info" : "badge-warning"}`}>
+                {session.visibility}
+              </span>
+            )}{" "}
             <span style={{ marginLeft: 8 }}>{messages.length} messages</span>
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          {canMutate && (
+          {canMutate && session && (
             <button className="btn btn-secondary" onClick={openShareModal} title="Share this session with workspace members">
               Share
             </button>
@@ -543,64 +594,91 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
         </div>
       </div>
 
-      <div className="chat-messages">
-        {messages.length === 0 && (
-          <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }}>
-            <div style={{ fontSize: "2.5rem", marginBottom: 12, opacity: 0.5 }}>
-              <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ margin: "0 auto", display: "block" }}>
-                <rect x="8" y="12" width="32" height="24" rx="4" />
-                <path d="M8 20h10l4-4h4l4 4h10" />
-                <circle cx="24" cy="28" r="3" />
-              </svg>
-            </div>
-            <p style={{ fontSize: "0.95rem" }}>No messages yet. Send the first message below.</p>
+      {canMutate && agents.length === 0 ? (
+        <div className="chat-empty-agents">
+          <svg className="chat-empty-agents-icon" width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="11" width="18" height="10" rx="2" />
+            <circle cx="12" cy="5" r="2" />
+            <path d="M12 7v4M8 16h.01M16 16h.01" />
+          </svg>
+          <div className="chat-empty-agents-title">No agents in this workspace</div>
+          <div className="chat-empty-agents-desc">
+            You need at least one agent to start chatting.
           </div>
-        )}
-        {messages.map(m => (
-          <div key={m.id} className={`chat-message chat-message-${m.role}`}>
-            <div className={`chat-bubble chat-bubble-${m.role}`}>
-              {m.content || (m.role === "assistant" && streaming ? "..." : "")}
-            </div>
+          <button className="btn btn-primary" onClick={() => navigate("/agents")}>
+            Create Agent
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="chat-messages">
+            {messages.length === 0 && (
+              <div style={{ textAlign: "center", padding: "60px 20px", color: "var(--text-muted)" }}>
+                <div style={{ fontSize: "2.5rem", marginBottom: 12, opacity: 0.5 }}>
+                  <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ margin: "0 auto", display: "block" }}>
+                    <rect x="8" y="12" width="32" height="24" rx="4" />
+                    <path d="M8 20h10l4-4h4l4 4h10" />
+                    <circle cx="24" cy="28" r="3" />
+                  </svg>
+                </div>
+                <p style={{ fontSize: "0.95rem" }}>No messages yet. Send the first message below.</p>
+              </div>
+            )}
+            {messages.map(m => (
+              <div key={m.id} className={`chat-message chat-message-${m.role}`}>
+                <div className={`chat-bubble chat-bubble-${m.role}`}>
+                  {m.content || (m.role === "assistant" && streaming ? "..." : "")}
+                </div>
+              </div>
+            ))}
+            <div ref={messagesEndRef} />
           </div>
-        ))}
-        <div ref={messagesEndRef} />
-      </div>
 
-      <div className="chat-input-area">
-        {canMutate ? (
-          <>
-            <textarea
-              ref={textareaRef}
-              className="chat-textarea"
-              value={input}
-              onChange={handleInputChange}
-              onKeyDown={handleKeyDown}
-              placeholder="Type a message... (Enter to send, Shift+Enter for new line)"
-              disabled={streaming}
-              rows={1}
-              style={{
-                resize: "none",
-                overflow: "hidden",
-                height: "auto",
-                minHeight: "44px",
-                maxHeight: "200px",
-                fontFamily: "var(--font-sans)",
-                fontSize: "0.88rem",
-              }}
-            />
-            <button className="btn btn-primary" onClick={sendMessage} disabled={streaming || !input.trim()}>
-              {streaming ? "Sending..." : "Send"}
-            </button>
-            <button className="btn btn-danger btn-sm" onClick={() => setDeleteConfirmOpen(true)} title="Delete session">
-              Delete
-            </button>
-          </>
-        ) : (
-          <div className="chat-viewer-notice" style={{ flex: 1, margin: 0 }}>
-            View only -- only the session owner or a workspace admin can send messages in a shared session.
+          <div className="chat-input-area">
+            {canMutate ? (
+              <div className="chat-input-row">
+                <div className="chat-agent-selector">
+                  <Select
+                    value={selectedAgentName}
+                    onChange={setSelectedAgentName}
+                    placeholder="Select an agent..."
+                    options={agents.map(a => ({
+                      value: a.name,
+                      label: a.name,
+                    }))}
+                  />
+                </div>
+                <textarea
+                  ref={textareaRef}
+                  className="chat-textarea"
+                  value={input}
+                  onChange={handleInputChange}
+                  onKeyDown={handleKeyDown}
+                  placeholder={selectedAgentName ? "Type a message... (Enter to send, Shift+Enter for new line)" : "Select an agent to start chatting"}
+                  disabled={streaming || !selectedAgentName}
+                  rows={1}
+                  style={{
+                    resize: "none",
+                    overflow: "hidden",
+                    height: "auto",
+                    minHeight: "44px",
+                    maxHeight: "200px",
+                    fontFamily: "var(--font-sans)",
+                    fontSize: "0.88rem",
+                  }}
+                />
+                <button className="btn btn-primary" onClick={sendMessage} disabled={streaming || !input.trim() || !selectedAgentName}>
+                  {streaming ? "Sending..." : "Send"}
+                </button>
+              </div>
+            ) : (
+              <div className="chat-viewer-notice" style={{ flex: 1, margin: 0 }}>
+                View only -- only the session owner or a workspace admin can send messages in a shared session.
+              </div>
+            )}
           </div>
-        )}
-      </div>
+        </>
+      )}
 
       {/* Share Modal */}
       <Modal
@@ -663,7 +741,7 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
             <div className="form-label" style={{ marginBottom: 6 }}>Add a workspace member</div>
             {(() => {
               const sharedIds = new Set(shares.map(s => s.user_id));
-              const ownerExcluded = new Set([session.owner_id, ...(user ? [user.id] : [])]);
+              const ownerExcluded = new Set([session?.owner_id, ...(user ? [user.id] : [])].filter(Boolean) as string[]);
               const eligible = members.filter(
                 m => !sharedIds.has(m.user_id) && !ownerExcluded.has(m.user_id),
               );
@@ -700,17 +778,6 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
           </>
         )}
       </Modal>
-
-      {/* Delete Confirm Dialog */}
-      <ConfirmDialog
-        open={deleteConfirmOpen}
-        onClose={() => setDeleteConfirmOpen(false)}
-        onConfirm={confirmDeleteSession}
-        title="Delete Session"
-        description={`Delete session "${session.title}"? This cannot be undone.`}
-        confirmText="Delete"
-        variant="danger"
-      />
     </div>
   );
 }

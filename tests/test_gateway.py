@@ -194,3 +194,59 @@ async def test_chat_creates_request_log(app, httpx_mock):
             text("SELECT COUNT(*) as cnt FROM request_logs")
         )
         assert result.one().cnt >= 1
+
+
+@pytest.mark.asyncio
+async def test_chat_lazy_session_creation(app, httpx_mock):
+    """When no session_id is provided, the backend should create a ChatSession
+    on the first message and emit a `session.created` SSE event before any
+    text events. The session_id should then be usable for subsequent calls.
+    """
+    httpx_mock.add_response(
+        url="https://api.deepseek.com/v1/chat/completions",
+        content=b'data: {"choices":[{"delta":{"content":"Hi there"},"finish_reason":null}]}\n\ndata: [DONE]\n',
+        headers={"Content-Type": "text/event-stream"},
+    )
+    await _seed_chat_membership()
+
+    transport = ASGITransport(app=app)
+    new_session_id = None
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        async with client.stream(
+            "POST",
+            "/api/v1/chat",
+            json={
+                "messages": [{"role": "user", "content": "Hello world"}],
+                "config": {"workspace_id": "ws-test-chat"},
+            },
+            headers={"Authorization": f"Bearer {_token()}"},
+        ) as resp:
+            assert resp.status_code == 200
+            events = []
+            async for line in resp.aiter_lines():
+                if line.startswith("data: "):
+                    events.append(line[len("data: "):])
+
+    # First event should be session.created with a real session_id.
+    import json as _json
+    first = _json.loads(events[0])
+    assert first["type"] == "session.created"
+    new_session_id = first["data"]["session_id"]
+    assert isinstance(new_session_id, str) and len(new_session_id) > 0
+    # Title derived from the user message.
+    assert first["data"]["title"] == "Hello world"
+
+    # Subsequent events should NOT include another session.created.
+    for ev in events[1:]:
+        parsed = _json.loads(ev)
+        assert parsed["type"] != "session.created"
+
+    # The ChatSession record should actually exist in the DB, owned by the
+    # authenticated user, with the derived title.
+    from src.infra.db.models import ChatSession
+    async with async_session() as session:
+        cs = await session.get(ChatSession, new_session_id)
+        assert cs is not None
+        assert cs.workspace_id == "ws-test-chat"
+        assert cs.owner_id == "test-user"
+        assert cs.title == "Hello world"

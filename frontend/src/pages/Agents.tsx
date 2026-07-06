@@ -23,8 +23,7 @@ import { SkeletonTable } from "../components/Skeleton";
 
 const FRAMEWORK_OPTIONS: { value: AgentFramework; label: string }[] = [
   { value: "direct_llm", label: "Direct LLM" },
-  { value: "adk", label: "Google ADK" },
-  { value: "langgraph", label: "LangGraph" },
+  { value: "deepagents", label: "DeepAgents" },
 ];
 
 const EMPTY_FORM: AgentFormState = {
