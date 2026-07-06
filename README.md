@@ -28,8 +28,9 @@ See the [master design spec](docs/superpowers/specs/2026-06-26-remote-agent-plat
 | 5 | Observability (traces, metrics, quota, dashboard) | **Done** |
 | 6 | Admin UI & Audit Log | **Done** |
 | 7 | LangGraph Adapter | Not started |
+| — | Workspace Optimization | **Done** — User-workspace M2M, YAML RBAC, invite flow, SMTP, UI polish |
 
-See the [roadmap](docs/ROADMAP.md) for upcoming features (SMTP, password change, batch invites, webhooks, etc.).
+See the [roadmap](docs/ROADMAP.md) for upcoming features (password change, batch invites, OIDC, webhooks, etc.).
 
 ## Directory Structure
 
@@ -52,8 +53,14 @@ agent-platform/
 │       ├── telemetry/           # Collector, spans, metrics, logs, OTLP exporter, quota guardrail
 │       └── settings.py          # Pydantic Settings (env-driven)
 ├── frontend/                    # React 18 + Vite + TypeScript + recharts
-│   └── src/pages/               # ChatPage, Dashboard, Admin*, QuotaPage, Settings, etc.
-├── tests/                       # pytest suite (20 files, ~1,850 lines)
+│   └── src/
+│       ├── styles.css           # CSS design system (dark/light theme via CSS variables)
+│       ├── api.ts               # Centralized API client + TypeScript types
+│       ├── components/          # Shared UI components (Modal, Toast, ConfirmDialog, Dropdown, Select, etc.)
+│       ├── context/             # React Context (WorkspaceContext)
+│       └── pages/               # Sessions, Dashboard, Admin*, Agents, ApiKeys, etc.
+├── tests/                       # pytest suite (37 files, ~9,700 lines, 404 tests)
+├── permissions.yaml             # RBAC permission model — single source of truth
 ├── docs/superpowers/specs/    # Phase-by-phase design specs (7 phases)
 └── .opencode/agents/            # 7 AI agents for spec-driven development
 ```
@@ -99,7 +106,22 @@ cp .env.example .env
 # LLM_API_KEY=sk-<your-key>
 ```
 
-### 4. First User
+### 4. (Optional) Configure SMTP for Email
+
+To send real invitation emails instead of printing to console:
+
+```bash
+# Edit .env and set SMTP credentials (e.g., Brevo free tier: 300 emails/day)
+# SMTP_HOST=smtp-relay.brevo.com
+# SMTP_PORT=587
+# SMTP_USER=<your-brevo-account-email>
+# SMTP_PASSWORD=<your-smtp-key>   # NOT the API key — use the SMTP key from Brevo dashboard
+# SMTP_FROM=noreply@yourdomain.com
+```
+
+See `.env.example` for more providers (Gmail, Resend). Leave SMTP unset to use the console sender during development.
+
+### 5. First User
 
 Register via API (server must be running first):
 
@@ -119,22 +141,32 @@ sqlite3 data/agent_platform.db "UPDATE users SET role='tenant_admin' WHERE email
 
 Then log in at `http://localhost:5175`.
 
+## Frontend
+
+The frontend is a React 18 SPA with a custom CSS design system (no third-party UI library). It supports dark/light theme switching, and uses shared components for consistent interactions: Modal dialogs for forms, Toast notifications for feedback, ConfirmDialog for confirmations, and custom Select/Dropdown components.
+
 ## Frontend Pages
 
 | Route | Page |
 |-------|------|
-| `/` | Chat (SSE streaming) |
-| `/login` | Login |
-| `/invite` | Accept invite & register |
+| `/login` | Login / Register |
+| `/invite` | Accept invite & set password |
+| `/invitations/:token` | Accept workspace invitation |
+| `/sessions` | Session list |
+| `/sessions/:id` | Chat (SSE streaming) |
 | `/dashboard` | Observability dashboard |
 | `/requests` | Request log list |
+| `/requests/:traceId` | Request detail (traces, tool calls) |
+| `/agents` | Agent CRUD |
+| `/api-keys` | API key management |
 | `/quota` | Quota management |
-| `/settings` | OTel export config |
-| `/admin/dashboard` | Tenant overview |
+| `/invitations` | Workspace invitation management |
+| `/admin` | Admin overview |
 | `/admin/users` | User CRUD + invite |
 | `/admin/workspaces` | Workspace management |
 | `/admin/audit` | Audit log viewer |
 | `/admin/usage` | Usage statistics |
+| `/admin/observability` | OTel export config |
 
 ## API Endpoints
 

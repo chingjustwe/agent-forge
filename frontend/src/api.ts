@@ -89,6 +89,9 @@ async function apiFetch(url: string, options?: RequestInit): Promise<Response> {
   });
   if (resp.status === 401) {
     redirectToLogin();
+    // Throw to prevent downstream code from processing the response
+    // after the token has been cleared and the page is navigating away.
+    throw new Error("Session expired — redirecting to login");
   }
   return resp;
 }
@@ -394,7 +397,11 @@ export async function deleteUser(id: string): Promise<void> {
   if (!resp.ok) throw new Error("Failed to delete user");
 }
 
-export async function inviteUser(data: { email: string; role: string; workspace_id?: string; expires_in_days?: number }): Promise<AdminUser> {
+export interface InviteUserResult extends AdminUser {
+  email_error?: string | null;
+}
+
+export async function inviteUser(data: { email: string; role: string; workspace_id?: string; expires_in_days?: number }): Promise<InviteUserResult> {
   const resp = await apiFetch("/api/v1/admin/users/invite", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -463,7 +470,7 @@ export async function fetchAdminWorkspaces(
 
 export async function createAdminWorkspace(
   name: string,
-  options?: { slug?: string; description?: string; icon?: string },
+  options?: { slug?: string; description?: string; icon?: string; max_tokens_per_day?: number; max_cost_per_month?: number },
 ): Promise<AdminWorkspace> {
   const resp = await apiFetch("/api/v1/admin/workspaces", {
     method: "POST",
@@ -687,6 +694,7 @@ export interface ChatSessionInfo {
   id: string;
   workspace_id: string;
   owner_id: string;
+  owner_name: string;
   title: string;
   visibility: "private" | "workspace";
   agent_name: string | null;

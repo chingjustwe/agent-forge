@@ -303,7 +303,7 @@ export default function ApiKeys() {
               ))}
             </div>
           </div>
-          <div className="form-group" style={{ width: 200 }}>
+          <div className="form-group">
             <label className="form-label">Expires in days (blank = never)</label>
             <input
               type="number"
@@ -334,8 +334,8 @@ export default function ApiKeys() {
           </>
         }
       >
-        <div className="confirm-dialog" style={{ marginBottom: 16 }}>
-          <div className="confirm-dialog-icon">
+        <div className="confirm-dialog" style={{ marginBottom: 16, display: "flex", alignItems: "flex-start", gap: 12 }}>
+          <div className="confirm-dialog-icon" style={{ flexShrink: 0 }}>
             <svg
               width="24"
               height="24"
@@ -351,9 +351,11 @@ export default function ApiKeys() {
               <line x1="12" y1="17" x2="12.01" y2="17" />
             </svg>
           </div>
-          <div className="confirm-dialog-title">Save this key now</div>
-          <div className="confirm-dialog-description">
-            Copy this key now. You won&rsquo;t be able to see it again.
+          <div>
+            <div className="confirm-dialog-title">Save this key now</div>
+            <div className="confirm-dialog-description">
+              Copy this key now. You won&rsquo;t be able to see it again.
+            </div>
           </div>
         </div>
         <div className="form-group">

@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { fetchAdminWorkspaces, createAdminWorkspace, updateAdminWorkspace, archiveWorkspace, purgeWorkspace, setDefaultWorkspace, addWorkspaceMember, removeWorkspaceMember, fetchWorkspaceMembers, fetchUsers, AdminWorkspace, WorkspaceMember, AdminUser } from "../api";
 import { Modal } from "../components/Modal";
+import { Select } from "../components/Select";
 import { useToast } from "../components/Toast";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
@@ -25,6 +26,8 @@ export default function AdminWorkspaces() {
   const [newWsSlug, setNewWsSlug] = useState("");
   const [newWsDescription, setNewWsDescription] = useState("");
   const [newWsIcon, setNewWsIcon] = useState("");
+  const [newWsTokens, setNewWsTokens] = useState(0);
+  const [newWsCost, setNewWsCost] = useState(0);
 
   // Member management state
   const [memberWsId, setMemberWsId] = useState<string | null>(null);
@@ -69,6 +72,8 @@ export default function AdminWorkspaces() {
     setNewWsSlug("");
     setNewWsDescription("");
     setNewWsIcon("");
+    setNewWsTokens(0);
+    setNewWsCost(0);
     setCreateOpen(true);
   };
 
@@ -81,6 +86,8 @@ export default function AdminWorkspaces() {
         slug: newWsSlug.trim() || undefined,
         description: newWsDescription.trim() || undefined,
         icon: newWsIcon.trim() || undefined,
+        max_tokens_per_day: newWsTokens || undefined,
+        max_cost_per_month: newWsCost || undefined,
       });
       toast.success("Workspace created");
       setCreateOpen(false);
@@ -352,120 +359,125 @@ export default function AdminWorkspaces() {
             </table>
           </div>
 
-          {/* Member management panel */}
-          {memberWsId && (
-            <div className="card" style={{ marginTop: 20 }}>
-              <div className="card-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <h3 className="card-title">Members of {memberWsName}</h3>
-                <button className="btn btn-secondary btn-sm" onClick={() => setMemberWsId(null)}>Close</button>
+          {/* Member management modal */}
+      <Modal
+        open={!!memberWsId}
+        onClose={() => setMemberWsId(null)}
+        title={`Members of ${memberWsName}`}
+        width="lg"
+        footer={
+          <button className="btn btn-secondary" onClick={() => setMemberWsId(null)}>Close</button>
+        }
+      >
+        {memberLoading ? (
+          <SkeletonTable rows={3} cols={4} />
+        ) : (
+          <>
+            {members.length === 0 ? (
+              <div style={{ padding: 16, textAlign: "center", color: "var(--text-muted)" }}>
+                No members yet. Use the search below to add members.
               </div>
-
-              {memberLoading ? (
-                <SkeletonTable rows={3} cols={4} />
-              ) : (
-                <>
-                  {members.length === 0 ? (
-                    <div style={{ padding: 16, textAlign: "center", color: "var(--text-muted)" }}>
-                      No members yet. Use the search below to add members.
-                    </div>
-                  ) : (
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Email</th>
-                          <th>Name</th>
-                          <th>Role</th>
-                          <th style={{ width: 80 }}>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {members.map((m) => (
-                          <tr key={m.user_id}>
-                            <td>{m.email}</td>
-                            <td>{m.name}</td>
-                            <td><span className="badge badge-primary">{m.role}</span></td>
-                            <td>
-                              <Dropdown
-                                items={[
-                                  {
-                                    label: "Remove",
-                                    variant: "danger",
-                                    onClick: () => setRemoveMemberTarget({ userId: m.user_id, email: m.email }),
-                                  },
-                                ]}
-                              />
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-
-                  <div style={{ padding: 12, borderTop: "1px solid var(--border)" }}>
-                    <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-                      <div className="form-group" style={{ flex: 1, margin: 0, position: "relative" }}>
-                        <label className="form-label">Search registered users</label>
-                        <input
-                          value={searchQuery}
-                          onChange={e => handleSearch(e.target.value)}
-                          placeholder="Search by name or email..."
-                          onFocus={() => searchResults.length > 0 && setShowDropdown(true)}
-                          onBlur={() => setTimeout(() => setShowDropdown(false), 200)}
+            ) : (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Email</th>
+                    <th>Name</th>
+                    <th>Role</th>
+                    <th style={{ width: 80 }}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {members.map((m) => (
+                    <tr key={m.user_id}>
+                      <td>{m.email}</td>
+                      <td>{m.name}</td>
+                      <td><span className="badge badge-primary">{m.role}</span></td>
+                      <td>
+                        <Dropdown
+                          items={[
+                            {
+                              label: "Remove",
+                              variant: "danger",
+                              onClick: () => setRemoveMemberTarget({ userId: m.user_id, email: m.email }),
+                            },
+                          ]}
                         />
-                        {showDropdown && (
-                          <div style={{
-                            position: "absolute", top: "100%", left: 0, right: 0,
-                            background: "var(--bg)", border: "1px solid var(--border)",
-                            borderRadius: 6, maxHeight: 200, overflowY: "auto",
-                            zIndex: 100, boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-                          }}>
-                            {searching ? (
-                              <div style={{ padding: 8, color: "var(--text-muted)", fontSize: "0.85rem" }}>Searching...</div>
-                            ) : searchResults.length === 0 ? (
-                              <div style={{ padding: 8, color: "var(--text-muted)", fontSize: "0.85rem" }}>
-                                {searchQuery ? "No matching users found" : "Start typing to search"}
-                              </div>
-                            ) : (
-                              searchResults.map(u => (
-                                <div key={u.id}
-                                  style={{
-                                    display: "flex", alignItems: "center", gap: 8,
-                                    padding: "6px 8px", cursor: "pointer",
-                                    borderBottom: "1px solid var(--border)",
-                                  }}
-                                  onMouseDown={() => handleAddMember(u.id, u.name || u.email)}
-                                >
-                                  <div style={{ flex: 1 }}>
-                                    <div style={{ fontSize: "0.9rem" }}>{u.name || u.email}</div>
-                                    <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{u.email}</div>
-                                  </div>
-                                  <span className="badge badge-primary" style={{ fontSize: "0.7rem" }}>{u.role}</span>
-                                  <button
-                                    className="btn btn-primary btn-sm"
-                                    disabled={addingUser === u.id}
-                                  >
-                                    {addingUser === u.id ? "Adding..." : "Add"}
-                                  </button>
-                                </div>
-                              ))
-                            )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            <div style={{ padding: "12px 0 0", borderTop: "1px solid var(--border)", marginTop: 12 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+                <div className="form-group" style={{ flex: 1, margin: 0, position: "relative" }}>
+                  <label className="form-label">Search registered users</label>
+                  <input
+                    value={searchQuery}
+                    onChange={e => handleSearch(e.target.value)}
+                    placeholder="Search by name or email..."
+                    onFocus={() => searchResults.length > 0 && setShowDropdown(true)}
+                    onBlur={() => setTimeout(() => setShowDropdown(false), 200)}
+                  />
+                  {showDropdown && (
+                    <div style={{
+                      position: "absolute", top: "100%", left: 0, right: 0,
+                      background: "var(--bg)", border: "1px solid var(--border)",
+                      borderRadius: 6, maxHeight: 200, overflowY: "auto",
+                      zIndex: 100, boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                    }}>
+                      {searching ? (
+                        <div style={{ padding: 8, color: "var(--text-muted)", fontSize: "0.85rem" }}>Searching...</div>
+                      ) : searchResults.length === 0 ? (
+                        <div style={{ padding: 8, color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                          {searchQuery ? "No matching users found" : "Start typing to search"}
+                        </div>
+                      ) : (
+                        searchResults.map(u => (
+                          <div key={u.id}
+                            style={{
+                              display: "flex", alignItems: "center", gap: 8,
+                              padding: "6px 8px", cursor: "pointer",
+                              borderBottom: "1px solid var(--border)",
+                            }}
+                            onMouseDown={() => handleAddMember(u.id, u.name || u.email)}
+                          >
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontSize: "0.9rem" }}>{u.name || u.email}</div>
+                              <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>{u.email}</div>
+                            </div>
+                            <span className="badge badge-primary" style={{ fontSize: "0.7rem" }}>{u.role}</span>
+                            <button
+                              className="btn btn-primary btn-sm"
+                              disabled={addingUser === u.id}
+                            >
+                              {addingUser === u.id ? "Adding..." : "Add"}
+                            </button>
                           </div>
-                        )}
-                      </div>
-                      <div className="form-group" style={{ margin: 0 }}>
-                        <label className="form-label">Role</label>
-                        <select value={addRole} onChange={e => setAddRole(e.target.value)}>
-                          <option value="member">Member</option>
-                          <option value="workspace_admin">Admin</option>
-                          <option value="viewer">Viewer</option>
-                        </select>
-                      </div>
+                        ))
+                      )}
                     </div>
-                  </div>
-                </>
-              )}
+                  )}
+                </div>
+                <div className="form-group" style={{ margin: 0, width: 150, flexShrink: 0 }}>
+                  <label className="form-label">Role</label>
+                  <Select
+                    value={addRole}
+                    onChange={setAddRole}
+                    options={[
+                      { value: "member", label: "Member" },
+                      { value: "workspace_admin", label: "Admin" },
+                      { value: "viewer", label: "Viewer" },
+                    ]}
+                  />
+                </div>
+              </div>
             </div>
-          )}
+          </>
+        )}
+      </Modal>
         </>
       )}
 
@@ -475,7 +487,7 @@ export default function AdminWorkspaces() {
         onClose={() => setCreateOpen(false)}
         title="Create Workspace"
       >
-        <form onSubmit={handleCreate} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <form onSubmit={handleCreate}>
           <div className="form-group">
             <label className="form-label">Workspace name *</label>
             <input
@@ -485,8 +497,8 @@ export default function AdminWorkspaces() {
               autoFocus
             />
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <div className="form-group" style={{ flex: 1 }}>
+          <div className="form-row">
+            <div className="form-group">
               <label className="form-label">Icon (emoji or URL)</label>
               <input
                 value={newWsIcon}
@@ -494,7 +506,7 @@ export default function AdminWorkspaces() {
                 placeholder="Icon"
               />
             </div>
-            <div className="form-group" style={{ flex: 1 }}>
+            <div className="form-group">
               <label className="form-label">Slug</label>
               <input
                 value={newWsSlug}
@@ -511,6 +523,16 @@ export default function AdminWorkspaces() {
               placeholder="Description (optional)"
             />
           </div>
+          <div className="form-row">
+            <div className="form-group">
+              <label className="form-label">Tokens per day</label>
+              <input type="number" value={newWsTokens} onChange={(e) => setNewWsTokens(Number(e.target.value))} />
+            </div>
+            <div className="form-group">
+              <label className="form-label">Cost per month ($)</label>
+              <input type="number" value={newWsCost} onChange={(e) => setNewWsCost(Number(e.target.value))} />
+            </div>
+          </div>
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
             <button type="button" className="btn btn-secondary" onClick={() => setCreateOpen(false)}>Cancel</button>
             <button type="submit" className="btn btn-primary" disabled={creating}>
@@ -526,17 +548,17 @@ export default function AdminWorkspaces() {
         onClose={() => setEditWs(null)}
         title="Edit Workspace"
       >
-        <form onSubmit={handleSave} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <form onSubmit={handleSave}>
           <div className="form-group">
             <label className="form-label">Name *</label>
             <input value={editName} onChange={(e) => setEditName(e.target.value)} autoFocus />
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <div className="form-group" style={{ flex: 1 }}>
+          <div className="form-row">
+            <div className="form-group">
               <label className="form-label">Slug</label>
               <input value={editSlug} onChange={(e) => setEditSlug(e.target.value)} placeholder="slug" />
             </div>
-            <div className="form-group" style={{ flex: 1 }}>
+            <div className="form-group">
               <label className="form-label">Icon</label>
               <input value={editIcon} onChange={(e) => setEditIcon(e.target.value)} placeholder="emoji / URL" />
             </div>
@@ -545,12 +567,12 @@ export default function AdminWorkspaces() {
             <label className="form-label">Description</label>
             <input value={editDescription} onChange={(e) => setEditDescription(e.target.value)} placeholder="description" />
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <div className="form-group" style={{ flex: 1 }}>
+          <div className="form-row">
+            <div className="form-group">
               <label className="form-label">Tokens per day</label>
               <input type="number" value={editTokens} onChange={(e) => setEditTokens(Number(e.target.value))} />
             </div>
-            <div className="form-group" style={{ flex: 1 }}>
+            <div className="form-group">
               <label className="form-label">Cost per month ($)</label>
               <input type="number" value={editCost} onChange={(e) => setEditCost(Number(e.target.value))} />
             </div>

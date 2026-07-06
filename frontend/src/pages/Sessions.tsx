@@ -20,6 +20,7 @@ import {
 } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
 import { Modal } from "../components/Modal";
+import { Select } from "../components/Select";
 import { useToast } from "../components/Toast";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
@@ -183,7 +184,7 @@ function SessionList() {
                     </span>
                   </td>
                   <td style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>
-                    {s.owner_id === user?.id ? "you" : s.owner_id.slice(0, 8)}
+                    {s.owner_id === user?.id ? "you" : s.owner_name}
                   </td>
                   <td style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>
                     {formatTimestamp(s.updated_at)}
@@ -676,17 +677,15 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
               return (
                 <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
                   <div className="form-group" style={{ flex: 1, margin: 0 }}>
-                    <select
+                    <Select
                       value={selectedUserId}
-                      onChange={e => setSelectedUserId(e.target.value)}
-                    >
-                      <option value="">Select a member...</option>
-                      {eligible.map(m => (
-                        <option key={m.user_id} value={m.user_id}>
-                          {m.name || m.email} {m.email ? `<${m.email}>` : ""}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={setSelectedUserId}
+                      placeholder="Select a member..."
+                      options={eligible.map(m => ({
+                        value: m.user_id,
+                        label: `${m.name || m.email} ${m.email ? `<${m.email}>` : ""}`,
+                      }))}
+                    />
                   </div>
                   <button
                     className="btn btn-primary"

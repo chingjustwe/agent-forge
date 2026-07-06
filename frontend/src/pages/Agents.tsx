@@ -14,6 +14,7 @@ import {
 } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
 import { Modal } from "../components/Modal";
+import { Select } from "../components/Select";
 import { useToast } from "../components/Toast";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
@@ -327,14 +328,11 @@ export default function Agents() {
           </div>
           <div className="form-group">
             <label className="form-label">Framework</label>
-            <select
+            <Select
               value={form.framework}
-              onChange={e => setForm({ ...form, framework: e.target.value as AgentFramework })}
-            >
-              {FRAMEWORK_OPTIONS.map(o => (
-                <option key={o.value} value={o.value}>{o.label}</option>
-              ))}
-            </select>
+              onChange={(v) => setForm({ ...form, framework: v as AgentFramework })}
+              options={FRAMEWORK_OPTIONS.map(o => ({ value: o.value, label: o.label }))}
+            />
           </div>
           <div className="form-group">
             <label className="form-label">Model</label>
@@ -354,7 +352,7 @@ export default function Agents() {
               placeholder="You are a helpful assistant."
             />
           </div>
-          <div className="form-group" style={{ width: 160 }}>
+          <div className="form-group">
             <label className="form-label">Temperature</label>
             <input
               type="number"
@@ -410,15 +408,11 @@ export default function Agents() {
               No other workspaces available to copy to.
             </div>
           ) : (
-            <select
+            <Select
               value={targetWsId}
-              onChange={e => setTargetWsId(e.target.value)}
-              autoFocus
-            >
-              {targetWorkspaces.map(w => (
-                <option key={w.id} value={w.id}>{w.name}</option>
-              ))}
-            </select>
+              onChange={setTargetWsId}
+              options={targetWorkspaces.map(w => ({ value: w.id, label: w.name }))}
+            />
           )}
         </div>
       </Modal>

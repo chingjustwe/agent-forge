@@ -34,11 +34,11 @@ export function ConfirmDialog({
       setInternalLoading(true);
       try {
         await result;
-        setInternalLoading(false);
-        onClose();
       } catch {
-        // Keep dialog open on rejection
+        // Error already handled by the caller (toast.error etc.)
+      } finally {
         setInternalLoading(false);
+        onClose(); // Always close after confirm completes
       }
     } else {
       onClose();
@@ -46,42 +46,58 @@ export function ConfirmDialog({
   }
 
   return (
-    <Modal open={open} onClose={onClose} width="sm">
+    <Modal open={open} onClose={onClose} width="sm" hideHeader>
       <div className="confirm-dialog">
-        <div className="confirm-dialog-icon">
-          {variant === "danger" ? (
+        <div className="confirm-dialog-header">
+          <div className="confirm-dialog-icon">
+            {variant === "danger" ? (
+              <svg
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polyline points="3,6 5,6 21,6" />
+                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                <path d="M10 11v6" />
+                <path d="M14 11v6" />
+                <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+              </svg>
+            ) : (
+              <svg
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <circle cx="12" cy="16" r="0.5" fill="currentColor" />
+              </svg>
+            )}
+          </div>
+          <button className="modal-close" onClick={onClose} aria-label="Close">
             <svg
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              viewBox="0 0 16 16"
               fill="none"
               stroke="currentColor"
-              strokeWidth="1.5"
+              strokeWidth="2"
               strokeLinecap="round"
-              strokeLinejoin="round"
             >
-              <polyline points="3,6 5,6 21,6" />
-              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-              <path d="M10 11v6" />
-              <path d="M14 11v6" />
-              <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+              <line x1="4" y1="4" x2="12" y2="12" />
+              <line x1="12" y1="4" x2="4" y2="12" />
             </svg>
-          ) : (
-            <svg
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="8" x2="12" y2="12" />
-              <circle cx="12" cy="16" r="0.5" fill="currentColor" />
-            </svg>
-          )}
+          </button>
         </div>
         <div className="confirm-dialog-title">{title}</div>
         <div className="confirm-dialog-description">{description}</div>

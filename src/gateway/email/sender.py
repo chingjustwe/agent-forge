@@ -92,7 +92,10 @@ def get_sender() -> EmailSender:
 
 
 def send_invite_email(email: str, invite_url: str, expires_in_days: int = 7) -> None:
-    """Send an invitation email to *email* with the link *invite_url*."""
+    """Send an invitation email to *email* with the link *invite_url*.
+
+    Raises RuntimeError if SMTP sending fails, so the caller can surface the error.
+    """
     subject = "You've been invited to Agent Platform"
     text = (
         f"You've been invited to join Agent Platform.\n\n"
@@ -111,7 +114,4 @@ def send_invite_email(email: str, invite_url: str, expires_in_days: int = 7) -> 
         f"<p style='color: #888; font-size: 0.85rem;'>This invitation expires in {expires_in_days} day(s).</p>"
         f"</body></html>"
     )
-    try:
-        get_sender().send(to=email, subject=subject, text=text, html=html)
-    except Exception as exc:
-        logger.error("send_invite_email failed for %s: %s", email, exc)
+    get_sender().send(to=email, subject=subject, text=text, html=html)

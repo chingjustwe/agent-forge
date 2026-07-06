@@ -3,6 +3,7 @@ import {
   useContext,
   useState,
   useCallback,
+  useEffect,
   useRef,
   ReactNode,
 } from "react";
@@ -111,7 +112,7 @@ function Toast({
   }
 
   // Mount / resume timer
-  React.useEffect(() => {
+  useEffect(() => {
     startTimer();
     return () => {
       if (timerRef.current !== null) clearTimeout(timerRef.current);

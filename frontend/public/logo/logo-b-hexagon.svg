@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- Variant B: Hexagon Shield — structural, platform-like -->
+  <defs>
+    <linearGradient id="gB" x1="0" y1="0" x2="32" y2="32">
+      <stop offset="0%" stop-color="#3a81f6"/>
+      <stop offset="100%" stop-color="#2563ef"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer hexagon -->
+  <path d="M16 2L28 9V23L16 30L4 23V9L16 2Z" stroke="#2563ef" stroke-width="1.5" fill="none"/>
+  <!-- Inner hexagon, rotated slightly for depth -->
+  <path d="M16 7L23 11V21L16 25L9 21V11L16 7Z" fill="url(#gB)" opacity="0.9"/>
+  <!-- Inner dot (agent core) -->
+  <circle cx="16" cy="16" r="3" fill="#ffffff" opacity="0.9"/>
+</svg>

@@ -27,8 +27,17 @@ agent-platform/
 │       ├── telemetry/       # Collector, spans, metrics, logs, OTLP, quota
 │       └── settings.py      # Pydantic Settings
 ├── frontend/                # React 18 SPA (Vite + TypeScript + recharts)
-├── tests/                   # pytest suite (~1,850 lines, 20 test files)
-├── docs/superpowers/        # Design specs and implementation plans
+│   └── src/
+│       ├── styles.css       # CSS design system (dark/light theme, CSS variables)
+│       ├── api.ts           # Centralized API client + TypeScript types
+│       ├── components/      # Shared UI components (Modal, Toast, ConfirmDialog, Dropdown, Select, EmptyState, Skeleton, Layout, TraceTimeline)
+│       ├── context/         # React Context (WorkspaceContext)
+│       └── pages/           # 15 page components (Sessions, Dashboard, Admin*, Agents, etc.)
+├── tests/                   # pytest suite (~9,700 lines, 37 test files, 404 tests)
+├── permissions.yaml         # Permission model — single source of truth for RBAC
+├── docs/
+│   ├── superpowers/         # Design specs and implementation plans
+│   └── workspace-optimization/  # Workspace refactor design docs (P0-P3)
 ├── .opencode/agents/        # AI agent definitions for spec-driven development
 └── pyproject.toml           # Python project config (uv)
 ```
@@ -44,8 +53,17 @@ agent-platform/
 | 5 | Observability (traces, metrics, quota, dashboard) | **Done** |
 | 6 | Admin UI & Audit Log | **Done** |
 | 7 | LangGraph Adapter | Not started |
+| — | Workspace Optimization (P0-P3) | **Done** — Many-to-many user-workspace, YAML RBAC, invite flow, SMTP, UI polish |
 
 Tech stack: Python 3.11+, FastAPI, SQLAlchemy async (SQLite), React 18, Vite, TypeScript, recharts. LLM provider: DeepSeek (OpenAI-compatible API).
+
+### Frontend Design System
+
+The frontend uses a custom CSS design system with no third-party UI library:
+- **Theme**: Dark/light mode via CSS variables + `[data-theme]` attribute, persisted in localStorage
+- **Shared components**: `Modal`, `Toast` (context-based notifications), `ConfirmDialog`, `Dropdown` (3-dot menus), `Select` (custom dropdown), `EmptyState`, `Skeleton` (shimmer loading)
+- **Sidebar**: Collapsible with grouped nav sections, SVG icons, workspace switcher, theme toggle
+- **Interaction patterns**: All CRUD forms use Modal dialogs (not inline), confirmations use ConfirmDialog (not `window.confirm`), feedback uses Toast (not inline alerts)
 
 ---
 

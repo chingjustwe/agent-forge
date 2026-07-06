@@ -48,7 +48,7 @@ export default function RequestList() {
           placeholder="Filter by model or status..."
           value={filter}
           onChange={e => setFilter(e.target.value)}
-          style={{ minWidth: 240 }}
+
         />
       </div>
 

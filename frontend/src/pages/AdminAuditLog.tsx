@@ -1,16 +1,17 @@
 import { useEffect, useState } from "react";
 import { fetchAdminAudit, AuditEntry, AuditResponse } from "../api";
 import { EmptyState } from "../components/EmptyState";
+import { Select } from "../components/Select";
 import { SkeletonTable } from "../components/Skeleton";
 
-const ACTIONS = [
-  "",
-  "workspace.create",
-  "workspace.update",
-  "workspace.delete",
-  "user.role_change",
-  "user.invite",
-  "user.delete",
+const ACTION_OPTIONS = [
+  { value: "", label: "All actions" },
+  { value: "workspace.create", label: "workspace.create" },
+  { value: "workspace.update", label: "workspace.update" },
+  { value: "workspace.delete", label: "workspace.delete" },
+  { value: "user.role_change", label: "user.role_change" },
+  { value: "user.invite", label: "user.invite" },
+  { value: "user.delete", label: "user.delete" },
 ];
 
 export default function AdminAuditLog() {
@@ -51,12 +52,12 @@ export default function AdminAuditLog() {
       </div>
 
       <div className="filter-bar">
-        <select value={action} onChange={(e) => setAction(e.target.value)}>
-          {ACTIONS.map((a) => (
-            <option key={a} value={a}>{a || "All actions"}</option>
-          ))}
-        </select>
-        <input placeholder="User ID" value={userId} onChange={(e) => setUserId(e.target.value)} style={{ minWidth: 200 }} />
+        <Select
+          value={action}
+          onChange={setAction}
+          options={ACTION_OPTIONS}
+        />
+        <input placeholder="User ID" value={userId} onChange={(e) => setUserId(e.target.value)} />
         <input type="date" value={since} onChange={(e) => setSince(e.target.value)} />
         <input type="date" value={until} onChange={(e) => setUntil(e.target.value)} />
         <button className="btn btn-secondary" onClick={load}>Filter</button>

@@ -9,6 +9,7 @@ interface ModalProps {
   footer?: ReactNode;
   closeOnBackdrop?: boolean;
   closeOnEsc?: boolean;
+  hideHeader?: boolean;
 }
 
 const WIDTH_CLASSES: Record<string, string> = {
@@ -26,6 +27,7 @@ export function Modal({
   footer,
   closeOnBackdrop = true,
   closeOnEsc = true,
+  hideHeader = false,
 }: ModalProps) {
   const backdropRef = useRef<HTMLDivElement>(null);
 
@@ -35,7 +37,8 @@ export function Modal({
       const prev = document.body.style.overflow;
       document.body.style.overflow = "hidden";
       return () => {
-        document.body.style.overflow = prev;
+        // Safety: always restore on cleanup
+        document.body.style.overflow = prev || "";
       };
     }
   }, [open]);
@@ -65,23 +68,25 @@ export function Modal({
       onClick={handleBackdropClick}
     >
       <div className={`modal-card ${WIDTH_CLASSES[width] || ""}`}>
-        <div className="modal-header">
-          {title && <div className="modal-title">{title}</div>}
-          <button className="modal-close" onClick={onClose} aria-label="Close">
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-            >
-              <line x1="4" y1="4" x2="12" y2="12" />
-              <line x1="12" y1="4" x2="4" y2="12" />
-            </svg>
-          </button>
-        </div>
+        {!hideHeader && (
+          <div className="modal-header">
+            {title && <div className="modal-title">{title}</div>}
+            <button className="modal-close" onClick={onClose} aria-label="Close">
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              >
+                <line x1="4" y1="4" x2="12" y2="12" />
+                <line x1="12" y1="4" x2="4" y2="12" />
+              </svg>
+            </button>
+          </div>
+        )}
         <div className="modal-body">{children}</div>
         {footer && <div className="modal-footer">{footer}</div>}
       </div>

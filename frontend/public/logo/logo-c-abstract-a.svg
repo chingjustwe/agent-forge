@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <!-- Variant C: Abstract "A" — stylized lettermark -->
+  <defs>
+    <linearGradient id="gC" x1="0" y1="0" x2="32" y2="32">
+      <stop offset="0%" stop-color="#3a81f6"/>
+      <stop offset="100%" stop-color="#2563ef"/>
+    </linearGradient>
+  </defs>
+  <!-- Stylized A shape using geometric strokes -->
+  <path d="M6 26L16 6L26 26" stroke="url(#gC)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M10 18H22" stroke="#2563ef" stroke-width="2" stroke-linecap="round"/>
+  <!-- Agent node dots on vertices -->
+  <circle cx="6" cy="26" r="2.5" fill="url(#gC)"/>
+  <circle cx="16" cy="6" r="2.5" fill="url(#gC)"/>
+  <circle cx="26" cy="26" r="2.5" fill="url(#gC)"/>
+</svg>

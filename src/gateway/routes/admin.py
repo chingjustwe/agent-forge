@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -32,6 +33,8 @@ from src.infra.db.session import get_db
 from src.infra.settings import settings
 from src.infra.telemetry.collector import TelemetryCollector
 from src.utils.slugify import slugify, unique_slug
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 admin_router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
@@ -391,7 +394,12 @@ async def invite_user(
     # Send invitation email
     base_url = settings.app_base_url.rstrip("/")
     invite_url = f"{base_url}/invite?token={raw_token}"
-    send_invite_email(email=email, invite_url=invite_url, expires_in_days=expires_in_days)
+    email_error = None
+    try:
+        send_invite_email(email=email, invite_url=invite_url, expires_in_days=expires_in_days)
+    except Exception as exc:
+        logger.error("Failed to send invite email to %s: %s", email, exc)
+        email_error = str(exc)
 
     return {
         "id": user.id,
@@ -402,6 +410,7 @@ async def invite_user(
         "invited_workspace_id": workspace_id,
         "invited_workspace_name": ws_name,
         "expires_at": invite.expires_at.isoformat(),
+        "email_error": email_error,
     }
 
 
@@ -562,6 +571,8 @@ class CreateWorkspaceBody(BaseModel):
     slug: str | None = None
     description: str | None = None
     icon: str | None = None
+    max_tokens_per_day: int | None = None
+    max_cost_per_month: float | None = None
 
 
 @admin_router.post("/workspaces", status_code=201)
@@ -582,6 +593,8 @@ async def admin_create_workspace(
         description=body.description,
         icon=body.icon,
         owner_id=user_id,
+        max_tokens_per_day=body.max_tokens_per_day if body.max_tokens_per_day is not None else 1_000_000,
+        max_cost_per_month=body.max_cost_per_month if body.max_cost_per_month is not None else 0.0,
     )
     db.add(ws)
     await db.commit()

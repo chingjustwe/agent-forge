@@ -12,6 +12,7 @@ import {
 } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
 import { useToast } from "../components/Toast";
+import { Select } from "../components/Select";
 import { Modal } from "../components/Modal";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
@@ -271,15 +272,19 @@ function ManageInvitationsPage() {
               placeholder="invitee@example.com"
             />
           </div>
-          <div style={{ display: "flex", gap: 12 }}>
-            <div className="form-group" style={{ flex: 1 }}>
+          <div className="form-row">
+            <div className="form-group">
               <label className="form-label">Role</label>
-              <select value={role} onChange={e => setRole(e.target.value)}>
-                <option value="member">Member</option>
-                <option value="workspace_admin">Workspace Admin</option>
-              </select>
+              <Select
+                value={role}
+                onChange={setRole}
+                options={[
+                  { value: "member", label: "Member" },
+                  { value: "workspace_admin", label: "Workspace Admin" },
+                ]}
+              />
             </div>
-            <div className="form-group" style={{ width: 160 }}>
+            <div className="form-group">
               <label className="form-label">Expires in (days)</label>
               <input
                 type="number"

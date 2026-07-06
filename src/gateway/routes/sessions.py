@@ -47,11 +47,12 @@ class CreateShareRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Serializers
 # ---------------------------------------------------------------------------
-def _serialize_session(cs: ChatSession) -> dict:
+def _serialize_session(cs: ChatSession, owner_name: str | None = None) -> dict:
     return {
         "id": cs.id,
         "workspace_id": cs.workspace_id,
         "owner_id": cs.owner_id,
+        "owner_name": owner_name or cs.owner_id[:8],
         "title": cs.title,
         "visibility": cs.visibility,
         "agent_name": cs.agent_name,
@@ -92,6 +93,18 @@ def _serialize_share(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+async def _resolve_owner_names(
+    db: AsyncSession, owner_ids: set[str],
+) -> dict[str, str]:
+    """Batch-resolve owner_id → owner_name from the users table."""
+    if not owner_ids:
+        return {}
+    result = await db.execute(
+        select(User.id, User.name).where(User.id.in_(owner_ids))
+    )
+    return {row[0]: row[1] for row in result.all()}
+
+
 def _can_see_session(
     cs: ChatSession,
     user_id: str,
@@ -164,7 +177,8 @@ async def create_session(
     db.add(cs)
     await db.commit()
     await db.refresh(cs)
-    return JSONResponse(status_code=201, content=_serialize_session(cs))
+    owner_name = user.get("name", "")
+    return JSONResponse(status_code=201, content=_serialize_session(cs, owner_name))
 
 
 @router.get("/api/v1/workspaces/{workspace_id}/sessions")
@@ -216,11 +230,13 @@ async def list_sessions(
     )
     rows = result.scalars().all()
     visible = [
-        _serialize_session(cs)
-        for cs in rows
+        cs for cs in rows
         if _can_see_session(cs, user_id, role, tenant_role, shared_ids)
     ]
-    return visible
+    owner_names = await _resolve_owner_names(
+        db, {cs.owner_id for cs in visible}
+    )
+    return [_serialize_session(cs, owner_names.get(cs.owner_id)) for cs in visible]
 
 
 @router.get("/api/v1/workspaces/{workspace_id}/sessions/{session_id}")
@@ -283,7 +299,8 @@ async def get_session(
         .order_by(ChatMessage.created_at.asc())
     )
     messages = [_serialize_message(m) for m in msg_result.scalars().all()]
-    return {"session": _serialize_session(cs), "messages": messages}
+    owner_names = await _resolve_owner_names(db, {cs.owner_id})
+    return {"session": _serialize_session(cs, owner_names.get(cs.owner_id)), "messages": messages}
 
 
 @router.patch("/api/v1/workspaces/{workspace_id}/sessions/{session_id}")
@@ -339,7 +356,8 @@ async def update_session(
         cs.visibility = body.visibility
     await db.commit()
     await db.refresh(cs)
-    return _serialize_session(cs)
+    owner_names = await _resolve_owner_names(db, {cs.owner_id})
+    return _serialize_session(cs, owner_names.get(cs.owner_id))
 
 
 @router.delete("/api/v1/workspaces/{workspace_id}/sessions/{session_id}")

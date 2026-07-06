@@ -12,6 +12,7 @@ import {
   PendingInvitation,
 } from "../api";
 import { Modal } from "../components/Modal";
+import { Select } from "../components/Select";
 import { useToast } from "../components/Toast";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
@@ -133,8 +134,12 @@ export default function AdminUsers() {
     if (!inviteEmail.trim()) return;
     setInviting(true);
     try {
-      await inviteUser({ email: inviteEmail, role: inviteRole, workspace_id: inviteWsId || undefined, expires_in_days: inviteExpires });
-      toast.success("Invitation sent", `Invitation sent to ${inviteEmail}`);
+      const result = await inviteUser({ email: inviteEmail, role: inviteRole, workspace_id: inviteWsId || undefined, expires_in_days: inviteExpires });
+      if (result.email_error) {
+        toast.warning("Invitation created but email not sent", `Invite record created for ${inviteEmail}, but email delivery failed: ${result.email_error}`);
+      } else {
+        toast.success("Invitation sent", `Invitation sent to ${inviteEmail}`);
+      }
       setInviteOpen(false);
       setInviteEmail("");
       setInviteWsId("");
@@ -160,9 +165,6 @@ export default function AdminUsers() {
       <div className="page-header">
         <h1 className="page-title">User Management</h1>
         <p className="page-subtitle">Manage users, roles, and invitations</p>
-        <div style={{ marginLeft: "auto" }}>
-          <button className="btn btn-primary" onClick={openInvite}>Invite User</button>
-        </div>
       </div>
 
       <div className="filter-bar">
@@ -170,14 +172,20 @@ export default function AdminUsers() {
           placeholder="Search email or name..."
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{ minWidth: 200 }}
         />
-        <select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)}>
-          <option value="">All roles</option>
-          <option value="tenant_admin">Tenant Admin</option>
-          <option value="member">Member</option>
-        </select>
+        <Select
+          value={roleFilter}
+          onChange={setRoleFilter}
+          options={[
+            { value: "", label: "All roles" },
+            { value: "tenant_admin", label: "Tenant Admin" },
+            { value: "member", label: "Member" },
+          ]}
+        />
         <button className="btn btn-secondary" onClick={handleSearch}>Search</button>
+        <div style={{ marginLeft: "auto" }}>
+          <button className="btn btn-primary" onClick={openInvite}>Invite User</button>
+        </div>
       </div>
 
       {loading ? (
@@ -304,39 +312,49 @@ export default function AdminUsers() {
         onClose={() => setInviteOpen(false)}
         title="Invite User"
       >
-        <form onSubmit={handleInvite} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <form onSubmit={handleInvite}>
           <div className="form-group">
             <label className="form-label">Email *</label>
             <input placeholder="user@example.com" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} autoFocus />
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <div className="form-group" style={{ flex: 1 }}>
+          <div className="form-row">
+            <div className="form-group">
               <label className="form-label">Role</label>
-              <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)}>
-                <option value="member">Member</option>
-                <option value="workspace_admin">Workspace Admin</option>
-                <option value="tenant_admin">Tenant Admin</option>
-              </select>
+              <Select
+                value={inviteRole}
+                onChange={setInviteRole}
+                options={[
+                  { value: "member", label: "Member" },
+                  { value: "workspace_admin", label: "Workspace Admin" },
+                  { value: "tenant_admin", label: "Tenant Admin" },
+                ]}
+              />
             </div>
-            <div className="form-group" style={{ flex: 1 }}>
+            <div className="form-group">
               <label className="form-label">Workspace</label>
-              <select value={inviteWsId} onChange={(e) => setInviteWsId(e.target.value)}>
-                <option value="">(Default)</option>
-                {workspaces.map((ws) => (
-                  <option key={ws.id} value={ws.id}>{ws.name}</option>
-                ))}
-              </select>
+              <Select
+                value={inviteWsId}
+                onChange={setInviteWsId}
+                options={[
+                  { value: "", label: "(Default)" },
+                  ...workspaces.map((ws) => ({ value: ws.id, label: ws.name })),
+                ]}
+              />
             </div>
           </div>
           <div className="form-group">
             <label className="form-label">Expires</label>
-            <select value={inviteExpires} onChange={(e) => setInviteExpires(Number(e.target.value))}>
-              <option value={1}>1 day</option>
-              <option value={3}>3 days</option>
-              <option value={7}>7 days</option>
-              <option value={14}>14 days</option>
-              <option value={30}>30 days</option>
-            </select>
+            <Select
+              value={String(inviteExpires)}
+              onChange={(v) => setInviteExpires(Number(v))}
+              options={[
+                { value: "1", label: "1 day" },
+                { value: "3", label: "3 days" },
+                { value: "7", label: "7 days" },
+                { value: "14", label: "14 days" },
+                { value: "30", label: "30 days" },
+              ]}
+            />
           </div>
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
             <button type="button" className="btn btn-secondary" onClick={() => setInviteOpen(false)}>Cancel</button>
@@ -359,12 +377,16 @@ export default function AdminUsers() {
         </p>
         <div className="form-group">
           <label className="form-label">Role</label>
-          <select value={editRole} onChange={(e) => setEditRole(e.target.value)}>
-            <option value="member">Member</option>
-            <option value="workspace_admin">Workspace Admin</option>
-            <option value="tenant_admin">Tenant Admin</option>
-            <option value="viewer">Viewer</option>
-          </select>
+          <Select
+            value={editRole}
+            onChange={setEditRole}
+            options={[
+              { value: "member", label: "Member" },
+              { value: "workspace_admin", label: "Workspace Admin" },
+              { value: "tenant_admin", label: "Tenant Admin" },
+              { value: "viewer", label: "Viewer" },
+            ]}
+          />
         </div>
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
           <button className="btn btn-secondary" onClick={() => setRoleEditUser(null)}>Cancel</button>

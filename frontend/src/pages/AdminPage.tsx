@@ -1,9 +1,94 @@
 import { useState, useEffect } from "react";
-import { listWorkspaces, createWorkspace, listAdminUsers, Workspace, User } from "../api";
-import { Modal } from "../components/Modal";
-import { useToast } from "../components/Toast";
-import { EmptyState } from "../components/EmptyState";
-import { SkeletonTable } from "../components/Skeleton";
+import { Link } from "react-router-dom";
+import { listWorkspaces, listAdminUsers, Workspace, User } from "../api";
+
+function UsersIcon() {
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </svg>
+  );
+}
+
+function WorkspacesIcon() {
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="2" width="16" height="20" rx="2" />
+      <path d="M9 22v-4h6v4" />
+      <path d="M8 6h.01" />
+      <path d="M16 6h.01" />
+      <path d="M12 6h.01" />
+      <path d="M12 10h.01" />
+      <path d="M12 14h.01" />
+      <path d="M16 10h.01" />
+      <path d="M16 14h.01" />
+      <path d="M8 10h.01" />
+      <path d="M8 14h.01" />
+    </svg>
+  );
+}
+
+function AuditLogIcon() {
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="16" y1="13" x2="8" y2="13" />
+      <line x1="16" y1="17" x2="8" y2="17" />
+    </svg>
+  );
+}
+
+function UsageIcon() {
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="23 6 13.5 15.5 8.5 10.5 1 18" />
+      <polyline points="17 6 23 6 23 12" />
+    </svg>
+  );
+}
+
+interface QuickLinkCard {
+  path: string;
+  title: string;
+  description: string;
+  icon: JSX.Element;
+  accentClass: string;
+}
+
+const QUICK_LINKS: QuickLinkCard[] = [
+  {
+    path: "/admin/users",
+    title: "Users",
+    description: "Manage users, roles, and invitations",
+    icon: <UsersIcon />,
+    accentClass: "stat-card-accent",
+  },
+  {
+    path: "/admin/workspaces",
+    title: "Workspaces",
+    description: "Manage workspaces and quotas",
+    icon: <WorkspacesIcon />,
+    accentClass: "stat-card-accent-success",
+  },
+  {
+    path: "/admin/audit",
+    title: "Audit Log",
+    description: "View administrative actions",
+    icon: <AuditLogIcon />,
+    accentClass: "stat-card-accent-warning",
+  },
+  {
+    path: "/admin/usage",
+    title: "Usage",
+    description: "View platform usage statistics",
+    icon: <UsageIcon />,
+    accentClass: "stat-card-accent-error",
+  },
+];
 
 export default function AdminPage() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -11,47 +96,14 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  // Create workspace modal
-  const [createOpen, setCreateOpen] = useState(false);
-  const [newWsName, setNewWsName] = useState("");
-  const [creating, setCreating] = useState(false);
-
-  const toast = useToast();
-
-  async function loadData() {
-    setLoading(true);
-    try {
-      const [ws, us] = await Promise.all([listWorkspaces(), listAdminUsers()]);
-      setWorkspaces(ws);
-      setUsers(us);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load data");
-      toast.error("Load failed", err instanceof Error ? err.message : "Failed to load data");
-    } finally {
-      setLoading(false);
-    }
-  }
-
   useEffect(() => {
-    loadData();
+    Promise.all([listWorkspaces(), listAdminUsers()])
+      .then(([ws, us]) => { setWorkspaces(ws); setUsers(us); })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : "Failed to load data");
+      })
+      .finally(() => setLoading(false));
   }, []);
-
-  async function handleCreateWorkspace(e: React.FormEvent) {
-    e.preventDefault();
-    if (!newWsName.trim()) return;
-    setCreating(true);
-    try {
-      await createWorkspace(newWsName.trim());
-      toast.success("Workspace created");
-      setCreateOpen(false);
-      setNewWsName("");
-      await loadData();
-    } catch (err: unknown) {
-      toast.error("Create failed", err instanceof Error ? err.message : "Failed to create workspace");
-    } finally {
-      setCreating(false);
-    }
-  }
 
   return (
     <div>
@@ -62,114 +114,38 @@ export default function AdminPage() {
 
       <div className="stat-grid">
         <div className="stat-card stat-card-accent">
-          <div className="stat-card-value">{workspaces.length}</div>
+          <div className="stat-card-value">{loading ? "-" : workspaces.length}</div>
           <div className="stat-card-label">Workspaces</div>
         </div>
         <div className="stat-card stat-card-accent-success">
-          <div className="stat-card-value">{users.length}</div>
+          <div className="stat-card-value">{loading ? "-" : users.length}</div>
           <div className="stat-card-label">Users</div>
         </div>
       </div>
 
-      <section style={{ marginTop: 32 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <h2 className="detail-section-title" style={{ margin: 0 }}>Workspaces</h2>
-          <button className="btn btn-primary btn-sm" onClick={() => { setNewWsName(""); setCreateOpen(true); }}>+ Create Workspace</button>
+      {error && <div className="alert alert-error">{error}</div>}
+
+      {/* Quick Links */}
+      <div style={{ marginBottom: 32 }}>
+        <h2 style={{ fontSize: "1rem", marginBottom: 12, color: "var(--text-secondary)" }}>Quick Links</h2>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16 }}>
+          {QUICK_LINKS.map(link => (
+            <Link
+              key={link.path}
+              to={link.path}
+              style={{ textDecoration: "none" }}
+            >
+              <div className={`stat-card ${link.accentClass}`} style={{ cursor: "pointer" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+                  <div style={{ color: "var(--text-secondary)" }}>{link.icon}</div>
+                  <div className="stat-card-value" style={{ fontSize: "1.1rem" }}>{link.title}</div>
+                </div>
+                <div className="stat-card-label">{link.description}</div>
+              </div>
+            </Link>
+          ))}
         </div>
-        {loading ? (
-          <SkeletonTable rows={5} cols={3} />
-        ) : workspaces.length === 0 ? (
-          <EmptyState
-            title="No workspaces"
-            description="Create your first workspace to get started."
-            action={{ label: "+ Create Workspace", onClick: () => { setNewWsName(""); setCreateOpen(true); } }}
-          />
-        ) : (
-          <div className="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Members</th>
-                  <th>Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {workspaces.map((ws) => (
-                  <tr key={ws.id}>
-                    <td>{ws.name}</td>
-                    <td>{ws.member_count ?? 0}</td>
-                    <td style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>
-                      {new Date(ws.created_at).toLocaleDateString()}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      <section style={{ marginTop: 32 }}>
-        <h2 className="detail-section-title" style={{ marginBottom: 12 }}>Users</h2>
-        {loading ? (
-          <SkeletonTable rows={5} cols={4} />
-        ) : users.length === 0 ? (
-          <EmptyState
-            title="No users"
-            description="No users have been registered yet."
-          />
-        ) : (
-          <div className="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>Email</th>
-                  <th>Name</th>
-                  <th>Role</th>
-                  <th>Workspaces</th>
-                </tr>
-              </thead>
-              <tbody>
-                {users.map((u) => (
-                  <tr key={u.id}>
-                    <td>{u.email}</td>
-                    <td>{u.name}</td>
-                    <td><span className="badge badge-primary">{u.role}</span></td>
-                    <td>{u.workspace_count ?? (u.workspace_ids?.length ?? 0)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
-
-      {/* Create Workspace Modal */}
-      <Modal
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
-        title="Create Workspace"
-        width="sm"
-      >
-        <form onSubmit={handleCreateWorkspace} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <div className="form-group">
-            <label className="form-label">Workspace name *</label>
-            <input
-              value={newWsName}
-              onChange={(e) => setNewWsName(e.target.value)}
-              placeholder="New workspace name"
-              autoFocus
-            />
-          </div>
-          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-            <button type="button" className="btn btn-secondary" onClick={() => setCreateOpen(false)}>Cancel</button>
-            <button type="submit" className="btn btn-primary" disabled={creating}>
-              {creating ? "Creating..." : "Create"}
-            </button>
-          </div>
-        </form>
-      </Modal>
+      </div>
     </div>
   );
 }

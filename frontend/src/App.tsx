@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage";
 import InviteRegister from "./pages/InviteRegister";
@@ -31,7 +31,17 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 }
 
 function App() {
-  const token = getToken();
+  // Use state for token so it stays reactive — when clearToken() fires
+  // the auth:token-changed event, this state updates and the login route
+  // renders correctly instead of showing the old stale token.
+  const [token, setToken] = useState<string | null>(getToken);
+
+  // Listen for auth:token-changed events so the token state stays in sync.
+  useEffect(() => {
+    const handler = () => setToken(getToken());
+    window.addEventListener("auth:token-changed", handler);
+    return () => window.removeEventListener("auth:token-changed", handler);
+  }, []);
 
   // Initialize theme from localStorage before first render
   useEffect(() => {

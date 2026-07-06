@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate, useLocation, Link } from "react-router-dom";
-import { getCurrentUser, clearToken, User, fetchPermissions } from "../api";
+import { getCurrentUser, clearToken, User, fetchPermissions, createSession } from "../api";
+import { useWorkspace } from "../context/WorkspaceContext";
 import WorkspaceSwitcher from "./WorkspaceSwitcher";
 
 // ── SVG Icon Components ────────────────────────────────────────────────────
@@ -180,6 +181,15 @@ function SidebarExpandIcon() {
   );
 }
 
+function PlusIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
 function SignOutIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -198,13 +208,16 @@ interface NavItem {
   icon: JSX.Element;
 }
 
-const NAV_ITEMS: NavItem[] = [
+const SESSION_ITEMS: NavItem[] = [
   { path: "/sessions", label: "Sessions", icon: <SessionsIcon /> },
+];
+
+const TOOL_ITEMS: NavItem[] = [
   { path: "/dashboard", label: "Dashboard", icon: <DashboardIcon /> },
   { path: "/requests", label: "Requests", icon: <RequestsIcon /> },
-  { path: "/quota", label: "Quota", icon: <QuotaIcon /> },
   { path: "/agents", label: "Agents", icon: <AgentsIcon /> },
   { path: "/api-keys", label: "API Keys", icon: <ApiKeysIcon /> },
+  { path: "/quota", label: "Quota", icon: <QuotaIcon /> },
 ];
 
 const ADMIN_ITEMS: NavItem[] = [
@@ -216,23 +229,16 @@ const ADMIN_ITEMS: NavItem[] = [
   { path: "/admin/usage", label: "Usage", icon: <UsageIcon /> },
 ];
 
-// ── Section definition ──────────────────────────────────────────────────────
-
-interface NavSection {
-  id: string;
-  label: string;
-  items: NavItem[];
-}
-
 // ── Layout Component ─────────────────────────────────────────────────────
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
+  const { currentWorkspaceId } = useWorkspace();
   const [user, setUser] = useState<User | null>(null);
   const [visibleTabs, setVisibleTabs] = useState<Set<string>>(new Set());
   const [visibleAdminTabs, setVisibleAdminTabs] = useState<Set<string>>(new Set());
-  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set(["platform"]));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
       return localStorage.getItem("agent_platform_sidebar_collapsed") === "true";
@@ -318,27 +324,89 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     });
   }
 
+  // Create a new session and navigate to it directly
+  async function handleNewSession() {
+    if (!currentWorkspaceId) {
+      navigate("/sessions");
+      return;
+    }
+    try {
+      const session = await createSession(currentWorkspaceId, { title: "New Session" });
+      navigate(`/sessions/${session.id}`);
+    } catch {
+      // If creation fails, fall back to sessions list
+      navigate("/sessions");
+    }
+  }
+
   const initials = user?.name
     ? user.name.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2)
     : user?.email?.slice(0, 2).toUpperCase() || "??";
 
-  const visibleNavItems = NAV_ITEMS.filter((item) => visibleTabs.has(item.path));
+  const visibleSessionItems = SESSION_ITEMS.filter((item) => visibleTabs.has(item.path));
+  const visibleToolItems = TOOL_ITEMS.filter((item) => visibleTabs.has(item.path));
   const visibleAdminItems = ADMIN_ITEMS.filter((item) => visibleAdminTabs.has(item.path));
 
-  const sections: NavSection[] = [
-    { id: "workspace", label: "Workspace", items: visibleNavItems },
-    ...(visibleAdminItems.length > 0
-      ? [{ id: "platform", label: "Platform", items: visibleAdminItems }]
-      : []),
-  ];
+  function isNavActive(item: NavItem) {
+    if (item.path === "/admin") {
+      return location.pathname === "/admin";
+    }
+    if (item.path === "/") {
+      return location.pathname === "/";
+    }
+    return location.pathname.startsWith(item.path);
+  }
+
+  function renderNavLink(item: NavItem) {
+    const isActive = isNavActive(item);
+    return (
+      <Link
+        key={item.path}
+        to={item.path}
+        className={`sidebar-link${isActive ? " active" : ""}`}
+      >
+        <span className="sidebar-link-icon">{item.icon}</span>
+        <span>{item.label}</span>
+      </Link>
+    );
+  }
 
   return (
     <div className="app-layout">
       <aside className={`sidebar${sidebarCollapsed ? " collapsed" : ""}`}>
         {/* ── Brand ──────────────────────────────────────────────────── */}
         <div className="sidebar-brand">
-          <div className="sidebar-brand-icon">AP</div>
-          <span className="sidebar-brand-text">Agent Platform</span>
+          <div className="sidebar-brand-icon">
+            <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+              <defs>
+                <linearGradient id="brand-logo-grad" x1="0" y1="0" x2="32" y2="32">
+                  <stop offset="0%" stopColor="#3a81f6"/>
+                  <stop offset="100%" stopColor="#2563ef"/>
+                </linearGradient>
+              </defs>
+              <line x1="16" y1="6" x2="6" y2="18" stroke="#2563ef" strokeWidth="1.5" opacity="0.5"/>
+              <line x1="16" y1="6" x2="26" y2="18" stroke="#2563ef" strokeWidth="1.5" opacity="0.5"/>
+              <line x1="6" y1="18" x2="26" y2="18" stroke="#2563ef" strokeWidth="1.5" opacity="0.5"/>
+              <line x1="16" y1="6" x2="16" y2="26" stroke="#2563ef" strokeWidth="1.5" opacity="0.5"/>
+              <line x1="6" y1="18" x2="16" y2="26" stroke="#2563ef" strokeWidth="1.5" opacity="0.5"/>
+              <line x1="26" y1="18" x2="16" y2="26" stroke="#2563ef" strokeWidth="1.5" opacity="0.5"/>
+              <circle cx="16" cy="6" r="4" fill="url(#brand-logo-grad)"/>
+              <circle cx="6" cy="18" r="4" fill="url(#brand-logo-grad)"/>
+              <circle cx="26" cy="18" r="4" fill="url(#brand-logo-grad)"/>
+              <circle cx="16" cy="26" r="4" fill="url(#brand-logo-grad)"/>
+              <circle cx="16" cy="16" r="3" fill="#2563ef" opacity="0.8"/>
+            </svg>
+          </div>
+          {!sidebarCollapsed && (
+            <span className="sidebar-brand-text">Agent Platform</span>
+          )}
+          <button
+            className="sidebar-collapse-btn"
+            onClick={toggleSidebarCollapse}
+            title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            {sidebarCollapsed ? <SidebarExpandIcon /> : <SidebarCollapseIcon />}
+          </button>
         </div>
 
         {/* ── Workspace Switcher ────────────────────────────────────── */}
@@ -348,68 +416,80 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
         {/* ── Navigation ────────────────────────────────────────────── */}
         <nav className="sidebar-nav">
-          {sections.map((section) => {
-            const isCollapsed = collapsedSections.has(section.id);
-            return (
-              <div key={section.id} className="collapsible-section">
-                <button
-                  className="sidebar-section-toggle"
-                  onClick={() => toggleSection(section.id)}
-                >
-                  <span>{section.label}</span>
-                  <span className={`collapsible-chevron${isCollapsed ? " collapsed" : ""}`}>
-                    <ChevronDownIcon />
-                  </span>
-                </button>
-                {!isCollapsed && (
-                  <div>
-                    {section.items.map((item) => {
-                      const isActive =
-                        item.path === "/"
-                          ? location.pathname === "/"
-                          : location.pathname.startsWith(item.path);
-                      return (
-                        <Link
-                          key={item.path}
-                          to={item.path}
-                          className={`sidebar-link${isActive ? " active" : ""}`}
-                        >
-                          <span className="sidebar-link-icon">{item.icon}</span>
-                          <span>{item.label}</span>
-                        </Link>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+          {/* Sessions — always visible at top, with inline "+" action */}
+          {visibleSessionItems.map(item => (
+            <div key={item.path} className="sidebar-link-group">
+              <Link
+                to={item.path}
+                className={`sidebar-link${isNavActive(item) ? " active" : ""}`}
+              >
+                <span className="sidebar-link-icon">{item.icon}</span>
+                <span>{item.label}</span>
+              </Link>
+              <button
+                className="sidebar-link-action"
+                onClick={handleNewSession}
+                title="New Session"
+              >
+                <PlusIcon />
+              </button>
+            </div>
+          ))}
+
+          {/* Divider */}
+          <div className="sidebar-divider"></div>
+
+          {/* Tools */}
+          {visibleToolItems.length > 0 && (
+            <div className={`collapsible-section${collapsedSections.has("tools") ? " collapsed" : ""}`}>
+              <button className="sidebar-section-toggle" onClick={() => toggleSection("tools")}>
+                <span>Tools</span>
+                <span className={`collapsible-chevron${collapsedSections.has("tools") ? " collapsed" : ""}`}>
+                  <ChevronDownIcon />
+                </span>
+              </button>
+              {!collapsedSections.has("tools") && (
+                <div>
+                  {visibleToolItems.map(item => renderNavLink(item))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Platform (Admin) */}
+          {visibleAdminItems.length > 0 && (
+            <div className={`collapsible-section${collapsedSections.has("platform") ? " collapsed" : ""}`}>
+              <button className="sidebar-section-toggle" onClick={() => toggleSection("platform")}>
+                <span>Platform</span>
+                <span className={`collapsible-chevron${collapsedSections.has("platform") ? " collapsed" : ""}`}>
+                  <ChevronDownIcon />
+                </span>
+              </button>
+              {!collapsedSections.has("platform") && (
+                <div>
+                  {visibleAdminItems.map(item => renderNavLink(item))}
+                </div>
+              )}
+            </div>
+          )}
         </nav>
 
         {/* ── Footer ────────────────────────────────────────────────── */}
         <div className="sidebar-footer">
-          <div className="sidebar-footer-actions">
-            <button
-              className="sidebar-collapsed-toggle"
-              onClick={toggleSidebarCollapse}
-              title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            >
-              {sidebarCollapsed ? <SidebarExpandIcon /> : <SidebarCollapseIcon />}
-            </button>
-            <button
-              className="theme-toggle"
-              onClick={toggleTheme}
-              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-            >
-              {theme === "dark" ? <SunIcon /> : <MoonIcon />}
-            </button>
-          </div>
           <div className="sidebar-user">
             <div className="sidebar-user-avatar">{initials}</div>
             <div className="sidebar-user-info">
               <div className="sidebar-user-name">{user?.name || "User"}</div>
               <div className="sidebar-user-email">{user?.email || ""}</div>
             </div>
+            <button
+              className="theme-toggle"
+              onClick={toggleTheme}
+              title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+              style={{ marginLeft: "auto" }}
+            >
+              {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+            </button>
           </div>
           <button className="sidebar-logout" onClick={handleLogout}>
             <SignOutIcon />
