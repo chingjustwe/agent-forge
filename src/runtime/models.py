@@ -11,6 +11,19 @@ class RuntimeConfig(BaseModel):
     extra: dict = {}
 
 
+class Usage(BaseModel):
+    """Standardized token usage across all LLM providers.
+
+    Adapters are responsible for normalizing provider-specific usage
+    formats (OpenAI `prompt_tokens`/`completion_tokens`, Anthropic
+    `input_tokens`/`output_tokens`, etc.) into this canonical form.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+
+
 class StreamEvent(BaseModel):
     type: Literal["text", "tool_call", "tool_result", "error", "status"]
     data: dict

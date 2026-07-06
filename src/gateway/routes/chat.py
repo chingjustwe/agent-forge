@@ -17,13 +17,14 @@ from src.infra.db.engine import async_session
 from src.infra.db.models import ChatMessage, ChatSession, WorkspaceMember
 from src.infra.db.session import get_db
 from src.infra.settings import settings
-from src.runtime.harness.pipeline import GuardrailPipeline
+from src.infra.telemetry.quota import QuotaGuardrail
+from src.runtime.harness.agents import AgentDefinition
 from src.runtime.harness.context import HarnessContext
 from src.runtime.models import RuntimeConfig, StreamEvent
 from src.runtime.adapters.direct_llm import DirectLLMAdapter
 
 router = APIRouter()
-_guardrail_pipeline = GuardrailPipeline.create_default()
+_quota_guardrail = QuotaGuardrail()
 logger = logging.getLogger(__name__)
 
 
@@ -153,7 +154,7 @@ async def _event_stream(
         try:
             adapter = _get_adapter(config)
             async with context.tracer.span("adapter.run", trace_id, parent_span_id=context.tracer._spans[-1].span_id if context.tracer._spans else None):
-                async for event in adapter.run({}, messages, {}):
+                async for event in adapter.run(messages, context):
                     yield f"data: {event.model_dump_json()}\n\n"
                     if event.type == "text":
                         assistant_text += event.data.get("content", "") or ""
@@ -275,14 +276,6 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
         )
 
     trace_id = uuid.uuid4().hex
-    context = HarnessContext()
-
-    guardrail_result = await _guardrail_pipeline.check(config.workspace_id)
-    if not guardrail_result.passed:
-        return JSONResponse(
-            status_code=429,
-            content={"error": {"code": "RATE_LIMITED", "message": guardrail_result.reason}},
-        )
 
     # Bug fix: JWT puts user id in `sub`, not `id`. Fall back to `id` for
     # legacy tokens.
@@ -297,6 +290,36 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
         session_id = None
     if session_id == "":
         session_id = None
+
+    # P0: pre-flight quota check (preserves HTTP 429 behavior). The full
+    # guardrail pipeline (content_filter, PII, policy) runs inside
+    # HarnessRuntime in P1 when chat.py is refactored to use the runtime.
+    quota_result = await _quota_guardrail.check(config.workspace_id)
+    if not quota_result.passed:
+        return JSONResponse(
+            status_code=429,
+            content={"error": {"code": "RATE_LIMITED", "message": quota_result.reason}},
+        )
+
+    # Build a minimal HarnessContext for the DirectLLM adapter. P1 will
+    # replace this with HarnessRuntime.run() which builds its own context
+    # (with tool_engine, guardrails, etc.) from the resolved AgentDefinition.
+    agent_def = AgentDefinition(
+        id="",
+        name="default",
+        workspace_id=config.workspace_id,
+        model=config.model,
+        max_tokens=config.max_tokens,
+        temperature=config.temperature,
+        adapter="direct_llm",
+    )
+    context = HarnessContext(
+        workspace_id=config.workspace_id,
+        user_id=user_id,
+        session_id=session_id or "",
+        trace_id=trace_id,
+        agent=agent_def,
+    )
 
     # Q4: shared sessions are view-only for non-owners. Only the session
     # owner (or workspace admin/owner / tenant_admin) may append messages.

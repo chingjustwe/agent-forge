@@ -207,7 +207,7 @@ class TestWorkspaceOrdering:
         # event then end the stream.
         from src.runtime.models import StreamEvent
 
-        async def _fake_run(self, ctx, messages, state):
+        async def _fake_run(self, messages, ctx):
             yield StreamEvent(type="text", data={"content": "hi"})
             yield StreamEvent(
                 type="status",

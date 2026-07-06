@@ -11,7 +11,7 @@ class TestRunAdapter:
         class DummyAdapter(RunAdapter):
             name = "dummy"
 
-            async def run(self, session, messages, context):
+            async def run(self, messages, ctx):
                 if False:
                     yield
 

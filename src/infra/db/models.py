@@ -253,12 +253,22 @@ class WorkspaceInvitation(Base):
 
 
 class AgentConfig(Base):
-    """P2-2: workspace-scoped agent configurations.
+    """P2-2 + P3a: workspace-scoped agent configurations.
 
-    Each agent config is bound to a workspace and references a framework
-    (``direct_llm`` / ``adk`` / ``langgraph``). The ``config`` JSON holds
-    framework-specific settings (model, system_prompt, temperature, tools,
-    ...). Cross-workspace access is prevented by always filtering on
+    Each agent config is bound to a workspace and references an adapter
+    (``direct_llm`` / ``adk`` / ``langgraph``). The ``framework`` column
+    is the legacy name for ``adapter`` — kept for backward compat with
+    existing API clients and tests; new code reads ``adapter`` via the
+    Pydantic ``AgentDefinition`` wrapper.
+
+    P3a adds structured fields (``system_prompt``, ``model``,
+    ``temperature``, ``max_tokens``, ``tools``, ``guardrails``,
+    ``skills``, ``hooks``, ``memory_config``) so the harness can build
+    a ``HarnessContext`` without parsing free-form JSON. The legacy
+    ``config`` JSON column is preserved as ``metadata`` for
+    framework-specific extras not covered by the structured fields.
+
+    Cross-workspace access is prevented by always filtering on
     ``workspace_id``.
     """
     __tablename__ = "agent_configs"
@@ -268,6 +278,7 @@ class AgentConfig(Base):
         String(32), ForeignKey("workspaces.id"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Legacy column; ``adapter`` in Pydantic maps to this.
     framework: Mapped[str] = mapped_column(String(50), nullable=False)
     config: Mapped[dict] = mapped_column(JSON, default=dict)
     created_by: Mapped[str] = mapped_column(
@@ -277,6 +288,22 @@ class AgentConfig(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=_now, onupdate=_now
     )
+    # ── P3a structured fields (added via M12 migration) ──
+    system_prompt: Mapped[str] = mapped_column(Text, default="", server_default="")
+    model: Mapped[str] = mapped_column(
+        String(100), default="deepseek-chat", server_default="deepseek-chat"
+    )
+    temperature: Mapped[float] = mapped_column(
+        Float, default=0.7, server_default="0.7"
+    )
+    max_tokens: Mapped[int] = mapped_column(
+        Integer, default=4096, server_default="4096"
+    )
+    tools: Mapped[list] = mapped_column(JSON, default=list)
+    guardrails: Mapped[list] = mapped_column(JSON, default=list)
+    skills: Mapped[list] = mapped_column(JSON, default=list)
+    hooks: Mapped[list] = mapped_column(JSON, default=list)
+    memory_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class ApiKey(Base):

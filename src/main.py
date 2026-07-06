@@ -313,6 +313,33 @@ def _migrate_schema(sync_conn):
     except Exception:
         pass
 
+    # Migration M12 (P3a): extend agent_configs with structured fields.
+    # The legacy ``framework`` + ``config`` JSON columns are kept as-is
+    # for backward compat with existing API clients. New structured
+    # fields let the harness build a HarnessContext without parsing
+    # free-form JSON. Idempotent: each column is checked individually.
+    if "agent_configs" in tables:
+        cols = {c["name"] for c in insp.get_columns("agent_configs")}
+        new_columns = [
+            ("system_prompt", "TEXT DEFAULT ''"),
+            ("model", "VARCHAR(100) DEFAULT 'deepseek-chat'"),
+            ("temperature", "FLOAT DEFAULT 0.7"),
+            ("max_tokens", "INTEGER DEFAULT 4096"),
+            ("tools", "JSON"),
+            ("guardrails", "JSON"),
+            ("skills", "JSON"),
+            ("hooks", "JSON"),
+            ("memory_config", "JSON"),
+        ]
+        for col_name, col_type in new_columns:
+            if col_name not in cols:
+                try:
+                    sync_conn.exec_driver_sql(
+                        f"ALTER TABLE agent_configs ADD COLUMN {col_name} {col_type}"
+                    )
+                except Exception as exc:  # pragma: no cover — defensive
+                    print(f"[migration] M12 add {col_name} skipped: {exc}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -321,7 +348,25 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(_migrate_schema)
 
     app.state.telemetry = TelemetryCollector()
+
+    # P3a: wire the HarnessRegistry (platform-level singleton container)
+    # and HarnessRuntime (sole orchestrator). Both are idempotent —
+    # HarnessRegistry.create() skips already-registered tools/guardrails,
+    # and set_runtime() overwrites any previous instance.
+    from src.runtime.harness.registry import HarnessRegistry, reset_registry
+    from src.runtime.harness.runtime import HarnessRuntime, set_runtime
+
+    reset_registry()
+    registry = HarnessRegistry.create()
+    app.state.registry = registry
+    app.state.runtime = HarnessRuntime(registry)
+    set_runtime(app.state.runtime)
+
     yield
+
+    # Graceful shutdown: release any held resources (MCP connections,
+    # scheduler, etc.). P0 is a no-op; P1+ subsystems add real cleanup.
+    await registry.shutdown()
 
 
 def create_app() -> FastAPI:

@@ -1,13 +1,21 @@
-"""P2-2: Workspace-scoped agent configurations.
+"""P2-2 + P3a: Workspace-scoped agent configurations.
 
-Each agent config is bound to a workspace and references a framework
-(``direct_llm`` / ``adk`` / ``langgraph``). The ``config`` JSON holds
-framework-specific settings (model, system_prompt, temperature, tools, ...).
+Each agent config is bound to a workspace and references an adapter
+(``direct_llm`` / ``adk`` / ``langgraph``). The legacy ``framework`` JSON
+column is kept as the canonical adapter field (P3a maps it to
+``AgentDefinition.adapter``). The legacy ``config`` JSON column is kept
+as free-form ``metadata``.
+
+P3a adds structured fields (system_prompt, model, temperature, max_tokens,
+tools, guardrails, skills, hooks, memory_config) so the harness can build
+a ``HarnessContext`` without parsing free-form JSON. All new fields are
+optional with sensible defaults — existing API clients that only send
+``name`` / ``framework`` / ``config`` keep working unchanged.
 
 Access rules:
 - Reads (list / detail): any workspace member.
-- Mutations (create / patch / delete): ``workspace_admin`` / ``workspace_owner``
-  (and ``tenant_admin`` short-circuits to owner).
+- Mutations (create / patch / delete): ``workspace_admin``
+  (and ``tenant_admin`` short-circuits to admin).
 
 Cross-workspace isolation: every query filters on ``workspace_id`` AND
 ``id``, so an agent from another workspace is never visible (returns 404).
@@ -27,29 +35,94 @@ router = APIRouter()
 ALLOWED_FRAMEWORKS = ("direct_llm", "adk", "langgraph")
 
 
+class MemoryConfigPayload(BaseModel):
+    enable_short_term: bool = True
+    enable_long_term: bool = False
+    recall_top_k: int = 5
+
+
 class CreateAgentRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     framework: str
     config: dict = Field(default_factory=dict)
+    # P3a structured fields — all optional, override defaults when provided.
+    system_prompt: str | None = None
+    model: str | None = None
+    temperature: float | None = Field(None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(None, ge=1)
+    tools: list[str] | None = None
+    guardrails: list[str] | None = None
+    skills: list[str] | None = None
+    hooks: list[str] | None = None
+    memory_config: MemoryConfigPayload | None = None
 
 
 class UpdateAgentRequest(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=100)
     framework: str | None = None
     config: dict | None = None
+    # P3a structured fields — None means "leave unchanged".
+    system_prompt: str | None = None
+    model: str | None = None
+    temperature: float | None = Field(None, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(None, ge=1)
+    tools: list[str] | None = None
+    guardrails: list[str] | None = None
+    skills: list[str] | None = None
+    hooks: list[str] | None = None
+    memory_config: MemoryConfigPayload | None = None
 
 
 def _serialize_agent(a: AgentConfig) -> dict:
+    """Serialize an AgentConfig ORM row to a JSON dict.
+
+    Includes both legacy fields (framework, config) and P3a structured
+    fields. The ``framework`` value is echoed back as-is for backward
+    compat; clients that know about P3a can read the structured fields.
+    """
     return {
         "id": a.id,
         "workspace_id": a.workspace_id,
         "name": a.name,
         "framework": a.framework,
         "config": a.config or {},
+        # P3a structured fields
+        "system_prompt": a.system_prompt or "",
+        "model": a.model or "deepseek-chat",
+        "temperature": a.temperature if a.temperature is not None else 0.7,
+        "max_tokens": a.max_tokens if a.max_tokens is not None else 4096,
+        "tools": a.tools or [],
+        "guardrails": a.guardrails or [],
+        "skills": a.skills or [],
+        "hooks": a.hooks or [],
+        "memory_config": a.memory_config,
+        # Metadata
         "created_by": a.created_by,
         "created_at": a.created_at.isoformat() if a.created_at else None,
         "updated_at": a.updated_at.isoformat() if a.updated_at else None,
     }
+
+
+def _apply_create_fields(agent: AgentConfig, body: CreateAgentRequest) -> None:
+    """Copy P3a structured fields from the request onto a new ORM row."""
+    if body.system_prompt is not None:
+        agent.system_prompt = body.system_prompt
+    if body.model is not None:
+        agent.model = body.model
+    if body.temperature is not None:
+        agent.temperature = body.temperature
+    if body.max_tokens is not None:
+        agent.max_tokens = body.max_tokens
+    if body.tools is not None:
+        agent.tools = body.tools
+    if body.guardrails is not None:
+        agent.guardrails = body.guardrails
+    if body.skills is not None:
+        agent.skills = body.skills
+    if body.hooks is not None:
+        agent.hooks = body.hooks
+    if body.memory_config is not None:
+        agent.memory_config = body.memory_config.model_dump()
 
 
 async def _write_audit(
@@ -116,6 +189,7 @@ async def create_agent(
         config=body.config,
         created_by=user_id,
     )
+    _apply_create_fields(agent, body)
     db.add(agent)
     await db.flush()  # populate agent.id before referencing it in AuditLog
     await _write_audit(
@@ -180,7 +254,11 @@ async def update_agent(
     db: AsyncSession = Depends(get_db),
     _ctx=Depends(require_permission("agents:write", workspace_id_param="workspace_id")),
 ):
-    """Update name / framework / config. Cross-workspace lookups return 404."""
+    """Update name / framework / config / structured fields.
+
+    Cross-workspace lookups return 404. P3a structured fields are patched
+    only when explicitly provided (None means "leave unchanged").
+    """
     result = await db.execute(
         select(AgentConfig).where(
             AgentConfig.id == agent_id,
@@ -206,6 +284,34 @@ async def update_agent(
     if body.config is not None:
         agent.config = body.config
         details["config"] = body.config
+    # P3a structured fields
+    if body.system_prompt is not None:
+        agent.system_prompt = body.system_prompt
+        details["system_prompt"] = body.system_prompt
+    if body.model is not None:
+        agent.model = body.model
+        details["model"] = body.model
+    if body.temperature is not None:
+        agent.temperature = body.temperature
+        details["temperature"] = body.temperature
+    if body.max_tokens is not None:
+        agent.max_tokens = body.max_tokens
+        details["max_tokens"] = body.max_tokens
+    if body.tools is not None:
+        agent.tools = body.tools
+        details["tools"] = body.tools
+    if body.guardrails is not None:
+        agent.guardrails = body.guardrails
+        details["guardrails"] = body.guardrails
+    if body.skills is not None:
+        agent.skills = body.skills
+        details["skills"] = body.skills
+    if body.hooks is not None:
+        agent.hooks = body.hooks
+        details["hooks"] = body.hooks
+    if body.memory_config is not None:
+        agent.memory_config = body.memory_config.model_dump()
+        details["memory_config"] = body.memory_config.model_dump()
 
     user = request.state.user
     await _write_audit(
@@ -275,10 +381,10 @@ async def copy_agent_to(
     """Copy an agent config from one workspace to another (same tenant).
 
     Produces a new AgentConfig row with a fresh id, ``workspace_id`` set to
-    the target, and the same name / framework / config as the source. The
-    source row is left untouched (deep copy — mutations after the copy do
-    not propagate). An ``agent.copy`` AuditLog entry is written against the
-    destination workspace.
+    the target, and the same name / framework / config / structured fields
+    as the source. The source row is left untouched (deep copy — mutations
+    after the copy do not propagate). An ``agent.copy`` AuditLog entry is
+    written against the destination workspace.
 
     Cross-workspace isolation: looking up the source agent under a
     workspace it doesn't belong to returns 404 (no leak). Target workspace
@@ -312,13 +418,22 @@ async def copy_agent_to(
             },
         )
 
-    # 3. Deep-copy into a fresh row.
+    # 3. Deep-copy into a fresh row (including P3a structured fields).
     copy = AgentConfig(
         workspace_id=target_workspace_id,
         name=source.name,
         framework=source.framework,
         config=source.config or {},
         created_by=user_id,
+        system_prompt=source.system_prompt,
+        model=source.model,
+        temperature=source.temperature,
+        max_tokens=source.max_tokens,
+        tools=source.tools,
+        guardrails=source.guardrails,
+        skills=source.skills,
+        hooks=source.hooks,
+        memory_config=source.memory_config,
     )
     db.add(copy)
     await db.flush()  # populate copy.id before audit log references it
