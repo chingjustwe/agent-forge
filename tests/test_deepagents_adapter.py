@@ -3,25 +3,29 @@
 Covers:
 - run() with empty messages raises ValueError
 - _normalize_messages strips leading system message
-- _translate_event maps on_chat_model_stream → text event
-- _translate_event maps on_tool_start → tool_call event (already_executed=True)
-- _translate_event maps on_tool_end → tool_result event
-- _translate_event maps on_chain_start name="task" → subagent start event
-- _translate_event maps on_chain_end name="task" → subagent end event
-- _translate_event maps on_chat_model_end with usage → status event
+- _translate_event maps v3 ``method=messages`` + ``content-block-delta`` → text event
+- _translate_event maps v3 ``method=messages`` + ``tool-call`` → tool_call event (already_executed=True)
+- _translate_event maps v3 ``method=messages`` + ``tool-result`` → tool_result event
+- _translate_event maps v3 ``method=on_chain_start`` name="task" → subagent start event
+- _translate_event maps v3 ``method=on_chain_end`` name="task" → subagent end event
+- _translate_event maps v3 ``method=values`` w/ usage_metadata → status event
 - _translate_event maps error events → error StreamEvent
 - _translate_event returns [] for unrecognized events
-- excluded_tools includes the 7 filesystem tool names
+- _EXCLUDED_FILESYSTEM_TOOLS lists the 7 deepagents filesystem tool names
+  (kept for reference; deepagents 0.6.12 uses permissions, not excluded_tools)
 - run() yields a final status event when no usage was emitted
+- run() passes permissions (not excluded_tools) to create_deep_agent
+- run() strips system messages, passes subagents, handles empty tools/checkpoint
 
 All tests mock ``create_deep_agent`` and ``astream_events`` so no real
-LLM calls are made.
+LLM calls are made. Mock events use the LangGraph v3 JSON-RPC format:
+``{"type": "event", "method": "...", "params": {"data": ..., "name": ...}}``.
 """
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -33,26 +37,85 @@ from src.runtime.models import StreamEvent
 
 
 def _make_event(
-    event: str,
+    method: str,
     *,
+    data: Any = None,
     name: str = "",
-    data: dict | None = None,
-    run_id: str = "r-1",
+    event_type: str = "event",
 ) -> dict:
+    """Build a LangGraph v3 JSON-RPC-style event.
+
+    Format: ``{"type": event_type, "method": method, "params": {"data": data, "name": name}}``
+    """
     return {
-        "event": event,
-        "name": name,
-        "data": data or {},
-        "run_id": run_id,
-        "tags": [],
-        "metadata": {},
+        "type": event_type,
+        "method": method,
+        "params": {"data": data, "name": name},
     }
 
 
-class _MockChunk:
-    """Stand-in for LangChain AIMessageChunk."""
-    def __init__(self, content: str):
-        self.content = content
+def _make_text_delta(text: str) -> dict:
+    """v3 ``method=messages`` event with a ``content-block-delta`` text delta."""
+    return _make_event(
+        "messages",
+        data=[{
+            "event": "content-block-delta",
+            "delta": {"type": "text-delta", "text": text},
+        }],
+    )
+
+
+def _make_tool_call(name: str, args: dict, call_id: str = "c-1") -> dict:
+    """v3 ``method=messages`` event with a ``tool-call`` sub-event."""
+    return _make_event(
+        "messages",
+        data=[{
+            "event": "tool-call",
+            "name": name,
+            "args": args,
+            "id": call_id,
+        }],
+    )
+
+
+def _make_tool_result(name: str, output: str) -> dict:
+    """v3 ``method=messages`` event with a ``tool-result`` sub-event."""
+    return _make_event(
+        "messages",
+        data=[{
+            "event": "tool-result",
+            "name": name,
+            "output": output,
+        }],
+    )
+
+
+def _make_values_event(messages: list) -> dict:
+    """v3 ``method=values`` event carrying a state snapshot.
+
+    ``messages`` is a list of message-like objects (the last one's
+    ``usage_metadata`` is checked for token usage).
+    """
+    return _make_event("values", data={"messages": messages})
+
+
+def _make_chain_start(name: str, input_data: dict) -> dict:
+    """v3 ``method=on_chain_start`` event."""
+    return _make_event("on_chain_start", data=input_data, name=name)
+
+
+def _make_chain_end(name: str, output: Any) -> dict:
+    """v3 ``method=on_chain_end`` event."""
+    return _make_event("on_chain_end", data={"output": output}, name=name)
+
+
+def _make_error_event(message: str, method: str = "unknown") -> dict:
+    """v3 error event (``type=error``)."""
+    return {
+        "type": "error",
+        "method": method,
+        "params": {"data": message},
+    }
 
 
 class _MockMessage:
@@ -94,6 +157,21 @@ async def _collect(stream: AsyncIterator[StreamEvent]) -> list[StreamEvent]:
     return out
 
 
+def _awaitable_stream(events: list[dict]):
+    """Return an async function that yields an async iterator of events.
+
+    The adapter does ``event_stream = await deep_agent.astream_events(...)``
+    then ``async for event in event_stream``. So the mock must be an
+    async function returning an async generator.
+    """
+    async def _gen():
+        for e in events:
+            yield e
+    async def _runner(*args, **kwargs):
+        return _gen()
+    return _runner
+
+
 # ── _normalize_messages ─────────────────────────────────────────────────
 
 
@@ -128,49 +206,55 @@ class TestNormalizeMessages:
 
 
 class TestTranslateEvent:
-    def test_on_chat_model_stream_yields_text_event(self):
+    def test_messages_content_block_delta_yields_text_event(self):
+        """v3 method=messages + content-block-delta → StreamEvent(type='text')."""
         adapter = DeepAgentsAdapter(api_key="fake")
-        event = _make_event(
-            "on_chat_model_stream",
-            data={"chunk": _MockChunk("hello")},
-        )
+        event = _make_text_delta("hello")
         result = adapter._translate_event(event)
         assert len(result) == 1
         assert result[0].type == "text"
         assert result[0].data["content"] == "hello"
 
-    def test_on_chat_model_stream_with_empty_content_returns_empty(self):
+    def test_messages_content_block_delta_with_empty_text_returns_empty(self):
+        """Empty text-delta → no event (avoid emitting empty text chunks)."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_text_delta("")
+        result = adapter._translate_event(event)
+        assert result == []
+
+    def test_messages_content_block_delta_with_non_text_delta_returns_empty(self):
+        """A delta whose type is not 'text-delta' (e.g. tool-use-delta) is ignored."""
         adapter = DeepAgentsAdapter(api_key="fake")
         event = _make_event(
-            "on_chat_model_stream",
-            data={"chunk": _MockChunk("")},
+            "messages",
+            data=[{
+                "event": "content-block-delta",
+                "delta": {"type": "tool-use-delta"},
+            }],
         )
         result = adapter._translate_event(event)
         assert result == []
 
-    def test_on_tool_start_yields_tool_call_with_already_executed(self):
+    def test_messages_tool_call_yields_tool_call_with_already_executed(self):
+        """v3 method=messages + tool-call → StreamEvent(type='tool_call', already_executed=True)."""
         adapter = DeepAgentsAdapter(api_key="fake")
-        event = _make_event(
-            "on_tool_start",
-            name="shell_exec",
-            data={"input": {"command": "echo hi"}},
-            run_id="r-tool-1",
+        event = _make_tool_call(
+            "shell_exec",
+            {"command": "echo hi"},
+            call_id="c-tool-1",
         )
         result = adapter._translate_event(event)
         assert len(result) == 1
         assert result[0].type == "tool_call"
         assert result[0].data["name"] == "shell_exec"
         assert result[0].data["args"] == {"command": "echo hi"}
-        assert result[0].data["call_id"] == "r-tool-1"
+        assert result[0].data["call_id"] == "c-tool-1"
         assert result[0].already_executed is True
 
-    def test_on_tool_end_yields_tool_result_with_already_executed(self):
+    def test_messages_tool_result_yields_tool_result_with_already_executed(self):
+        """v3 method=messages + tool-result → StreamEvent(type='tool_result')."""
         adapter = DeepAgentsAdapter(api_key="fake")
-        event = _make_event(
-            "on_tool_end",
-            name="shell_exec",
-            data={"output": "hi\n"},
-        )
+        event = _make_tool_result("shell_exec", "hi\n")
         result = adapter._translate_event(event)
         assert len(result) == 1
         assert result[0].type == "tool_result"
@@ -179,27 +263,47 @@ class TestTranslateEvent:
         assert result[0].data["error"] is None
         assert result[0].already_executed is True
 
-    def test_on_tool_end_with_error_string(self):
-        """If the shim returned an ERROR: string, the tool_result should
-        parse it into output='' and error=<message>."""
+    def test_messages_tool_result_with_error_string(self):
+        """If the shim returned an 'ERROR: ...' string, the tool_result
+        should parse it into output='' and error=<message>."""
         adapter = DeepAgentsAdapter(api_key="fake")
-        event = _make_event(
-            "on_tool_end",
-            name="boom_tool",
-            data={"output": "ERROR: something failed"},
-        )
+        event = _make_tool_result("boom_tool", "ERROR: something failed")
         result = adapter._translate_event(event)
         assert len(result) == 1
         assert result[0].type == "tool_result"
         assert result[0].data["output"] == ""
         assert result[0].data["error"] == "something failed"
 
-    def test_on_chain_start_task_yields_subagent_start(self):
+    def test_messages_with_empty_data_returns_empty(self):
+        """method=messages with empty data list → no events."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_event("messages", data=[])
+        result = adapter._translate_event(event)
+        assert result == []
+
+    def test_messages_with_non_dict_first_element_returns_empty(self):
+        """method=messages where data[0] is not a dict → no events."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_event("messages", data=["not-a-dict"])
+        result = adapter._translate_event(event)
+        assert result == []
+
+    def test_messages_with_unrecognized_sub_event_returns_empty(self):
+        """method=messages with an unknown sub-event type → no events."""
         adapter = DeepAgentsAdapter(api_key="fake")
         event = _make_event(
-            "on_chain_start",
-            name="task",
-            data={"input": {"name": "web-searcher", "subagent_type": "research"}},
+            "messages",
+            data=[{"event": "some-future-event-type"}],
+        )
+        result = adapter._translate_event(event)
+        assert result == []
+
+    def test_on_chain_start_task_yields_subagent_start(self):
+        """v3 method=on_chain_start name='task' → StreamEvent(type='subagent', action='start')."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_chain_start(
+            "task",
+            {"name": "web-searcher", "subagent_type": "research"},
         )
         result = adapter._translate_event(event)
         assert len(result) == 1
@@ -208,20 +312,25 @@ class TestTranslateEvent:
         assert result[0].data["name"] == "web-searcher"
         assert result[0].data["subagent_type"] == "research"
 
-    def test_on_chain_end_task_yields_subagent_end(self):
+    def test_on_chain_start_non_task_returns_empty(self):
+        """method=on_chain_start with name != 'task' → no events."""
         adapter = DeepAgentsAdapter(api_key="fake")
-        event = _make_event(
-            "on_chain_end",
-            name="task",
-            data={"output": _MockMessage("subagent result")},
-        )
+        event = _make_chain_start("agent", {"name": "ignored"})
+        result = adapter._translate_event(event)
+        assert result == []
+
+    def test_on_chain_end_task_yields_subagent_end(self):
+        """v3 method=on_chain_end name='task' → StreamEvent(type='subagent', action='end')."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_chain_end("task", "subagent result")
         result = adapter._translate_event(event)
         assert len(result) == 1
         assert result[0].type == "subagent"
         assert result[0].data["action"] == "end"
         assert result[0].data["output"] == "subagent result"
 
-    def test_on_chat_model_end_with_usage_yields_status(self):
+    def test_values_with_usage_yields_status(self):
+        """v3 method=values with usage_metadata on last message → status event."""
         adapter = DeepAgentsAdapter(api_key="fake")
         msg = _MockMessage(
             "final",
@@ -231,10 +340,7 @@ class TestTranslateEvent:
                 "total_tokens": 150,
             },
         )
-        event = _make_event(
-            "on_chat_model_end",
-            data={"output": msg},
-        )
+        event = _make_values_event([msg])
         result = adapter._translate_event(event)
         assert len(result) == 1
         assert result[0].type == "status"
@@ -242,35 +348,48 @@ class TestTranslateEvent:
         assert result[0].data["usage"]["output_tokens"] == 50
         assert result[0].data["usage"]["total_tokens"] == 150
 
-    def test_on_chat_model_end_without_usage_returns_empty(self):
+    def test_values_without_usage_returns_empty(self):
+        """method=values with no usage_metadata on last message → no events."""
         adapter = DeepAgentsAdapter(api_key="fake")
         msg = _MockMessage("final", usage_metadata=None)
-        event = _make_event(
-            "on_chat_model_end",
-            data={"output": msg},
-        )
+        event = _make_values_event([msg])
+        result = adapter._translate_event(event)
+        assert result == []
+
+    def test_values_with_empty_messages_returns_empty(self):
+        """method=values with empty messages list → no events."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_values_event([])
+        result = adapter._translate_event(event)
+        assert result == []
+
+    def test_values_with_non_dict_data_returns_empty(self):
+        """method=values where data is not a dict → no events."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_event("values", data="not-a-dict")
         result = adapter._translate_event(event)
         assert result == []
 
     def test_error_event_yields_error_stream_event(self):
+        """type=error → StreamEvent(type='error')."""
         adapter = DeepAgentsAdapter(api_key="fake")
-        event = _make_event(
-            "on_chain_error",
-            data={"error": "something broke"},
-        )
+        event = _make_error_event("something broke", method="on_chain_error")
         result = adapter._translate_event(event)
         assert len(result) == 1
         assert result[0].type == "error"
         assert result[0].data["code"] == "DEEPAGENTS_EVENT_ERROR"
+        assert "something broke" in result[0].data["message"]
+        assert result[0].data["event"] == "on_chain_error"
 
-    def test_unrecognized_event_returns_empty(self):
+    def test_unrecognized_method_returns_empty(self):
+        """An event with an unknown method → no events."""
         adapter = DeepAgentsAdapter(api_key="fake")
-        event = _make_event("on_some_unknown_event", data={"foo": "bar"})
+        event = _make_event("some-future-method", data={"foo": "bar"})
         result = adapter._translate_event(event)
         assert result == []
 
 
-# ── excluded_tools ──────────────────────────────────────────────────────
+# ── _EXCLUDED_FILESYSTEM_TOOLS ──────────────────────────────────────────
 
 
 class TestExcludedTools:
@@ -299,29 +418,29 @@ class TestRunOrchestration:
 
     @pytest.mark.asyncio
     async def test_run_yields_text_events_from_stream(self):
-        """End-to-end: mock create_deep_agent + astream_events."""
+        """End-to-end: mock create_deep_agent + astream_events.
+
+        Verifies that v3 method=messages content-block-delta events are
+        translated to text StreamEvents, and method=values with usage
+        is translated to a status StreamEvent.
+        """
         adapter = DeepAgentsAdapter(api_key="fake")
         ctx = _make_ctx()
 
-        # Build a mock deep_agent whose astream_events yields our events.
+        events_to_stream = [
+            _make_text_delta("hello"),
+            _make_text_delta(" world"),
+            _make_values_event([_MockMessage(
+                "final",
+                usage_metadata={
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                },
+            )]),
+        ]
         mock_deep_agent = MagicMock()
-        async def _mock_astream_events(*args, **kwargs):
-            yield _make_event(
-                "on_chat_model_stream",
-                data={"chunk": _MockChunk("hello")},
-            )
-            yield _make_event(
-                "on_chat_model_stream",
-                data={"chunk": _MockChunk(" world")},
-            )
-            yield _make_event(
-                "on_chat_model_end",
-                data={"output": _MockMessage(
-                    "final",
-                    usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
-                )},
-            )
-        mock_deep_agent.astream_events = _mock_astream_events
+        mock_deep_agent.astream_events = _awaitable_stream(events_to_stream)
 
         with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
              patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
@@ -345,14 +464,9 @@ class TestRunOrchestration:
         adapter = DeepAgentsAdapter(api_key="fake")
         ctx = _make_ctx()
 
+        events_to_stream = [_make_text_delta("hi")]
         mock_deep_agent = MagicMock()
-        async def _mock_astream_events(*args, **kwargs):
-            yield _make_event(
-                "on_chat_model_stream",
-                data={"chunk": _MockChunk("hi")},
-            )
-            # No on_chat_model_end with usage
-        mock_deep_agent.astream_events = _mock_astream_events
+        mock_deep_agent.astream_events = _awaitable_stream(events_to_stream)
 
         with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
              patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
@@ -372,11 +486,11 @@ class TestRunOrchestration:
         adapter = DeepAgentsAdapter(api_key="fake")
         ctx = _make_ctx()
 
-        mock_deep_agent = MagicMock()
-        async def _mock_astream_events(*args, **kwargs):
+        async def _exploding_stream(*args, **kwargs):
             raise RuntimeError("deepagents blew up")
-            yield  # unreachable — make it an async generator
-        mock_deep_agent.astream_events = _mock_astream_events
+
+        mock_deep_agent = MagicMock()
+        mock_deep_agent.astream_events = _exploding_stream
 
         with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
              patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
@@ -390,16 +504,15 @@ class TestRunOrchestration:
         assert "deepagents blew up" in events[0].data["message"]
 
     @pytest.mark.asyncio
-    async def test_run_passes_excluded_tools_to_create_deep_agent(self):
-        """create_deep_agent should receive the 7 excluded tool names."""
+    async def test_run_passes_permissions_to_create_deep_agent(self):
+        """When workspace_root is set, create_deep_agent receives
+        filesystem permissions scoping access to the workspace."""
         adapter = DeepAgentsAdapter(api_key="fake")
         ctx = _make_ctx()
+        ctx.workspace_root = "/tmp/test-ws"
 
         mock_deep_agent = MagicMock()
-        async def _mock_astream_events(*args, **kwargs):
-            return
-            yield  # type: ignore[unreachable]
-        mock_deep_agent.astream_events = _mock_astream_events
+        mock_deep_agent.astream_events = _awaitable_stream([])
 
         with patch("deepagents.create_deep_agent", return_value=mock_deep_agent) as mock_create, \
              patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
@@ -407,10 +520,11 @@ class TestRunOrchestration:
                 [{"role": "user", "content": "x"}], ctx
             ))
 
-        # Inspect the call args
         call_kwargs = mock_create.call_args.kwargs
-        excluded = call_kwargs.get("excluded_tools", set())
-        assert excluded == _EXCLUDED_FILESYSTEM_TOOLS
+        perms = call_kwargs.get("permissions")
+        assert perms is not None
+        assert len(perms) == 2  # allow workspace_root/** + deny /**
+        assert call_kwargs.get("excluded_tools") is None
 
     @pytest.mark.asyncio
     async def test_run_passes_subagents_none_when_empty(self):
@@ -420,10 +534,7 @@ class TestRunOrchestration:
         ctx = _make_ctx()  # agent has no subagents by default
 
         mock_deep_agent = MagicMock()
-        async def _mock_astream_events(*args, **kwargs):
-            return
-            yield  # type: ignore[unreachable]
-        mock_deep_agent.astream_events = _mock_astream_events
+        mock_deep_agent.astream_events = _awaitable_stream([])
 
         with patch("deepagents.create_deep_agent", return_value=mock_deep_agent) as mock_create, \
              patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
@@ -442,10 +553,7 @@ class TestRunOrchestration:
         ctx.tool_engine = None
 
         mock_deep_agent = MagicMock()
-        async def _mock_astream_events(*args, **kwargs):
-            return
-            yield  # type: ignore[unreachable]
-        mock_deep_agent.astream_events = _mock_astream_events
+        mock_deep_agent.astream_events = _awaitable_stream([])
 
         with patch("deepagents.create_deep_agent", return_value=mock_deep_agent) as mock_create, \
              patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
@@ -464,10 +572,7 @@ class TestRunOrchestration:
         ctx.checkpoint = None
 
         mock_deep_agent = MagicMock()
-        async def _mock_astream_events(*args, **kwargs):
-            return
-            yield  # type: ignore[unreachable]
-        mock_deep_agent.astream_events = _mock_astream_events
+        mock_deep_agent.astream_events = _awaitable_stream([])
 
         with patch("deepagents.create_deep_agent", return_value=mock_deep_agent) as mock_create, \
              patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
@@ -487,12 +592,15 @@ class TestRunOrchestration:
 
         captured_input: dict = {}
 
-        mock_deep_agent = MagicMock()
-        async def _mock_astream_events(input_payload, *args, **kwargs):
+        async def _capturing_stream(input_payload, *args, **kwargs):
             captured_input.update(input_payload)
-            return
-            yield  # type: ignore[unreachable]
-        mock_deep_agent.astream_events = _mock_astream_events
+            async def _gen():
+                return
+                yield  # type: ignore[unreachable]
+            return _gen()
+
+        mock_deep_agent = MagicMock()
+        mock_deep_agent.astream_events = _capturing_stream
 
         with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
              patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
@@ -510,7 +618,7 @@ class TestRunOrchestration:
         assert messages[0]["content"] == "hello"
 
 
-# ── Phase 4b: subagent wiring ──────────────────────────────────────────
+# ── Phase 4b: subagent wiring ───────────────────────────────────────────
 
 
 class TestSubagentWiring:
@@ -543,10 +651,7 @@ class TestSubagentWiring:
         ctx = _make_ctx(agent=agent)
 
         mock_deep_agent = MagicMock()
-        async def _mock_astream_events(*args, **kwargs):
-            return
-            yield  # type: ignore[unreachable]
-        mock_deep_agent.astream_events = _mock_astream_events
+        mock_deep_agent.astream_events = _awaitable_stream([])
 
         with patch("deepagents.create_deep_agent", return_value=mock_deep_agent) as mock_create, \
              patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
@@ -585,10 +690,7 @@ class TestSubagentWiring:
         ctx = _make_ctx(agent=agent)
 
         mock_deep_agent = MagicMock()
-        async def _mock_astream_events(*args, **kwargs):
-            return
-            yield  # type: ignore[unreachable]
-        mock_deep_agent.astream_events = _mock_astream_events
+        mock_deep_agent.astream_events = _awaitable_stream([])
 
         with patch("deepagents.create_deep_agent", return_value=mock_deep_agent) as mock_create, \
              patch("langchain.chat_models.init_chat_model", return_value=MagicMock()), \
@@ -606,21 +708,17 @@ class TestSubagentWiring:
 
     @pytest.mark.asyncio
     async def test_run_yields_subagent_event_on_task_chain_start(self):
-        """on_chain_start with name='task' → StreamEvent(type='subagent',
+        """method=on_chain_start name='task' → StreamEvent(type='subagent',
         action='start')."""
         adapter = DeepAgentsAdapter(api_key="fake")
         ctx = _make_ctx()
 
-        task_event = _make_event(
-            "on_chain_start",
-            name="task",
-            data={"input": {"name": "researcher", "subagent_type": "web"}},
+        task_event = _make_chain_start(
+            "task",
+            {"name": "researcher", "subagent_type": "web"},
         )
-
         mock_deep_agent = MagicMock()
-        async def _mock_astream_events(*args, **kwargs):
-            yield task_event
-        mock_deep_agent.astream_events = _mock_astream_events
+        mock_deep_agent.astream_events = _awaitable_stream([task_event])
 
         with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
              patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
@@ -636,21 +734,14 @@ class TestSubagentWiring:
 
     @pytest.mark.asyncio
     async def test_run_yields_subagent_event_on_task_chain_end(self):
-        """on_chain_end with name='task' → StreamEvent(type='subagent',
+        """method=on_chain_end name='task' → StreamEvent(type='subagent',
         action='end')."""
         adapter = DeepAgentsAdapter(api_key="fake")
         ctx = _make_ctx()
 
-        task_event = _make_event(
-            "on_chain_end",
-            name="task",
-            data={"output": "subagent result"},
-        )
-
+        task_event = _make_chain_end("task", "subagent result")
         mock_deep_agent = MagicMock()
-        async def _mock_astream_events(*args, **kwargs):
-            yield task_event
-        mock_deep_agent.astream_events = _mock_astream_events
+        mock_deep_agent.astream_events = _awaitable_stream([task_event])
 
         with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
              patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
@@ -662,85 +753,3 @@ class TestSubagentWiring:
         assert len(subagent_events) == 1
         assert subagent_events[0].data["action"] == "end"
         assert "subagent result" in subagent_events[0].data["output"]
-
-
-# ── Phase 4c: LangSmith tracing ────────────────────────────────────────
-
-
-class TestLangSmithTracing:
-    """Phase 4c: LangSmith tracing wired only when api_key is set."""
-
-    @pytest.mark.asyncio
-    async def test_no_tracing_when_api_key_unset(self):
-        """Default settings (empty api_key) → no callbacks attached."""
-        from src.infra.settings import Settings
-        s = Settings(langsmith_api_key="")
-        assert s.langsmith_api_key == ""
-        # When api_key is empty, _wire_langsmith_tracing is never
-        # called (adapter checks truthiness). Verifiable by mocking
-        # settings to empty and confirming no callbacks in config.
-        adapter = DeepAgentsAdapter(api_key="fake")
-        agent = _make_agent()
-        ctx = _make_ctx(agent=agent)
-
-        mock_deep_agent = MagicMock()
-        async def _mock_astream_events(*args, **kwargs):
-            return
-            yield  # type: ignore[unreachable]
-        mock_deep_agent.astream_events = _mock_astream_events
-
-        captured_config: dict = {}
-
-        def _capture_config(*args, **kwargs):
-            captured_config.update(kwargs.get("config", {}))
-            return mock_deep_agent
-
-        with patch("deepagents.create_deep_agent", side_effect=_capture_config), \
-             patch("langchain.chat_models.init_chat_model", return_value=MagicMock()), \
-             patch.object(adapter, "_wire_langsmith_tracing") as mock_wire:
-            await _collect(adapter.run(
-                [{"role": "user", "content": "x"}], ctx
-            ))
-        # When api_key is empty, _wire_langsmith_tracing must not be
-        # called at all (guarded by `if settings.langsmith_api_key`).
-        mock_wire.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_tracing_wired_when_api_key_set(self):
-        """When LANGSMITH_API_KEY is set, callbacks are attached to config."""
-        from src.infra.settings import Settings
-        test_settings = Settings(
-            langsmith_api_key="ls-key-123",
-            langsmith_project="test-project",
-        )
-
-        adapter = DeepAgentsAdapter(api_key="fake")
-        agent = _make_agent()
-        ctx = _make_ctx(agent=agent)
-
-        captured_config: dict = {}
-
-        async def _mock_astream_events(input_payload, *, version, config):
-            captured_config.update(config)
-            return
-            yield  # type: ignore[unreachable]
-
-        mock_deep_agent = MagicMock()
-        mock_deep_agent.astream_events = _mock_astream_events
-
-        with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
-             patch("langchain.chat_models.init_chat_model", return_value=MagicMock()), \
-             patch("src.runtime.adapters.deepagents.settings", test_settings):
-            await _collect(adapter.run(
-                [{"role": "user", "content": "x"}], ctx
-            ))
-
-        # When api_key is set, the config should have callbacks attached.
-        assert "callbacks" in captured_config
-        assert len(captured_config["callbacks"]) >= 1
-        # run_name follows "{agent_name}@{session_id_prefix}" pattern.
-        assert "@" in captured_config.get("run_name", "")
-        # metadata should carry identifying fields.
-        meta = captured_config.get("metadata", {})
-        assert meta.get("session_id") == ctx.session_id
-        assert meta.get("workspace_id") == ctx.workspace_id

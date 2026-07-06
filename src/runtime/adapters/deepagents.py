@@ -87,13 +87,13 @@ class DeepAgentsAdapter(RunAdapter):
     ) -> AsyncIterator[StreamEvent]:
         """One deepagents run → StreamEvent stream.
 
-        Mapping (spec §3.1):
-        - ``on_chat_model_stream`` delta  → ``StreamEvent(type="text")``
-        - ``on_tool_start``               → ``StreamEvent(type="tool_call", already_executed=True)``
-        - ``on_tool_end``                 → ``StreamEvent(type="tool_result")``
-        - ``on_chain_start/end`` name="task" → ``StreamEvent(type="subagent")``
-        - ``on_chat_model_end`` w/ usage  → ``StreamEvent(type="status")``
-        - error event                     → ``StreamEvent(type="error")``
+        Mapping (spec §3.1) — LangGraph v3 JSON-RPC event format:
+        - ``method=messages`` + ``content-block-delta`` → ``StreamEvent(type="text")``
+        - ``method=messages`` + ``tool-call``           → ``StreamEvent(type="tool_call", already_executed=True)``
+        - ``method=messages`` + ``tool-result``         → ``StreamEvent(type="tool_result")``
+        - ``method=on_chain_start/end`` name="task"     → ``StreamEvent(type="subagent")``
+        - ``method=values`` w/ ``usage_metadata``       → ``StreamEvent(type="status")``
+        - ``type=error``                                → ``StreamEvent(type="error")``
         """
         if not messages:
             raise ValueError("messages must not be empty")
@@ -157,14 +157,40 @@ class DeepAgentsAdapter(RunAdapter):
             max_tokens=max_tokens,
         )
 
-        # 6. Compile the deep agent
+        # 6. Compile the deep agent.
+        # deepagents 0.6.12 does not support ``excluded_tools``; instead we
+        # constrain the built-in filesystem tools via ``permissions`` so
+        # they can only access ``ctx.workspace_root`` (not arbitrary paths).
+        # Our sandboxed builtins (ls/read/write/edit/glob/grep) coexist
+        # with deepagents' read_file/write_file/edit_file/execute — the
+        # LLM picks which to call.
+        perms: list[Any] = []
+        if ctx.workspace_root:
+            try:
+                from deepagents.middleware.filesystem import (
+                    FilesystemPermission,
+                )
+                perms = [
+                    FilesystemPermission(
+                        operations=["read", "write"],
+                        mode="allow",
+                        paths=[f"{ctx.workspace_root}/**"],
+                    ),
+                    FilesystemPermission(
+                        operations=["read", "write"],
+                        mode="deny",
+                        paths=["/**"],
+                    ),
+                ]
+            except ImportError:
+                pass
         deep_agent = create_deep_agent(
             model=model,
             tools=tools,
             system_prompt=system_prompt,
             subagents=subagents or None,
             checkpointer=checkpointer,
-            excluded_tools=set(_EXCLUDED_FILESYSTEM_TOOLS),
+            permissions=perms or None,
         )
 
         # 7. Stream events
@@ -180,9 +206,13 @@ class DeepAgentsAdapter(RunAdapter):
 
         usage_emitted = False
         try:
-            async for event in deep_agent.astream_events(
+            # ``astream_events`` may return either an AsyncIterator or an
+            # Awaitable[AsyncIterator] depending on the langgraph version.
+            # Await first to normalize, then iterate.
+            event_stream = await deep_agent.astream_events(
                 input_payload, version="v3", config=config
-            ):
+            )
+            async for event in event_stream:
                 for stream_event in self._translate_event(event):
                     yield stream_event
                     if (
@@ -227,93 +257,84 @@ class DeepAgentsAdapter(RunAdapter):
         return out
 
     def _translate_event(self, event: dict) -> list[StreamEvent]:
-        """Map one deepagents ``astream_events`` v3 event → StreamEvents.
+        """Map one LangGraph v3 ``astream_events`` event → StreamEvents.
 
-        Returns a list because some raw events yield multiple
-        StreamEvents (rare; kept for future extension).
+        LangGraph v3 uses a JSON-RPC-style format:
+        ``{"type": "event", "method": "messages"|"values", "params": {"data": ...}}``
+
+        - ``method=messages``: streaming tokens; ``params.data`` is a
+          tuple whose first element carries ``{"event": "content-block-delta",
+          "delta": {"type": "text-delta", "text": "..."}}``.
+        - ``method=values``: state snapshot; ``params.data`` is a dict
+          with ``messages`` list. The final AIMessage carries
+          ``usage_metadata``.
         """
-        event_name = event.get("event", "")
-        name = event.get("name", "")
-        data = event.get("data", {}) or {}
+        method = event.get("method", "")
+        params = event.get("params", {}) or {}
+        data = params.get("data")
 
-        # Token stream
-        if event_name == "on_chat_model_stream":
-            chunk = data.get("chunk")
-            content = ""
-            if chunk is not None:
-                # LangChain AIMessageChunk — content is on .content attr.
-                content = getattr(chunk, "content", "") or ""
-            if not content:
+        # ── method=messages: streaming token deltas ──
+        if method == "messages":
+            if not isinstance(data, (list, tuple)) or not data:
                 return []
-            return [StreamEvent(type="text", data={"content": content})]
+            first = data[0] if data else {}
+            if not isinstance(first, dict):
+                return []
+            sub_event = first.get("event", "")
 
-        # Tool call start — the shim already executed the tool by the
-        # time on_tool_end fires, so we mark already_executed=True.
-        if event_name == "on_tool_start":
-            tool_input = data.get("input", {}) or {}
-            return [StreamEvent(
-                type="tool_call",
-                data={
-                    "name": name,
-                    "args": tool_input,
-                    "call_id": event.get("run_id", ""),
-                },
-                already_executed=True,
-            )]
+            # Text streaming — emit data={"content": text} to match
+            # DirectLLMAdapter's convention (chat.py reads this key).
+            if sub_event == "content-block-delta":
+                delta = first.get("delta", {}) or {}
+                if delta.get("type") == "text-delta":
+                    text = delta.get("text", "")
+                    if text:
+                        return [StreamEvent(
+                            type="text", data={"content": text}
+                        )]
+                return []
 
-        # Tool call end — yield the result the shim returned.
-        if event_name == "on_tool_end":
-            output = data.get("output")
-            output_str = ""
-            error_str: str | None = None
-            if isinstance(output, str):
-                output_str = output
-                if output.startswith("ERROR: "):
+            # Tool call start
+            if sub_event == "tool-call":
+                return [StreamEvent(
+                    type="tool_call",
+                    data={
+                        "name": first.get("name", ""),
+                        "args": first.get("args", {}),
+                        "call_id": first.get("id", ""),
+                    },
+                    already_executed=True,
+                )]
+
+            # Tool result
+            if sub_event == "tool-result":
+                output = first.get("output", "")
+                error_str: str | None = None
+                if isinstance(output, str) and output.startswith("ERROR: "):
                     error_str = output.removeprefix("ERROR: ")
-                    output_str = ""
-            elif output is not None:
-                output_str = getattr(output, "content", str(output))
-            return [StreamEvent(
-                type="tool_result",
-                data={
-                    "name": name,
-                    "output": output_str,
-                    "error": error_str,
-                },
-                already_executed=True,
-            )]
+                    output = ""
+                return [StreamEvent(
+                    type="tool_result",
+                    data={
+                        "name": first.get("name", ""),
+                        "output": output if isinstance(output, str) else str(output),
+                        "error": error_str,
+                    },
+                    already_executed=True,
+                )]
 
-        # Subagent dispatch (the `task` tool)
-        if event_name == "on_chain_start" and name == "task":
-            inputs = data.get("input", {}) or {}
-            return [StreamEvent(
-                type="subagent",
-                data={
-                    "action": "start",
-                    "name": inputs.get("name", ""),
-                    "subagent_type": inputs.get("subagent_type", ""),
-                },
-            )]
-        if event_name == "on_chain_end" and name == "task":
-            output = data.get("output")
-            output_str = ""
-            if output is not None:
-                output_str = getattr(output, "content", str(output))
-            return [StreamEvent(
-                type="subagent",
-                data={
-                    "action": "end",
-                    "name": name,
-                    "output": output_str,
-                },
-            )]
+            return []
 
-        # Usage tracking
-        if event_name == "on_chat_model_end":
-            output = data.get("output")
-            usage_metadata = (
-                getattr(output, "usage_metadata", None) if output else None
-            )
+        # ── method=values: state snapshot (final state has usage) ──
+        if method == "values":
+            if not isinstance(data, dict):
+                return []
+            messages = data.get("messages", [])
+            if not messages:
+                return []
+            # The last message is the AI's final reply; check for usage.
+            last_msg = messages[-1]
+            usage_metadata = getattr(last_msg, "usage_metadata", None)
             if usage_metadata:
                 usage = Usage(
                     input_tokens=usage_metadata.get("input_tokens", 0),
@@ -324,15 +345,45 @@ class DeepAgentsAdapter(RunAdapter):
                     type="status",
                     data={"usage": usage.model_dump()},
                 )]
+            return []
 
-        # Errors surfaced by LangGraph
-        if "error" in event_name.lower():
+        # ── Subagent (task) chain events ──
+        # In v3, chain events arrive as method="on_chain_start"/"on_chain_end"
+        # with the chain name in params.name. We only surface "task" chains
+        # (deepagents' subagent dispatch) as subagent StreamEvents.
+        if method in ("on_chain_start", "on_chain_end"):
+            name = params.get("name", "") or event.get("name", "")
+            if name != "task":
+                return []
+            if method == "on_chain_start":
+                input_data = data if isinstance(data, dict) else {}
+                return [StreamEvent(
+                    type="subagent",
+                    data={
+                        "action": "start",
+                        "name": input_data.get("name", ""),
+                        "subagent_type": input_data.get("subagent_type", ""),
+                    },
+                )]
+            # on_chain_end
+            output = data.get("output", "") if isinstance(data, dict) else ""
+            output_str = output if isinstance(output, str) else str(output)
+            return [StreamEvent(
+                type="subagent",
+                data={
+                    "action": "end",
+                    "output": output_str,
+                },
+            )]
+
+        # ── Error events ──
+        if event.get("type") == "error":
             return [StreamEvent(
                 type="error",
                 data={
                     "code": "DEEPAGENTS_EVENT_ERROR",
                     "message": str(data)[:500],
-                    "event": event_name,
+                    "event": method,
                 },
             )]
 
