@@ -4,15 +4,15 @@ Replaces the direct ``DirectLLMAdapter()`` call in ``chat.py``. The
 runtime owns the full pipeline:
 1. Resolve agent definition (AgentRegistry)
 2. Build per-run HarnessContext
-3. Pre-flight guardrails
-4. Adapter.run() (with RetryPolicy + CircuitBreaker — P1)
-5. Intercept tool_call events → ctx.tool_engine.execute()
-6. Post-flight guardrails
-7. Final state / checkpoint commit (P1)
-
-P0 implements steps 1-5 with a minimal retry wrapper. P1 adds
-CircuitBreaker, Hooks, CheckpointStore commit, and full message-history
-management for the compact tool.
+3. PromptAssembler.assemble() (P1)
+4. Pre-hooks: trigger("run.start") (P1)
+5. Pre-flight guardrails
+6. Adapter.run() with RetryPolicy + CircuitBreaker (P1)
+7. Intercept tool_call events → ctx.tool_engine.execute()
+   + hooks: trigger("tool.call") / trigger("tool.result") (P1)
+8. Post-flight guardrails
+9. Post-hooks: trigger("run.end") (P1)
+10. Checkpoint commit (P1)
 
 ``chat.py`` calls ``HarnessRuntime.run()`` exactly once per request.
 """
@@ -32,18 +32,22 @@ from src.runtime.models import RuntimeConfig, StreamEvent
 
 from .agents import AgentDefinition, AgentNotFoundError
 from .context import HarnessContext
+from .checkpoint import CheckpointScope
 from .registry import HarnessRegistry
+from .retry import CircuitBreaker, CircuitOpenError, RetryPolicy
 from .tool_engine import ToolEngine, ToolError
 
 logger = logging.getLogger(__name__)
 
 
 class HarnessRuntime(AgentRuntime):
-    """Sole orchestrator: registry → context → guardrails → adapter → tools."""
+    """Sole orchestrator: registry → context → pipeline → adapter → tools."""
 
     def __init__(self, registry: HarnessRegistry) -> None:
         self._registry = registry
         self._adapters: dict[str, RunAdapter] = {}
+        self._retry_policy = RetryPolicy()
+        self._circuit_breaker = CircuitBreaker()
 
     # ── Public API ──
     async def run(
@@ -88,7 +92,18 @@ class HarnessRuntime(AgentRuntime):
             workspace_root=workspace_root,
         )
 
-        # 2. Pre-flight guardrails
+        # 2. PromptAssembler.assemble() — P1
+        if ctx.prompt_assembler is not None:
+            try:
+                await ctx.prompt_assembler.assemble(agent, ctx)
+            except Exception as exc:
+                logger.warning("PromptAssembler error: %s", exc)
+
+        # 3. Pre-hooks: trigger("run.start")
+        if ctx.hooks is not None:
+            await ctx.hooks.trigger("run.start", {"messages": messages}, ctx)
+
+        # 4. Pre-flight guardrails
         try:
             pre = await ctx.guardrails.check_input(messages, ctx)
         except Exception as exc:
@@ -110,50 +125,76 @@ class HarnessRuntime(AgentRuntime):
             pre.modified_messages if pre and pre.modified_messages else messages
         )
 
-        # 3. Adapter execution (with minimal retry — full policy in P1)
+        # 5. Adapter execution (with RetryPolicy + CircuitBreaker — P1)
         adapter = self._resolve_adapter(agent.adapter, config)
-        async for event in self._run_with_retry(adapter, safe_messages, ctx):
-            if event.type == "tool_call":
-                # 4. Intercept tool_call → harness-managed execution
-                tool_name = event.data.get("name", "")
-                tool_args = event.data.get("args", {}) or {}
-                try:
-                    result = await ctx.tool_engine.execute(
-                        tool_name, tool_args, ctx
-                    )
-                    yield StreamEvent(
-                        type="tool_result",
-                        data={
+        try:
+            async for event in self._run_with_retry(adapter, safe_messages, ctx):
+                if event.type == "tool_call":
+                    # 6. Intercept tool_call → harness-managed execution
+                    tool_name = event.data.get("name", "")
+                    tool_args = event.data.get("args", {}) or {}
+
+                    # Pre-tool hooks
+                    if ctx.hooks is not None:
+                        await ctx.hooks.trigger(
+                            "tool.call",
+                            {"name": tool_name, "args": tool_args},
+                            ctx,
+                        )
+
+                    try:
+                        result = await ctx.tool_engine.execute(
+                            tool_name, tool_args, ctx
+                        )
+                        tool_result_data = {
                             "name": tool_name,
                             "output": result.output,
                             "error": result.error,
                             "metadata": result.metadata,
-                        },
-                    )
-                except ToolError as exc:
-                    yield StreamEvent(
-                        type="tool_result",
-                        data={
+                        }
+                        yield StreamEvent(
+                            type="tool_result", data=tool_result_data
+                        )
+
+                        # Post-tool hooks
+                        if ctx.hooks is not None:
+                            await ctx.hooks.trigger(
+                                "tool.result", tool_result_data, ctx
+                            )
+
+                        # Mid-run checkpoint save
+                        if ctx.checkpoint is not None:
+                            await ctx.checkpoint.save(
+                                messages=safe_messages,
+                                tool_state=ctx.working_memory,
+                            )
+
+                    except ToolError as exc:
+                        err_data = {
                             "name": tool_name,
                             "output": "",
                             "error": f"{type(exc).__name__}: {exc}",
-                        },
-                    )
-            else:
-                yield event
+                        }
+                        yield StreamEvent(type="tool_result", data=err_data)
+                        if ctx.hooks is not None:
+                            await ctx.hooks.trigger("tool.result", err_data, ctx)
+                else:
+                    yield event
+        finally:
+            # 7. Post-hooks + checkpoint commit
+            if ctx.hooks is not None:
+                await ctx.hooks.trigger("run.end", {}, ctx)
+            if ctx.checkpoint is not None:
+                try:
+                    await ctx.checkpoint.commit()
+                except Exception as exc:
+                    logger.warning("Checkpoint commit failed: %s", exc)
 
     # ── Internals ──
     async def _resolve_agent(
         self, config: RuntimeConfig
     ) -> AgentDefinition | None:
-        """Resolve agent by id (config.agent) or name.
-
-        P0: if ``config.agent`` is empty or not found, fall back to a
-        synthetic default agent so existing chat flows that don't
-        specify an agent id keep working. This keeps ``chat.py``'s
-        current behavior (direct LLM, no tools) intact while enabling
-        tool use for agents that opt in.
-        """
+        """Resolve agent by id (config.agent) or name."""
         if not config.agent:
             return self._default_agent(config)
 
@@ -161,7 +202,6 @@ class HarnessRuntime(AgentRuntime):
             agent = await self._registry.agents.get(db, config.agent)
             if agent is not None:
                 return agent
-            # Try by name within the workspace.
             agent = await self._registry.agents.get_by_name(
                 db, config.workspace_id, config.agent
             )
@@ -170,12 +210,7 @@ class HarnessRuntime(AgentRuntime):
         return self._default_agent(config)
 
     def _default_agent(self, config: RuntimeConfig) -> AgentDefinition:
-        """Build a synthetic default agent from RuntimeConfig fields.
-
-        Used when no AgentDefinition is found — preserves Phase 1/2
-        behavior (direct LLM call, no tools, no guardrails beyond the
-        built-in pipeline).
-        """
+        """Build a synthetic default agent from RuntimeConfig fields."""
         return AgentDefinition(
             id="",
             name="default",
@@ -204,7 +239,7 @@ class HarnessRuntime(AgentRuntime):
         workspace_settings: dict,
         workspace_root: str,
     ) -> HarnessContext:
-        """Build a per-run HarnessContext with tool_engine scoped to agent."""
+        """Build a per-run HarnessContext with all P1 subsystems wired."""
         from .tools import BUILTIN_HANDLERS
 
         tool_engine = ToolEngine(
@@ -214,6 +249,15 @@ class HarnessRuntime(AgentRuntime):
             mcp_manager=self._registry.mcp,
             sandbox=self._registry.sandbox,
         )
+
+        # Build per-run CheckpointScope
+        checkpoint: CheckpointScope | None = None
+        if self._registry.checkpoints is not None and session_id:
+            checkpoint = CheckpointScope(
+                store=self._registry.checkpoints,
+                session_id=session_id,
+                agent_id=agent.id,
+            )
 
         return HarnessContext(
             workspace_id=config.workspace_id,
@@ -227,6 +271,11 @@ class HarnessRuntime(AgentRuntime):
             secrets={},
             workspace_settings=workspace_settings,
             workspace_root=workspace_root,
+            # P1 wiring
+            sandbox=self._registry.sandbox,
+            hooks=self._registry.hooks,
+            checkpoint=checkpoint,
+            prompt_assembler=self._registry.prompt_assembler,
         )
 
     def _resolve_adapter(
@@ -239,7 +288,6 @@ class HarnessRuntime(AgentRuntime):
         if adapter_name == "direct_llm":
             adapter = DirectLLMAdapter(model=config.model)
         else:
-            # ADK / LangGraph arrive in Phase 4/7; fall back to direct_llm.
             logger.warning(
                 "Adapter %r not implemented in P3a; falling back to direct_llm",
                 adapter_name,
@@ -254,23 +302,47 @@ class HarnessRuntime(AgentRuntime):
         adapter: RunAdapter,
         messages: list[dict],
         ctx: HarnessContext,
-        max_retries: int = 3,
-        base_delay: float = 1.0,
     ) -> AsyncIterator[StreamEvent]:
-        """Run adapter with exponential backoff on retryable exceptions.
+        """Run adapter with RetryPolicy + CircuitBreaker (P1).
 
-        P0 uses a fixed retry policy; P1 replaces this with the
-        configurable ``RetryPolicy`` + ``CircuitBreaker`` classes.
+        Replaces the P0 hardcoded retry loop with configurable
+        ``RetryPolicy`` (exponential backoff + jitter) and
+        ``CircuitBreaker`` (closed/open/half-open state machine).
         """
         attempt = 0
         while True:
+            # Circuit breaker check
+            if not self._circuit_breaker.can_execute():
+                yield StreamEvent(
+                    type="error",
+                    data={
+                        "code": "CIRCUIT_OPEN",
+                        "message": "Circuit breaker is open; adapter unavailable",
+                    },
+                )
+                return
+
             try:
                 async for event in adapter.run(messages, ctx):
                     yield event
+                self._circuit_breaker.record_success()
                 return
-            except (TimeoutError, ConnectionError) as exc:
+            except Exception as exc:
+                self._circuit_breaker.record_failure()
+
+                if not self._retry_policy.is_retryable(exc):
+                    # Non-retryable; surface immediately.
+                    yield StreamEvent(
+                        type="error",
+                        data={
+                            "code": "ADAPTER_ERROR",
+                            "message": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
+                    return
+
                 attempt += 1
-                if attempt > max_retries:
+                if attempt > self._retry_policy.max_retries:
                     yield StreamEvent(
                         type="error",
                         data={
@@ -280,25 +352,16 @@ class HarnessRuntime(AgentRuntime):
                         },
                     )
                     return
-                delay = min(base_delay * (2 ** (attempt - 1)), 30.0)
+
+                delay = self._retry_policy.backoff(attempt)
                 logger.warning(
                     "Adapter retry %d/%d after %.1fs: %s",
                     attempt,
-                    max_retries,
+                    self._retry_policy.max_retries,
                     delay,
                     exc,
                 )
                 await asyncio.sleep(delay)
-            except Exception as exc:
-                # Non-retryable; surface immediately.
-                yield StreamEvent(
-                    type="error",
-                    data={
-                        "code": "ADAPTER_ERROR",
-                        "message": f"{type(exc).__name__}: {exc}",
-                    },
-                )
-                return
 
 
 # Module-level singleton — set by main.py lifespan.

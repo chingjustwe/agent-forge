@@ -456,6 +456,8 @@ class TestRunWithRetry:
 
         agent = _make_agent()
         runtime, _ = _make_runtime(agent=agent)
+        # P1: retry policy is configurable via runtime._retry_policy
+        runtime._retry_policy.max_retries = 2
         with patch("src.runtime.harness.runtime.asyncio.sleep", new=AsyncMock()):
             events = await _collect(runtime._run_with_retry(
                 _AlwaysTimeoutAdapter(), [{"role": "user", "content": "x"}],
@@ -463,7 +465,6 @@ class TestRunWithRetry:
                     workspace_id="ws", user_id="u", session_id="s",
                     trace_id="t", agent=agent,
                 ),
-                max_retries=2,
             ))
         # 1 initial + 2 retries = 3 calls.
         assert call_count == 3

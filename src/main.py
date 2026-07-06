@@ -313,6 +313,43 @@ def _migrate_schema(sync_conn):
     except Exception:
         pass
 
+    # Migration M13 (P3a-P1): create checkpoints table (idempotent).
+    # Stores per-session conversation snapshots for crash recovery.
+    if "workspaces" in tables:
+        sync_conn.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS checkpoints ("
+            "session_id VARCHAR(32) NOT NULL,"
+            "sequence INTEGER NOT NULL,"
+            "messages TEXT NOT NULL,"
+            "tool_state TEXT NOT NULL,"
+            "agent_id VARCHAR(32) NOT NULL,"
+            "metadata TEXT NOT NULL DEFAULT '{}',"
+            "created_at DATETIME NOT NULL,"
+            "PRIMARY KEY (session_id, sequence)"
+            ")"
+        )
+
+    # Migration M14 (P3a-P1): create mcp_servers table (idempotent).
+    # Stores per-workspace MCP server configurations.
+    if "workspaces" in tables:
+        sync_conn.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS mcp_servers ("
+            "id VARCHAR(32) NOT NULL PRIMARY KEY,"
+            "name VARCHAR(100) NOT NULL,"
+            "workspace_id VARCHAR(32) NOT NULL REFERENCES workspaces(id),"
+            "endpoint TEXT NOT NULL,"
+            "transport VARCHAR(20) DEFAULT 'http',"
+            "auth_token TEXT,"
+            "enabled INTEGER DEFAULT 1,"
+            "created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "UNIQUE (workspace_id, name)"
+            ")"
+        )
+        sync_conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_mcp_servers_workspace_id "
+            "ON mcp_servers (workspace_id)"
+        )
+
     # Migration M12 (P3a): extend agent_configs with structured fields.
     # The legacy ``framework`` + ``config`` JSON columns are kept as-is
     # for backward compat with existing API clients. New structured

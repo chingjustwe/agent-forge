@@ -6,7 +6,8 @@ uses it to resolve agents + build per-run ``HarnessContext`` objects.
 
 P0 wires: AgentRegistry, ToolRegistry (+12 builtin tools),
 GuardrailPipeline (+4 builtin guardrails), TelemetryCollector.
-P1 will add: MCPManager, SandboxManager, HookRegistry, CheckpointStore.
+P1 adds: MCPManager, SandboxManager, HookRegistry (+3 builtin hooks),
+CheckpointStore (SQLiteCheckpointStore), PromptAssembler.
 P2 will add: MemoryStore, SkillRegistry.
 P3 will add: Scheduler.
 """
@@ -17,6 +18,7 @@ import logging
 from src.infra.telemetry.collector import TelemetryCollector
 
 from .agents import AgentRegistry, agents as _agents_singleton
+from .checkpoint import SQLiteCheckpointStore
 from .guardrails import (
     ContentFilterGuardrail,
     GuardrailPipeline,
@@ -24,6 +26,15 @@ from .guardrails import (
     PolicyGuardrail,
     QuotaGuardrail,
 )
+from .hooks import (
+    AuditLogHook,
+    HookRegistry,
+    MetricHook,
+    TraceHook,
+)
+from .mcp import MCPManager
+from .prompt import PromptAssembler
+from .sandbox import SandboxManager
 from .tool_engine import ToolRegistry, tools as _tools_singleton
 
 logger = logging.getLogger(__name__)
@@ -39,33 +50,37 @@ class HarnessRegistry:
         tools: ToolRegistry | None = None,
         guardrails: GuardrailPipeline | None = None,
         collector: TelemetryCollector | None = None,
-        mcp: object | None = None,
-        sandbox: object | None = None,
+        mcp: MCPManager | None = None,
+        sandbox: SandboxManager | None = None,
         memory: object | None = None,
-        hooks: object | None = None,
-        checkpoints: object | None = None,
+        hooks: HookRegistry | None = None,
+        checkpoints: SQLiteCheckpointStore | None = None,
         skills: object | None = None,
         scheduler: object | None = None,
+        prompt_assembler: PromptAssembler | None = None,
     ) -> None:
         self.agents = agents or _agents_singleton
         self.tools = tools or _tools_singleton
         self.guardrails = guardrails or GuardrailPipeline()
         self.collector = collector or TelemetryCollector()
-        # P1+ placeholders — None until their respective phases wire them.
-        self.mcp = mcp
-        self.sandbox = sandbox
+        # P1 components
+        self.mcp = mcp or MCPManager()
+        self.sandbox = sandbox or SandboxManager()
+        self.hooks = hooks or HookRegistry()
+        self.checkpoints = checkpoints or SQLiteCheckpointStore()
+        self.prompt_assembler = prompt_assembler or PromptAssembler()
+        # P2+ placeholders
         self.memory = memory
-        self.hooks = hooks
-        self.checkpoints = checkpoints
         self.skills = skills
         self.scheduler = scheduler
 
     @classmethod
     def create(cls) -> "HarnessRegistry":
-        """Factory: wire all P0 subsystems with sensible defaults.
+        """Factory: wire all subsystems with sensible defaults.
 
         - Registers 12 builtin tool definitions into ``ToolRegistry``.
         - Registers 4 builtin guardrails into ``GuardrailPipeline``.
+        - Registers 3 builtin hooks into ``HookRegistry``.
         - Reuses the module-level ``agents`` / ``tools`` singletons so
           routes can import them directly.
         """
@@ -76,7 +91,6 @@ class HarnessRegistry:
 
         registered = 0
         for tool_def in BUILTIN_TOOL_DEFINITIONS:
-            # Don't double-register on repeated create() calls.
             if registry.tools.get(tool_def.name) is None:
                 registry.tools.register(tool_def)
                 registered += 1
@@ -94,12 +108,23 @@ class HarnessRegistry:
         if "policy" not in existing:
             registry.guardrails.add(PolicyGuardrail())
 
+        # ── Register builtin hooks (idempotent) ──
+        hook_names = {h.name for h in registry.hooks.list()}
+        if "trace" not in hook_names:
+            registry.hooks.register(TraceHook())
+        if "metric" not in hook_names:
+            registry.hooks.register(MetricHook())
+        if "audit_log" not in hook_names:
+            registry.hooks.register(AuditLogHook())
+
         return registry
 
     async def shutdown(self) -> None:
-        """Release any held resources. P0: no-op (no async resources yet)."""
-        # P1: close MCP connections, scheduler.stop(), etc.
-        pass
+        """Release any held resources."""
+        # Close MCP connections
+        if self.mcp is not None:
+            await self.mcp.close_all()
+        logger.info("HarnessRegistry: shutdown complete")
 
 
 # Module-level singleton — wired by main.py lifespan.

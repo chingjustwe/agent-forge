@@ -10,9 +10,9 @@ Built by ``HarnessRuntime._build_context`` from the platform
   workspace_root)
 - Telemetry (collector, tracer, metrics)
 
-P0 wires the fields the harness needs to actually run; P1/P2/P3 add
-SandboxManager, MemoryStore, CheckpointStore, Scheduler etc. by
-replacing the ``None`` placeholders with real instances.
+P0 wires the fields the harness needs to actually run; P1 adds
+SandboxManager, HookRegistry, CheckpointStore, PromptAssembler.
+P2/P3 add MemoryStore, SkillRegistry, Scheduler etc.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class HarnessContext:
     # ── Capability systems (scoped to this run) ──
     tool_engine: "ToolEngine"
     guardrails: "GuardrailPipeline"
-    # The following are None in P0; populated by P1/P2 wiring.
+    # The following are None in P0; populated by P1 wiring.
     sandbox: Any | None = None
     memory: Any | None = None
     hooks: Any | None = None

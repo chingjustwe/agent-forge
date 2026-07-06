@@ -18,10 +18,7 @@ from src.infra.db.models import ChatMessage, ChatSession, WorkspaceMember
 from src.infra.db.session import get_db
 from src.infra.settings import settings
 from src.infra.telemetry.quota import QuotaGuardrail
-from src.runtime.harness.agents import AgentDefinition
-from src.runtime.harness.context import HarnessContext
 from src.runtime.models import RuntimeConfig, StreamEvent
-from src.runtime.adapters.direct_llm import DirectLLMAdapter
 
 router = APIRouter()
 _quota_guardrail = QuotaGuardrail()
@@ -36,31 +33,10 @@ def _derive_title(content: str) -> str:
     return text[:50] + ("…" if len(text) > 50 else "")
 
 
-def _get_adapter(config: RuntimeConfig) -> DirectLLMAdapter:
-    if not settings.llm_api_key:
-        raise RuntimeError(
-            "LLM_API_KEY is not configured. "
-            "Set it in .env file or export LLM_API_KEY environment variable."
-        )
-    return DirectLLMAdapter(
-        api_key=settings.llm_api_key,
-        model=config.model,
-    )
-
-
 async def _persist_user_message(session_id: str, content: str) -> None:
-    """Write the user's prompt as a ChatMessage.
-
-    Decoupled from the chat response: any failure is logged and swallowed
-    so the SSE stream is not affected by session-persistence errors.
-
-    Q2: if this is the first message in the session and the title is still
-    the default "New Chat", derive a title from the message content so the
-    session list is distinguishable.
-    """
+    """Write the user's prompt as a ChatMessage."""
     try:
         async with async_session() as db:
-            # Auto-title: only when this is the first message AND title is default.
             existing = await db.execute(
                 select(ChatMessage).where(ChatMessage.session_id == session_id).limit(1)
             )
@@ -102,12 +78,7 @@ async def _persist_assistant_message(session_id: str, content: str, tokens: int)
 
 
 async def _touch_workspace_member(workspace_id: str, user_id: str) -> None:
-    """P3-1: bump WorkspaceMember.last_active_at on a successful chat request.
-
-    Decoupled from the chat response: any failure is logged and swallowed
-    so the SSE stream is not affected. Uses a separate session so it does
-    not interfere with the request-scoped transaction.
-    """
+    """P3-1: bump WorkspaceMember.last_active_at on a successful chat request."""
     try:
         async with async_session() as db:
             wm = await db.get(WorkspaceMember, (workspace_id, user_id))
@@ -124,20 +95,24 @@ async def _touch_workspace_member(workspace_id: str, user_id: str) -> None:
 async def _event_stream(
     messages: list[dict],
     config: RuntimeConfig,
-    context: HarnessContext,
     trace_id: str,
     user_id: str,
     session_id: str | None = None,
+    workspace_settings: dict | None = None,
+    workspace_root: str = "",
 ) -> AsyncIterator[str]:
-    ws_id = config.workspace_id
+    """SSE stream backed by HarnessRuntime.run().
 
-    # P3-1: bump WorkspaceMember.last_active_at on a successful chat request
-    # (RBAC membership check already passed in the chat handler before the
-    # stream started). Fire-and-forget — failures are logged inside the helper.
+    P1: chat.py no longer instantiates adapters directly. All agent
+    execution flows through the HarnessRuntime pipeline (guardrails →
+    hooks → adapter → tools → checkpoint).
+    """
+    from src.runtime.harness.runtime import get_runtime
+
+    ws_id = config.workspace_id
     await _touch_workspace_member(ws_id, user_id)
 
-    # P1-1: persist the latest user prompt BEFORE streaming starts so the
-    # user message survives even if the LLM stream errors out mid-flight.
+    # P1-1: persist the latest user prompt BEFORE streaming starts.
     if session_id:
         last_user = next(
             (m.get("content", "") for m in reversed(messages) if m.get("role") == "user"),
@@ -147,27 +122,37 @@ async def _event_stream(
             await _persist_user_message(session_id, last_user)
 
     assistant_text = ""
-    async with context.tracer.span("chat.handler", trace_id, attributes={"ws_id": ws_id, "user_id": user_id}):
-        start = time.monotonic()
-        error = ""
-        total_tokens = {"input": 0, "output": 0}
-        try:
-            adapter = _get_adapter(config)
-            async with context.tracer.span("adapter.run", trace_id, parent_span_id=context.tracer._spans[-1].span_id if context.tracer._spans else None):
-                async for event in adapter.run(messages, context):
-                    yield f"data: {event.model_dump_json()}\n\n"
-                    if event.type == "text":
-                        assistant_text += event.data.get("content", "") or ""
-                    if event.type == "status":
-                        usage = event.data.get("usage", {})
-                        total_tokens["input"] = usage.get("input_tokens", 0)
-                        total_tokens["output"] = usage.get("output_tokens", 0)
-        except Exception as e:
-            error = str(e)
-            yield f"data: {StreamEvent(type='error', data={'code': 'LLM_ERROR', 'message': error}).model_dump_json()}\n\n"
+    start = time.monotonic()
+    error = ""
+    total_tokens = {"input": 0, "output": 0}
 
-        duration_ms = int((time.monotonic() - start) * 1000)
-        await context.record_request(
+    runtime = get_runtime()
+    try:
+        async for event in runtime.run(
+            session_id=session_id or "",
+            messages=messages,
+            config=config,
+            user_id=user_id,
+            trace_id=trace_id,
+            workspace_settings=workspace_settings or {},
+            workspace_root=workspace_root,
+        ):
+            yield f"data: {event.model_dump_json()}\n\n"
+            if event.type == "text":
+                assistant_text += event.data.get("content", "") or ""
+            if event.type == "status":
+                usage = event.data.get("usage", {})
+                total_tokens["input"] = usage.get("input_tokens", 0)
+                total_tokens["output"] = usage.get("output_tokens", 0)
+    except Exception as e:
+        error = str(e)
+        yield f"data: {StreamEvent(type='error', data={'code': 'LLM_ERROR', 'message': error}).model_dump_json()}\n\n"
+
+    duration_ms = int((time.monotonic() - start) * 1000)
+    try:
+        from src.infra.telemetry.collector import TelemetryCollector
+        collector = TelemetryCollector()
+        await collector.record_request(
             trace_id=trace_id,
             user_id=user_id,
             ws_id=ws_id,
@@ -178,9 +163,10 @@ async def _event_stream(
             tokens=total_tokens,
             error=error,
         )
+    except Exception:
+        pass
 
-    # P1-1: persist the assistant reply AFTER the stream completes. Decoupled
-    # so a persistence failure never affects the chat response.
+    # P1-1: persist the assistant reply AFTER the stream completes.
     if session_id:
         await _persist_assistant_message(
             session_id, assistant_text, total_tokens.get("output", 0)
@@ -196,8 +182,7 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
             content={"error": {"code": "UNAUTHORIZED", "message": "Not authenticated"}},
         )
 
-    # P2-3: API-key callers must carry the ``chat:write`` scope. JWT
-    # callers (auth_method != "api_key") bypass this check.
+    # P2-3: API-key callers must carry the ``chat:write`` scope.
     if user.get("auth_method") == "api_key":
         scopes = user.get("api_key_scopes") or []
         if "chat:write" not in scopes:
@@ -250,7 +235,6 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
             },
         )
 
-    # P0-4: workspace_id must be provided by the client (WorkspaceContext).
     if not config.workspace_id:
         return JSONResponse(
             status_code=400,
@@ -262,7 +246,7 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
             },
         )
 
-    # P0-2: enforce workspace membership for the resolved workspace.
+    # P0-2: enforce workspace membership.
     member_role = await get_workspace_member_role(config.workspace_id, user, db)
     if member_role is None:
         return JSONResponse(
@@ -276,14 +260,9 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
         )
 
     trace_id = uuid.uuid4().hex
-
-    # Bug fix: JWT puts user id in `sub`, not `id`. Fall back to `id` for
-    # legacy tokens.
     user_id = user.get("sub") or user.get("id", "")
 
-    # P1-1: optional session_id — when the client supplies one, the chat
-    # handler persists the user prompt and the assistant reply as
-    # ChatMessage rows. Persistence is decoupled from the SSE response.
+    # P1-1: optional session_id
     raw_config = body.get("config", {}) or {}
     session_id = raw_config.get("session_id") if isinstance(raw_config, dict) else None
     if session_id is not None and not isinstance(session_id, str):
@@ -291,9 +270,9 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
     if session_id == "":
         session_id = None
 
-    # P0: pre-flight quota check (preserves HTTP 429 behavior). The full
+    # Pre-flight quota check (preserves HTTP 429 behavior). The full
     # guardrail pipeline (content_filter, PII, policy) runs inside
-    # HarnessRuntime in P1 when chat.py is refactored to use the runtime.
+    # HarnessRuntime.run().
     quota_result = await _quota_guardrail.check(config.workspace_id)
     if not quota_result.passed:
         return JSONResponse(
@@ -301,28 +280,7 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
             content={"error": {"code": "RATE_LIMITED", "message": quota_result.reason}},
         )
 
-    # Build a minimal HarnessContext for the DirectLLM adapter. P1 will
-    # replace this with HarnessRuntime.run() which builds its own context
-    # (with tool_engine, guardrails, etc.) from the resolved AgentDefinition.
-    agent_def = AgentDefinition(
-        id="",
-        name="default",
-        workspace_id=config.workspace_id,
-        model=config.model,
-        max_tokens=config.max_tokens,
-        temperature=config.temperature,
-        adapter="direct_llm",
-    )
-    context = HarnessContext(
-        workspace_id=config.workspace_id,
-        user_id=user_id,
-        session_id=session_id or "",
-        trace_id=trace_id,
-        agent=agent_def,
-    )
-
-    # Q4: shared sessions are view-only for non-owners. Only the session
-    # owner (or workspace admin/owner / tenant_admin) may append messages.
+    # Q4: shared sessions are view-only for non-owners.
     if session_id:
         cs = await db.get(ChatSession, session_id)
         if not cs or cs.workspace_id != config.workspace_id:
@@ -347,7 +305,21 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
                 },
             )
 
+    # Resolve workspace settings + root for the harness.
+    workspace_settings = {}
+    workspace_root = ""
+    try:
+        from src.infra.db.models import Workspace
+        ws = await db.get(Workspace, config.workspace_id)
+        if ws is not None:
+            workspace_settings = ws.settings or {}
+    except Exception:
+        pass
+
     return StreamingResponse(
-        _event_stream(messages, config, context, trace_id, user_id, session_id),
+        _event_stream(
+            messages, config, trace_id, user_id, session_id,
+            workspace_settings, workspace_root,
+        ),
         media_type="text/event-stream",
     )

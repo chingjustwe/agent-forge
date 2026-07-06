@@ -1,9 +1,9 @@
 """shell_exec — subprocess execution.
 
-P0: minimal subprocess implementation with timeout + output cap.
-P1: routes through ``SandboxManager`` (policy enforcement, resource
-limits, network egress control). The handler signature stays the same
-so adapters do not need to change.
+P1: routes through ``SandboxManager`` when available in the context.
+Falls back to direct ``asyncio.create_subprocess_shell`` when no
+sandbox is configured (e.g., in tests). The handler signature stays
+the same so adapters do not need to change.
 """
 from __future__ import annotations
 
@@ -30,6 +30,25 @@ async def exec(args: dict, ctx: "HarnessContext") -> dict:
         timeout = 30
     timeout = max(1, min(timeout, 300))
 
+    # P1: route through SandboxManager if available
+    sandbox = getattr(ctx, "sandbox", None)
+    if sandbox is not None:
+        result = await sandbox.execute(
+            command=command,
+            timeout=timeout,
+            cwd=ctx.workspace_root or None,
+        )
+        return {
+            "output": result.stdout,
+            "error": result.stderr or None,
+            "metadata": {
+                "exit_code": result.exit_code,
+                "duration_ms": result.duration_ms,
+                "truncated": result.truncated,
+            },
+        }
+
+    # Fallback: direct subprocess (P0 behavior)
     start = time.monotonic()
     try:
         proc = await asyncio.create_subprocess_shell(

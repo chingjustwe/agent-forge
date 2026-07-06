@@ -1,0 +1,294 @@
+"""Tests for Checkpoint model, SQLiteCheckpointStore, and CheckpointScope.
+
+Covers:
+- Checkpoint: default field values, full-field construction
+- SQLiteCheckpointStore: save/load, load_latest, load by sequence, list,
+  delete, next_sequence, missing session returns None
+- CheckpointScope: save+commit persistence, idempotent commit,
+  load_latest, save without commit does not persist
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+from sqlalchemy import text
+
+from src.infra.db.engine import async_session, engine
+from src.infra.db.models import Base
+from src.runtime.harness.checkpoint import (
+    Checkpoint,
+    CheckpointScope,
+    SQLiteCheckpointStore,
+)
+
+
+# ── DB setup ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+async def setup_db():
+    """Create tables before each test, drop after.
+
+    Base.metadata tables are created by the session-scoped conftest
+    fixture; the ``checkpoints`` table is a raw-SQL table (M13
+    migration) so we create it here explicitly.
+    """
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS checkpoints ("
+                "session_id VARCHAR(32) NOT NULL,"
+                "sequence INTEGER NOT NULL,"
+                "messages TEXT NOT NULL,"
+                "tool_state TEXT NOT NULL,"
+                "agent_id VARCHAR(32) NOT NULL,"
+                "metadata TEXT NOT NULL DEFAULT '{}',"
+                "created_at DATETIME NOT NULL,"
+                "PRIMARY KEY (session_id, sequence)"
+                ")"
+            )
+        )
+    yield
+    async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS checkpoints"))
+
+
+# ── TestCheckpointModel ─────────────────────────────────────────────────
+
+
+class TestCheckpointModel:
+    def test_checkpoint_defaults(self):
+        cp = Checkpoint(session_id="s", sequence=1)
+        assert cp.session_id == "s"
+        assert cp.sequence == 1
+        assert cp.messages == []
+        assert cp.tool_state == {}
+        assert cp.agent_id == ""
+        assert cp.metadata == {}
+        assert cp.created_at is None
+
+    def test_checkpoint_with_fields(self):
+        ts = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        cp = Checkpoint(
+            session_id="s2",
+            sequence=7,
+            messages=[{"role": "user", "content": "hi"}],
+            tool_state={"tool_x": {"done": True}},
+            agent_id="agent-9",
+            metadata={"run_id": "r1"},
+            created_at=ts,
+        )
+        assert cp.session_id == "s2"
+        assert cp.sequence == 7
+        assert cp.messages == [{"role": "user", "content": "hi"}]
+        assert cp.tool_state == {"tool_x": {"done": True}}
+        assert cp.agent_id == "agent-9"
+        assert cp.metadata == {"run_id": "r1"}
+        assert cp.created_at == ts
+
+
+# ── TestSQLiteCheckpointStore ───────────────────────────────────────────
+
+
+class TestSQLiteCheckpointStore:
+    @pytest.mark.asyncio
+    async def test_save_and_load(self):
+        store = SQLiteCheckpointStore()
+        cp = Checkpoint(
+            session_id="s1",
+            sequence=1,
+            messages=[{"role": "user", "content": "hello"}],
+            tool_state={"t": {"v": 1}},
+            agent_id="a1",
+            metadata={"k": "v"},
+        )
+        await store.save(cp)
+        loaded = await store.load("s1", 1)
+        assert loaded is not None
+        assert loaded.session_id == "s1"
+        assert loaded.sequence == 1
+        assert loaded.messages == [{"role": "user", "content": "hello"}]
+        assert loaded.tool_state == {"t": {"v": 1}}
+        assert loaded.agent_id == "a1"
+        assert loaded.metadata == {"k": "v"}
+        assert loaded.created_at is not None
+
+    @pytest.mark.asyncio
+    async def test_load_latest(self):
+        store = SQLiteCheckpointStore()
+        for seq in (1, 2, 3):
+            await store.save(
+                Checkpoint(
+                    session_id="s2",
+                    sequence=seq,
+                    messages=[{"seq": seq}],
+                    tool_state={},
+                    agent_id="a2",
+                )
+            )
+        latest = await store.load("s2")
+        assert latest is not None
+        assert latest.sequence == 3
+
+    @pytest.mark.asyncio
+    async def test_load_specific_sequence(self):
+        store = SQLiteCheckpointStore()
+        for seq in (1, 2, 3):
+            await store.save(
+                Checkpoint(
+                    session_id="s3",
+                    sequence=seq,
+                    messages=[{"seq": seq}],
+                    tool_state={},
+                    agent_id="a3",
+                )
+            )
+        cp = await store.load("s3", 2)
+        assert cp is not None
+        assert cp.sequence == 2
+        assert cp.messages == [{"seq": 2}]
+
+    @pytest.mark.asyncio
+    async def test_list_all(self):
+        store = SQLiteCheckpointStore()
+        for seq in (1, 2, 3):
+            await store.save(
+                Checkpoint(
+                    session_id="s4",
+                    sequence=seq,
+                    messages=[],
+                    tool_state={},
+                    agent_id="a4",
+                )
+            )
+        all_cps = await store.list("s4")
+        assert len(all_cps) == 3
+        assert [cp.sequence for cp in all_cps] == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_delete(self):
+        store = SQLiteCheckpointStore()
+        await store.save(
+            Checkpoint(
+                session_id="s5",
+                sequence=1,
+                messages=[],
+                tool_state={},
+                agent_id="a5",
+            )
+        )
+        await store.save(
+            Checkpoint(
+                session_id="s5",
+                sequence=2,
+                messages=[],
+                tool_state={},
+                agent_id="a5",
+            )
+        )
+        await store.delete("s5", 1)
+        remaining = await store.list("s5")
+        assert len(remaining) == 1
+        assert remaining[0].sequence == 2
+
+    @pytest.mark.asyncio
+    async def test_next_sequence(self):
+        store = SQLiteCheckpointStore()
+        await store.save(
+            Checkpoint(
+                session_id="s6",
+                sequence=1,
+                messages=[],
+                tool_state={},
+                agent_id="a6",
+            )
+        )
+        await store.save(
+            Checkpoint(
+                session_id="s6",
+                sequence=2,
+                messages=[],
+                tool_state={},
+                agent_id="a6",
+            )
+        )
+        assert await store.next_sequence("s6") == 3
+
+    @pytest.mark.asyncio
+    async def test_load_missing_returns_none(self):
+        store = SQLiteCheckpointStore()
+        assert await store.load("nonexistent-session") is None
+
+
+# ── TestCheckpointScope ─────────────────────────────────────────────────
+
+
+class TestCheckpointScope:
+    @pytest.mark.asyncio
+    async def test_save_and_commit(self):
+        store = SQLiteCheckpointStore()
+        scope = CheckpointScope(
+            store=store, session_id="sc-1", agent_id="agent-1"
+        )
+        await scope.initialize()
+        await scope.save(
+            messages=[{"role": "user", "content": "hi"}],
+            tool_state={"t": 1},
+            metadata={"k": "v"},
+        )
+        await scope.commit()
+        loaded = await store.load("sc-1")
+        assert loaded is not None
+        assert loaded.session_id == "sc-1"
+        assert loaded.agent_id == "agent-1"
+        assert loaded.messages == [{"role": "user", "content": "hi"}]
+        assert loaded.tool_state == {"t": 1}
+        assert loaded.metadata == {"k": "v"}
+
+    @pytest.mark.asyncio
+    async def test_commit_is_idempotent(self):
+        store = SQLiteCheckpointStore()
+        scope = CheckpointScope(
+            store=store, session_id="sc-2", agent_id="agent-2"
+        )
+        await scope.initialize()
+        await scope.save(
+            messages=[{"role": "user", "content": "hi"}],
+            tool_state={},
+        )
+        await scope.commit()
+        await scope.commit()
+        all_cps = await store.list("sc-2")
+        assert len(all_cps) == 1
+
+    @pytest.mark.asyncio
+    async def test_load_latest(self):
+        store = SQLiteCheckpointStore()
+        scope = CheckpointScope(
+            store=store, session_id="sc-3", agent_id="agent-3"
+        )
+        await scope.initialize()
+        await scope.save(
+            messages=[{"role": "user", "content": "hello"}],
+            tool_state={},
+        )
+        await scope.commit()
+        latest = await scope.load_latest()
+        assert latest is not None
+        assert latest.session_id == "sc-3"
+        assert latest.messages == [{"role": "user", "content": "hello"}]
+
+    @pytest.mark.asyncio
+    async def test_save_without_commit_does_not_persist(self):
+        store = SQLiteCheckpointStore()
+        scope = CheckpointScope(
+            store=store, session_id="sc-4", agent_id="agent-4"
+        )
+        await scope.initialize()
+        await scope.save(
+            messages=[{"role": "user", "content": "hi"}],
+            tool_state={},
+        )
+        assert await store.load("sc-4") is None
