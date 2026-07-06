@@ -7,6 +7,7 @@ from src.runtime.harness.retry import CircuitBreaker, CircuitOpenError, RetryPol
 from src.runtime.harness.sandbox import SandboxManager, SandboxPolicy, SandboxResult
 from src.runtime.harness.scheduler import ScheduledJob, Scheduler
 from src.runtime.harness.skills import SkillPackage, SkillRegistry
+from src.runtime.harness.agents import SubagentSpec
 
 __all__ = [
     "AuditLogHook",
@@ -33,5 +34,6 @@ __all__ = [
     "SQLiteMemoryStore",
     "SkillPackage",
     "SkillRegistry",
+    "SubagentSpec",
     "TraceHook",
 ]

@@ -25,6 +25,11 @@ class Usage(BaseModel):
 
 
 class StreamEvent(BaseModel):
-    type: Literal["text", "tool_call", "tool_result", "error", "status"]
+    type: Literal["text", "tool_call", "tool_result", "error", "status", "subagent"]
     data: dict
     metadata: dict = {}
+    # Phase 4: when True, the runtime must NOT re-execute the tool —
+    # the adapter (e.g. DeepAgentsAdapter) already executed it via the
+    # LangChainToolShim → ToolEngine pipeline. The runtime still fires
+    # tool.call / tool.result hooks for telemetry parity.
+    already_executed: bool = False

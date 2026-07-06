@@ -76,7 +76,7 @@ class TestAgentRegistryCRUD:
         reg = AgentRegistry()
         async with async_session() as db:
             await reg.register(
-                db, workspace_id=ws_id, name="Named", adapter="adk",
+                db, workspace_id=ws_id, name="Named", adapter="deepagents",
                 created_by="u1",
             )
             await db.commit()
@@ -84,7 +84,7 @@ class TestAgentRegistryCRUD:
             missing = await reg.get_by_name(db, ws_id, "Nope")
         assert found is not None
         assert found.name == "Named"
-        assert found.adapter == "adk"
+        assert found.adapter == "deepagents"
         assert missing is None
 
     @pytest.mark.asyncio
@@ -122,12 +122,12 @@ class TestAgentRegistryCRUD:
                 db, agent.id,
                 system_prompt="New prompt",
                 tools=["ls"],
-                adapter="adk",
+                adapter="deepagents",
             )
             await db.commit()
         assert updated.system_prompt == "New prompt"
         assert updated.tools == ["ls"]
-        assert updated.adapter == "adk"
+        assert updated.adapter == "deepagents"
 
     @pytest.mark.asyncio
     async def test_update_unknown_field_raises(self):

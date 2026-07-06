@@ -304,6 +304,9 @@ class AgentConfig(Base):
     skills: Mapped[list] = mapped_column(JSON, default=list)
     hooks: Mapped[list] = mapped_column(JSON, default=list)
     memory_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Phase 4 (M17): subagent specs (list of SubagentSpec dicts).
+    # Only used when framework='deepagents'. Empty list = no subagents.
+    subagents: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class ApiKey(Base):

@@ -33,11 +33,36 @@ class MemoryConfig(BaseModel):
     recall_top_k: int = 5
 
 
+class SubagentSpec(BaseModel):
+    """Declarative subagent definition stored in ``AgentDefinition.subagents``.
+
+    Mirrors deepagents' SubAgent dict shape but uses our field names
+    for consistency with ``AgentDefinition``. ``SubagentMapper.to_subagents()``
+    (Phase 4b) converts these to the dict shape deepagents expects.
+
+    Per spec D9: if ``tools`` is empty the subagent receives NO tools
+    (not the parent's set). This is the opposite of deepagents' default
+    and is a defense-in-depth measure.
+    """
+
+    name: str
+    description: str
+    system_prompt: str
+    tools: list[str] = Field(default_factory=list)
+    model: str | None = None  # None = inherit parent agent's model
+    skills: list[str] = Field(default_factory=list)
+
+
 class AgentDefinition(BaseModel):
     """Canonical agent definition consumed by the harness.
 
     ``adapter`` maps to the ORM ``framework`` column (legacy name kept
     for backward compat with existing API clients and tests).
+
+    Phase 4 (spec D1, D10): adapter literal changed from
+    ``["direct_llm", "adk", "langgraph"]`` to
+    ``["direct_llm", "deepagents"]``. The ``adk``/``langgraph`` values
+    were never functional (P3a fell back to direct_llm for them).
     """
 
     id: str
@@ -52,7 +77,9 @@ class AgentDefinition(BaseModel):
     skills: list[str] = Field(default_factory=list)
     hooks: list[str] = Field(default_factory=list)
     memory: MemoryConfig | None = None
-    adapter: Literal["direct_llm", "adk", "langgraph"] = "direct_llm"
+    adapter: Literal["direct_llm", "deepagents"] = "direct_llm"
+    # Phase 4 (spec D3): subagent specs; only used when adapter="deepagents"
+    subagents: list[SubagentSpec] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
     created_by: str = ""
     created_at: datetime | None = None
@@ -92,6 +119,7 @@ class AgentRegistry:
         hooks: list[str] | None = None,
         memory_config: dict | None = None,
         metadata: dict | None = None,
+        subagents: list[dict] | None = None,
     ) -> AgentDefinition:
         """Insert a new agent row and return the Pydantic model.
 
@@ -124,6 +152,7 @@ class AgentRegistry:
             skills=skills or [],
             hooks=hooks or [],
             memory_config=memory_config,
+            subagents=subagents or [],
         )
         db.add(row)
         await db.flush()
@@ -192,6 +221,7 @@ class AgentRegistry:
             "memory_config",
             "metadata",
             "config",
+            "subagents",
         }
         unknown = set(fields) - allowed
         if unknown:
@@ -221,6 +251,16 @@ class AgentRegistry:
             except Exception:
                 memory_cfg = None
 
+        # Phase 4: parse subagents JSON column → list[SubagentSpec]
+        subagent_specs: list[SubagentSpec] = []
+        raw_subagents = getattr(row, "subagents", None)
+        if raw_subagents:
+            try:
+                for item in raw_subagents if isinstance(raw_subagents, list) else []:
+                    subagent_specs.append(SubagentSpec(**item))
+            except Exception:
+                subagent_specs = []
+
         return AgentDefinition(
             id=row.id,
             name=row.name,
@@ -235,6 +275,7 @@ class AgentRegistry:
             hooks=row.hooks or [],
             memory=memory_cfg,
             adapter=row.framework,
+            subagents=subagent_specs,
             metadata=row.config or {},
             created_by=row.created_by or "",
             created_at=row.created_at,

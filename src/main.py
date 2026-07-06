@@ -431,6 +431,19 @@ def _migrate_schema(sync_conn):
                 except Exception as exc:  # pragma: no cover — defensive
                     print(f"[migration] M12 add {col_name} skipped: {exc}")
 
+    # Migration M17 (Phase 4): add ``subagents`` JSON column to agent_configs.
+    # Stores a list of SubagentSpec dicts; only used when framework='deepagents'.
+    # Empty list (default) means no subagents. Idempotent: checks column list.
+    if "agent_configs" in tables:
+        cols = {c["name"] for c in insp.get_columns("agent_configs")}
+        if "subagents" not in cols:
+            try:
+                sync_conn.exec_driver_sql(
+                    "ALTER TABLE agent_configs ADD COLUMN subagents JSON DEFAULT '[]'"
+                )
+            except Exception as exc:  # pragma: no cover — defensive
+                print(f"[migration] M17 add subagents skipped: {exc}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

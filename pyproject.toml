@@ -16,6 +16,13 @@ dependencies = [
     "python-multipart>=0.0.9",
     "pyyaml>=6.0",
     "apscheduler>=3.10",
+    # Phase 4: deepagents adapter (spec D4 pins 0.6.12).
+    # langgraph/langchain pinned explicitly to avoid surprise upgrades.
+    "deepagents==0.6.12",
+    "langgraph>=0.6,<0.7",
+    "langchain>=1.0,<2.0",
+    "langchain-openai>=0.3",
+    "langchain-core>=1.0",
 ]
 
 [project.optional-dependencies]

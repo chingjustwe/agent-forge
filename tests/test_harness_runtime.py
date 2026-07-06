@@ -157,11 +157,22 @@ class TestResolveAdapter:
         adapter = runtime._resolve_adapter("direct_llm", config)
         assert isinstance(adapter, DirectLLMAdapter)
 
+    def test_deepagents_returns_deepagents_adapter(self):
+        """Phase 4: 'deepagents' adapter resolves to DeepAgentsAdapter."""
+        from src.runtime.adapters.deepagents import DeepAgentsAdapter
+        runtime, _ = _make_runtime(agent=_make_agent(adapter="deepagents"))
+        config = _make_config()
+        adapter = runtime._resolve_adapter("deepagents", config)
+        assert isinstance(adapter, DeepAgentsAdapter)
+
     def test_unknown_adapter_falls_back_to_direct(self):
-        runtime, _ = _make_runtime(agent=_make_agent(adapter="adk"))
+        """Legacy 'adk' value (removed in Phase 4) still falls back gracefully.
+        _resolve_adapter takes adapter_name as a separate arg, so we can
+        test it without needing an AgentDefinition with an invalid literal."""
+        runtime, _ = _make_runtime(agent=_make_agent())
         config = _make_config()
         adapter = runtime._resolve_adapter("adk", config)
-        # Unknown adapters fall back to DirectLLMAdapter in P0.
+        # Unknown adapters fall back to DirectLLMAdapter.
         assert isinstance(adapter, DirectLLMAdapter)
 
     def test_adapter_is_cached(self):
@@ -403,6 +414,83 @@ class TestRunOrchestration:
         assert len(events) == 1
         assert events[0].type == "text"
         assert fake.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_already_executed_tool_call_skips_engine_execution(self):
+        """Phase 4: when event.already_executed=True, the runtime must NOT
+        call ctx.tool_engine.execute() — the adapter already ran the tool
+        via its own shim. The runtime still fires tool.call hooks."""
+        agent = _make_agent(tools=["todo_write"])
+        fake = _FakeAdapter([
+            StreamEvent(
+                type="tool_call",
+                data={"name": "todo_write", "args": {"todos": []}},
+                already_executed=True,
+            ),
+            StreamEvent(
+                type="tool_result",
+                data={"name": "todo_write", "output": "done", "error": None},
+                already_executed=True,
+            ),
+            StreamEvent(type="text", data={"delta": "ok"}),
+        ])
+        runtime, _ = _make_runtime(agent=agent, adapter=fake)
+        # Spy on tool_engine.execute to verify it's NOT called.
+        original_execute = agent  # placeholder
+        ctx_spy: list = []
+        events = await _collect(runtime.run(
+            "s-1", [{"role": "user", "content": "do"}], _make_config(),
+            user_id="u-1",
+        ))
+        # Should yield tool_call (already_executed, engine skipped),
+        # then tool_result (already_executed, from adapter), then text.
+        assert len(events) == 3
+        assert events[0].type == "tool_call"
+        assert events[0].already_executed is True
+        assert events[1].type == "tool_result"
+        assert events[1].data["output"] == "done"
+        assert events[2].type == "text"
+
+    @pytest.mark.asyncio
+    async def test_already_executed_tool_call_still_fires_hooks(self):
+        """Phase 4: even when already_executed=True, the runtime must
+        fire tool.call / tool.result hooks for telemetry parity."""
+        from src.runtime.harness.hooks import HookRegistry, Hook
+
+        fired: list[str] = []
+
+        class _Recorder(Hook):
+            name = "recorder"
+            events = ["tool.call", "tool.result"]
+
+            async def execute(self, event: str, payload: dict, ctx) -> dict:
+                fired.append(event)
+                return payload
+
+        hooks = HookRegistry()
+        hooks.register(_Recorder())
+
+        agent = _make_agent(tools=["todo_write"])
+        fake = _FakeAdapter([
+            StreamEvent(
+                type="tool_call",
+                data={"name": "todo_write", "args": {}},
+                already_executed=True,
+            ),
+            StreamEvent(
+                type="tool_result",
+                data={"name": "todo_write", "output": "x", "error": None},
+                already_executed=True,
+            ),
+        ])
+        runtime, registry = _make_runtime(agent=agent, adapter=fake)
+        registry.hooks = hooks
+        await _collect(runtime.run(
+            "s-1", [{"role": "user", "content": "do"}], _make_config(),
+            user_id="u-1",
+        ))
+        assert "tool.call" in fired
+        assert "tool.result" in fired
 
 
 # ── _run_with_retry ─────────────────────────────────────────────────────

@@ -152,42 +152,57 @@ class HarnessRuntime(AgentRuntime):
                             ctx,
                         )
 
-                    try:
-                        result = await ctx.tool_engine.execute(
-                            tool_name, tool_args, ctx
-                        )
-                        tool_result_data = {
-                            "name": tool_name,
-                            "output": result.output,
-                            "error": result.error,
-                            "metadata": result.metadata,
-                        }
-                        yield StreamEvent(
-                            type="tool_result", data=tool_result_data
-                        )
-
-                        # Post-tool hooks
-                        if ctx.hooks is not None:
-                            await ctx.hooks.trigger(
-                                "tool.result", tool_result_data, ctx
+                    if event.already_executed:
+                        # Phase 4: DeepAgentsAdapter already executed the
+                        # tool via LangChainToolShim → ToolEngine. We skip
+                        # re-execution but still fire hooks for telemetry
+                        # parity (spec §3.2). The adapter will yield a
+                        # separate tool_result event from on_tool_end.
+                        yield event
+                    else:
+                        try:
+                            result = await ctx.tool_engine.execute(
+                                tool_name, tool_args, ctx
+                            )
+                            tool_result_data = {
+                                "name": tool_name,
+                                "output": result.output,
+                                "error": result.error,
+                                "metadata": result.metadata,
+                            }
+                            yield StreamEvent(
+                                type="tool_result", data=tool_result_data
                             )
 
-                        # Mid-run checkpoint save
-                        if ctx.checkpoint is not None:
-                            await ctx.checkpoint.save(
-                                messages=safe_messages,
-                                tool_state=ctx.working_memory,
-                            )
+                            # Post-tool hooks
+                            if ctx.hooks is not None:
+                                await ctx.hooks.trigger(
+                                    "tool.result", tool_result_data, ctx
+                                )
 
-                    except ToolError as exc:
-                        err_data = {
-                            "name": tool_name,
-                            "output": "",
-                            "error": f"{type(exc).__name__}: {exc}",
-                        }
-                        yield StreamEvent(type="tool_result", data=err_data)
-                        if ctx.hooks is not None:
-                            await ctx.hooks.trigger("tool.result", err_data, ctx)
+                            # Mid-run checkpoint save
+                            if ctx.checkpoint is not None:
+                                await ctx.checkpoint.save(
+                                    messages=safe_messages,
+                                    tool_state=ctx.working_memory,
+                                )
+
+                        except ToolError as exc:
+                            err_data = {
+                                "name": tool_name,
+                                "output": "",
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                            yield StreamEvent(type="tool_result", data=err_data)
+                            if ctx.hooks is not None:
+                                await ctx.hooks.trigger("tool.result", err_data, ctx)
+                elif event.type == "tool_result" and event.already_executed:
+                    # Phase 4: tool_result from DeepAgentsAdapter's on_tool_end.
+                    # The tool was already executed by the shim; just fire
+                    # post-tool hooks and yield the event.
+                    if ctx.hooks is not None:
+                        await ctx.hooks.trigger("tool.result", event.data, ctx)
+                    yield event
                 else:
                     yield event
         finally:
@@ -305,15 +320,24 @@ class HarnessRuntime(AgentRuntime):
     def _resolve_adapter(
         self, adapter_name: str, config: RuntimeConfig
     ) -> RunAdapter:
-        """Resolve adapter by name. P0 only supports ``direct_llm``."""
+        """Resolve adapter by name.
+
+        Phase 4 (spec D1, D10): supports ``direct_llm`` and
+        ``deepagents``. Unknown adapters fall back to ``direct_llm``
+        with a loud warning (keeps existing behavior for legacy
+        ``adk``/``langgraph`` values that may exist in old DB rows).
+        """
         if adapter_name in self._adapters:
             return self._adapters[adapter_name]
 
         if adapter_name == "direct_llm":
             adapter = DirectLLMAdapter(model=config.model)
+        elif adapter_name == "deepagents":
+            from src.runtime.adapters.deepagents import DeepAgentsAdapter
+            adapter = DeepAgentsAdapter(model=config.model)
         else:
             logger.warning(
-                "Adapter %r not implemented in P3a; falling back to direct_llm",
+                "Adapter %r not implemented; falling back to direct_llm",
                 adapter_name,
             )
             adapter = DirectLLMAdapter(model=config.model)
