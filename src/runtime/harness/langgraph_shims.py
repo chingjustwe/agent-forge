@@ -20,6 +20,7 @@ zero-dependency.
 from __future__ import annotations
 
 import base64
+import json
 from typing import TYPE_CHECKING, Any, AsyncIterator, Optional, Sequence
 
 from langchain_core.callbacks import AsyncCallbackManagerForToolRun
@@ -33,6 +34,7 @@ from langgraph.checkpoint.base import (
     CheckpointTuple,
 )
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from sqlalchemy import text
 
 if TYPE_CHECKING:
     from src.runtime.harness.checkpoint import CheckpointStore
@@ -78,12 +80,17 @@ class LangGraphCheckpointShim(BaseCheckpointSaver):
     async def aget_tuple(
         self, config: RunnableConfig
     ) -> Optional[CheckpointTuple]:
-        """Return the latest checkpoint tuple for the thread."""
+        """Return the latest checkpoint tuple for the thread.
+
+        Phase 4c: also loads pending writes from the
+        ``checkpoint_writes`` table so a crash between ``aput_writes``
+        and the next ``aput`` no longer loses intermediate state.
+        """
         thread_id = config["configurable"]["thread_id"]
         cp = await self._store.load(thread_id)
         if cp is None:
             return None
-        return self._decode_tuple(cp)
+        return self._decode_tuple(cp, await self._load_writes(thread_id))
 
     async def alist(
         self,
@@ -164,23 +171,95 @@ class LangGraphCheckpointShim(BaseCheckpointSaver):
         task_id: str,
         task_path: str = "",
     ) -> None:
-        """Persist intermediate task writes.
+        """Persist intermediate task writes to ``checkpoint_writes``.
 
-        Phase 4 stores these best-effort in the metadata column of the
-        next ``aput()`` call — we do NOT create a separate
-        ``checkpoint_writes`` table. This means pending-write recovery
-        is best-effort: a crash between ``aput_writes`` and the next
-        ``aput`` may lose pending writes. Acceptable for Phase 4; Phase
-        4c may add a dedicated table (spec §11).
+        Phase 4c: writes are now durable. Each ``(channel, value)`` pair
+        is upserted (INSERT OR REPLACE) so duplicate task_ids don't
+        create duplicate rows — LangGraph may call aput_writes multiple
+        times for the same task as it streams intermediate state.
         """
-        # No-op: rely on the next aput() to capture full state.
-        return
+        thread_id = config["configurable"]["thread_id"]
+        if not writes:
+            return
+        from datetime import datetime, timezone
+
+        from src.infra.db.engine import async_session
+
+        # Serialize each value via the same serde used for checkpoints
+        # so any LangGraph type (BaseMessage, dict, etc.) round-trips.
+        rows = []
+        for channel, value in writes:
+            type_str, payload_bytes = self.serde.dumps_typed(value)
+            rows.append({
+                "session_id": thread_id,
+                "task_id": task_id,
+                "task_path": task_path,
+                "channel": channel,
+                "value": json.dumps({
+                    "type": type_str,
+                    "payload_b64": base64.b64encode(payload_bytes).decode("ascii"),
+                }),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        async with async_session() as db:
+            for row in rows:
+                await db.execute(
+                    text(
+                        "INSERT OR REPLACE INTO checkpoint_writes "
+                        "(session_id, task_id, task_path, channel, value, created_at) "
+                        "VALUES (:sid, :tid, :tp, :ch, :val, :cat)"
+                    ),
+                    {
+                        "sid": row["session_id"],
+                        "tid": row["task_id"],
+                        "tp": row["task_path"],
+                        "ch": row["channel"],
+                        "val": row["value"],
+                        "cat": row["created_at"],
+                    },
+                )
+            await db.commit()
+
+    async def _load_writes(self, thread_id: str) -> list[tuple[str, Any]]:
+        """Load all pending writes for a thread, decoded to (channel, value)."""
+        from src.infra.db.engine import async_session
+
+        out: list[tuple[str, Any]] = []
+        async with async_session() as db:
+            result = await db.execute(
+                text(
+                    "SELECT channel, value FROM checkpoint_writes "
+                    "WHERE session_id = :sid"
+                ),
+                {"sid": thread_id},
+            )
+            for row in result.fetchall():
+                try:
+                    encoded = json.loads(row.value)
+                    payload_bytes = base64.b64decode(encoded["payload_b64"])
+                    value = self.serde.loads_typed(
+                        (encoded.get("type", "json"), payload_bytes)
+                    )
+                    out.append((row.channel, value))
+                except Exception:
+                    # Skip malformed rows rather than crashing the load.
+                    continue
+        return out
 
     async def adelete_thread(self, thread_id: str) -> None:
-        """Delete all checkpoints for a thread (session)."""
+        """Delete all checkpoints and pending writes for a thread."""
         cps = await self._store.list(thread_id)
         for cp in cps:
             await self._store.delete(thread_id, cp.sequence)
+        # Phase 4c: also clear the pending-writes table for this thread.
+        from src.infra.db.engine import async_session
+
+        async with async_session() as db:
+            await db.execute(
+                text("DELETE FROM checkpoint_writes WHERE session_id = :sid"),
+                {"sid": thread_id},
+            )
+            await db.commit()
 
     # ── Sync API (LangGraph requires these even if only async is used) ──
     # All sync methods raise NotImplementedError. deepagents only uses
@@ -223,8 +302,16 @@ class LangGraphCheckpointShim(BaseCheckpointSaver):
 
     # ── Internal helpers ──
 
-    def _decode_tuple(self, cp: Any) -> CheckpointTuple:
-        """Decode our Checkpoint row → LangGraph CheckpointTuple."""
+    def _decode_tuple(
+        self, cp: Any, pending_writes: list[tuple[str, Any]] | None = None
+    ) -> CheckpointTuple:
+        """Decode our Checkpoint row → LangGraph CheckpointTuple.
+
+        ``pending_writes`` is the list of ``(channel, value)`` pairs
+        loaded from the ``checkpoint_writes`` table (Phase 4c). When
+        None, the tuple is returned with an empty pending_writes list
+        (preserves legacy behavior for the alist path).
+        """
         tool_state = cp.tool_state if hasattr(cp, "tool_state") else {}
         encoded = (tool_state or {}).get("langgraph_checkpoint")
         if encoded is None:
@@ -268,7 +355,7 @@ class LangGraphCheckpointShim(BaseCheckpointSaver):
             checkpoint=checkpoint,
             metadata=cp.metadata if isinstance(cp.metadata, dict) else {},
             parent_config=None,
-            pending_writes=[],
+            pending_writes=pending_writes or [],
         )
 
     def _extract_plain_messages(self, langchain_messages: list) -> list[dict]:

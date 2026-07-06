@@ -40,10 +40,10 @@ from src.runtime.harness.tool_engine import ToolDefinition, ToolResult
 
 @pytest.fixture(autouse=True)
 async def setup_db():
-    """Create checkpoints table before each test, drop after.
+    """Create checkpoints + checkpoint_writes tables before each test.
 
-    The ``checkpoints`` table is a raw-SQL table (M13 migration) so we
-    create it here explicitly (mirrors test_checkpoint.py).
+    Both tables are raw-SQL (M13 / M18 migrations) so we create them
+    here explicitly, mirroring test_checkpoint.py.
     """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -61,8 +61,22 @@ async def setup_db():
                 ")"
             )
         )
+        await conn.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS checkpoint_writes ("
+                "session_id VARCHAR(32) NOT NULL,"
+                "task_id VARCHAR(64) NOT NULL,"
+                "task_path VARCHAR(255) NOT NULL DEFAULT '',"
+                "channel VARCHAR(64) NOT NULL,"
+                "value TEXT NOT NULL,"
+                "created_at DATETIME NOT NULL,"
+                "PRIMARY KEY (session_id, task_id, task_path, channel)"
+                ")"
+            )
+        )
     yield
     async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS checkpoint_writes"))
         await conn.execute(text("DROP TABLE IF EXISTS checkpoints"))
 
 
@@ -297,6 +311,157 @@ class TestLangGraphCheckpointShim:
         rows = await store.list("s-empty-msg")
         assert len(rows) == 1
         assert rows[0].messages == []
+
+    # ── Phase 4c: pending writes durability ──
+
+    @pytest.mark.asyncio
+    async def test_aput_writes_persists_rows_to_checkpoint_writes_table(self):
+        """Phase 4c: aput_writes must persist writes so a crash before
+        the next aput doesn't lose them."""
+        store = SQLiteCheckpointStore()
+        shim = LangGraphCheckpointShim(store, "s-pw-1", "a-1")
+        config = {"configurable": {"thread_id": "s-pw-1"}}
+
+        writes = [
+            ("messages", {"role": "assistant", "content": "hi"}),
+            ("__interrupt__", {"value": "paused"}),
+        ]
+        await shim.aput_writes(config, writes, task_id="task-1", task_path="")
+
+        # Verify rows exist in checkpoint_writes table.
+        from src.infra.db.engine import async_session
+
+        async with async_session() as db:
+            result = await db.execute(
+                text(
+                    "SELECT channel FROM checkpoint_writes "
+                    "WHERE session_id = :sid"
+                ),
+                {"sid": "s-pw-1"},
+            )
+            channels = {row.channel for row in result.fetchall()}
+        assert channels == {"messages", "__interrupt__"}
+
+    @pytest.mark.asyncio
+    async def test_aput_writes_is_idempotent_for_same_task_and_channel(self):
+        """Duplicate (task_id, channel) pairs upsert, not insert."""
+        store = SQLiteCheckpointStore()
+        shim = LangGraphCheckpointShim(store, "s-pw-2", "a-1")
+        config = {"configurable": {"thread_id": "s-pw-2"}}
+
+        await shim.aput_writes(
+            config, [("messages", {"v": 1})], task_id="task-1"
+        )
+        await shim.aput_writes(
+            config, [("messages", {"v": 2})], task_id="task-1"
+        )
+
+        from src.infra.db.engine import async_session
+
+        async with async_session() as db:
+            result = await db.execute(
+                text(
+                    "SELECT COUNT(*) AS n FROM checkpoint_writes "
+                    "WHERE session_id = :sid AND task_id = :tid"
+                ),
+                {"sid": "s-pw-2", "tid": "task-1"},
+            )
+            count = result.fetchone().n
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_aput_writes_with_empty_writes_is_noop(self):
+        """Calling aput_writes with an empty writes list does nothing."""
+        store = SQLiteCheckpointStore()
+        shim = LangGraphCheckpointShim(store, "s-pw-3", "a-1")
+        config = {"configurable": {"thread_id": "s-pw-3"}}
+
+        await shim.aput_writes(config, [], task_id="task-x")
+
+        from src.infra.db.engine import async_session
+
+        async with async_session() as db:
+            result = await db.execute(
+                text(
+                    "SELECT COUNT(*) AS n FROM checkpoint_writes "
+                    "WHERE session_id = :sid"
+                ),
+                {"sid": "s-pw-3"},
+            )
+            assert result.fetchone().n == 0
+
+    @pytest.mark.asyncio
+    async def test_aget_tuple_loads_pending_writes(self):
+        """aget_tuple must surface pending writes from checkpoint_writes."""
+        store = SQLiteCheckpointStore()
+        shim = LangGraphCheckpointShim(store, "s-pw-4", "a-1")
+        config = {"configurable": {"thread_id": "s-pw-4"}}
+
+        # First persist a checkpoint so aget_tuple has something to load.
+        cp = _make_checkpoint_dict(messages=[{"role": "user", "content": "x"}])
+        await shim.aput(config, cp, {}, {})
+
+        # Then persist writes.
+        await shim.aput_writes(
+            config,
+            [("messages", {"role": "assistant", "content": "pending"})],
+            task_id="task-1",
+        )
+
+        tuple_ = await shim.aget_tuple(config)
+        assert tuple_ is not None
+        assert len(tuple_.pending_writes) == 1
+        assert tuple_.pending_writes[0][0] == "messages"
+
+    @pytest.mark.asyncio
+    async def test_adelete_thread_clears_pending_writes(self):
+        """adelete_thread must also clear checkpoint_writes rows."""
+        store = SQLiteCheckpointStore()
+        shim = LangGraphCheckpointShim(store, "s-pw-5", "a-1")
+        config = {"configurable": {"thread_id": "s-pw-5"}}
+
+        cp = _make_checkpoint_dict(messages=[])
+        await shim.aput(config, cp, {}, {})
+        await shim.aput_writes(
+            config, [("messages", {"v": 1})], task_id="task-1"
+        )
+
+        await shim.adelete_thread("s-pw-5")
+
+        from src.infra.db.engine import async_session
+
+        async with async_session() as db:
+            result = await db.execute(
+                text(
+                    "SELECT COUNT(*) AS n FROM checkpoint_writes "
+                    "WHERE session_id = :sid"
+                ),
+                {"sid": "s-pw-5"},
+            )
+            assert result.fetchone().n == 0
+
+    @pytest.mark.asyncio
+    async def test_pending_writes_round_trip_complex_values(self):
+        """Round-trip a dict with nested structure through aput_writes
+        and aget_tuple."""
+        store = SQLiteCheckpointStore()
+        shim = LangGraphCheckpointShim(store, "s-pw-6", "a-1")
+        config = {"configurable": {"thread_id": "s-pw-6"}}
+
+        cp = _make_checkpoint_dict(messages=[])
+        await shim.aput(config, cp, {}, {})
+
+        nested = {"k": {"nested": [1, 2, {"three": 3}]}, "flag": True}
+        await shim.aput_writes(
+            config, [("state", nested)], task_id="task-1"
+        )
+
+        tuple_ = await shim.aget_tuple(config)
+        assert tuple_ is not None
+        assert len(tuple_.pending_writes) == 1
+        channel, value = tuple_.pending_writes[0]
+        assert channel == "state"
+        assert value == nested
 
 
 # ── LangChainToolShim ───────────────────────────────────────────────────

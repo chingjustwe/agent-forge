@@ -171,6 +171,13 @@ class DeepAgentsAdapter(RunAdapter):
         config: dict[str, Any] = {"configurable": {"thread_id": ctx.session_id}}
         input_payload = {"messages": self._normalize_messages(messages)}
 
+        # Phase 4c: optional LangSmith tracing. Only enabled when
+        # ``LANGSMITH_API_KEY`` is set in settings; otherwise zero-
+        # overhead. The tracer is attached as a callback on the
+        # RunnableConfig so it applies to the deepagents run only.
+        if settings.langsmith_api_key:
+            self._wire_langsmith_tracing(config, ctx)
+
         usage_emitted = False
         try:
             async for event in deep_agent.astream_events(
@@ -330,3 +337,44 @@ class DeepAgentsAdapter(RunAdapter):
             )]
 
         return []
+
+    # ── Phase 4c: LangSmith tracing ───────────────────────────────────
+
+    def _wire_langsmith_tracing(
+        self, config: dict[str, Any], ctx: "HarnessContext"
+    ) -> None:
+        """Attach LangSmith tracing callbacks to the RunnableConfig.
+
+        Imports are lazy so the ``direct_llm`` path stays zero-dependency
+        even when LangSmith is configured. If imports fail (langsmith
+        not installed), the failure is logged and tracing is silently
+        skipped — runs proceed without tracing.
+        """
+        import os
+
+        # LangChain reads these env vars lazily at callback construction.
+        os.environ.setdefault("LANGSMITH_API_KEY", settings.langsmith_api_key)
+        os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
+        os.environ.setdefault("LANGSMITH_ENDPOINT", settings.langsmith_endpoint)
+        os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+
+        try:
+            from langchain_core.tracers.langchain import LangChainTracer
+        except ImportError:
+            return  # langsmith not installed — skip silently
+
+        tracer = LangChainTracer(
+            project_name=settings.langsmith_project,
+            client=None,  # LangChain builds the client from env vars
+        )
+        # Run name: agent name + session_id for easy search in LangSmith.
+        run_name = f"{ctx.agent.name}@{ctx.session_id[:8]}"
+        config.setdefault("callbacks", []).append(tracer)
+        config["run_name"] = run_name
+        config["metadata"] = {
+            "session_id": ctx.session_id,
+            "workspace_id": ctx.workspace_id,
+            "trace_id": ctx.trace_id,
+            "user_id": ctx.user_id,
+            "agent_id": ctx.agent.id,
+        }

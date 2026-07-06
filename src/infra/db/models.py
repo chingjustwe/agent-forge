@@ -352,3 +352,23 @@ class AuditLog(Base):
     details: Mapped[dict] = mapped_column(JSON, default=dict)
     ip_address: Mapped[str] = mapped_column(String(45), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class CheckpointWrite(Base):
+    """Phase 4c: persists LangGraph intermediate task writes.
+
+    Rows are written by ``LangGraphCheckpointShim.aput_writes()`` and
+    read back by ``aget_tuple()`` so a crash between ``aput_writes``
+    and the next ``aput`` no longer loses pending writes (spec §11).
+    Composite PK matches LangGraph's reference ``(thread_id, task_id,
+    task_path, channel)`` tuple.
+    """
+
+    __tablename__ = "checkpoint_writes"
+
+    session_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_path: Mapped[str] = mapped_column(String(255), primary_key=True, default="")
+    channel: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)

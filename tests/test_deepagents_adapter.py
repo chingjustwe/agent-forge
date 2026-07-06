@@ -662,3 +662,85 @@ class TestSubagentWiring:
         assert len(subagent_events) == 1
         assert subagent_events[0].data["action"] == "end"
         assert "subagent result" in subagent_events[0].data["output"]
+
+
+# ── Phase 4c: LangSmith tracing ────────────────────────────────────────
+
+
+class TestLangSmithTracing:
+    """Phase 4c: LangSmith tracing wired only when api_key is set."""
+
+    @pytest.mark.asyncio
+    async def test_no_tracing_when_api_key_unset(self):
+        """Default settings (empty api_key) → no callbacks attached."""
+        from src.infra.settings import Settings
+        s = Settings(langsmith_api_key="")
+        assert s.langsmith_api_key == ""
+        # When api_key is empty, _wire_langsmith_tracing is never
+        # called (adapter checks truthiness). Verifiable by mocking
+        # settings to empty and confirming no callbacks in config.
+        adapter = DeepAgentsAdapter(api_key="fake")
+        agent = _make_agent()
+        ctx = _make_ctx(agent=agent)
+
+        mock_deep_agent = MagicMock()
+        async def _mock_astream_events(*args, **kwargs):
+            return
+            yield  # type: ignore[unreachable]
+        mock_deep_agent.astream_events = _mock_astream_events
+
+        captured_config: dict = {}
+
+        def _capture_config(*args, **kwargs):
+            captured_config.update(kwargs.get("config", {}))
+            return mock_deep_agent
+
+        with patch("deepagents.create_deep_agent", side_effect=_capture_config), \
+             patch("langchain.chat_models.init_chat_model", return_value=MagicMock()), \
+             patch.object(adapter, "_wire_langsmith_tracing") as mock_wire:
+            await _collect(adapter.run(
+                [{"role": "user", "content": "x"}], ctx
+            ))
+        # When api_key is empty, _wire_langsmith_tracing must not be
+        # called at all (guarded by `if settings.langsmith_api_key`).
+        mock_wire.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_tracing_wired_when_api_key_set(self):
+        """When LANGSMITH_API_KEY is set, callbacks are attached to config."""
+        from src.infra.settings import Settings
+        test_settings = Settings(
+            langsmith_api_key="ls-key-123",
+            langsmith_project="test-project",
+        )
+
+        adapter = DeepAgentsAdapter(api_key="fake")
+        agent = _make_agent()
+        ctx = _make_ctx(agent=agent)
+
+        captured_config: dict = {}
+
+        async def _mock_astream_events(input_payload, *, version, config):
+            captured_config.update(config)
+            return
+            yield  # type: ignore[unreachable]
+
+        mock_deep_agent = MagicMock()
+        mock_deep_agent.astream_events = _mock_astream_events
+
+        with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
+             patch("langchain.chat_models.init_chat_model", return_value=MagicMock()), \
+             patch("src.runtime.adapters.deepagents.settings", test_settings):
+            await _collect(adapter.run(
+                [{"role": "user", "content": "x"}], ctx
+            ))
+
+        # When api_key is set, the config should have callbacks attached.
+        assert "callbacks" in captured_config
+        assert len(captured_config["callbacks"]) >= 1
+        # run_name follows "{agent_name}@{session_id_prefix}" pattern.
+        assert "@" in captured_config.get("run_name", "")
+        # metadata should carry identifying fields.
+        meta = captured_config.get("metadata", {})
+        assert meta.get("session_id") == ctx.session_id
+        assert meta.get("workspace_id") == ctx.workspace_id

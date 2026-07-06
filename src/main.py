@@ -444,6 +444,30 @@ def _migrate_schema(sync_conn):
             except Exception as exc:  # pragma: no cover — defensive
                 print(f"[migration] M17 add subagents skipped: {exc}")
 
+    # Migration M18 (Phase 4c): checkpoint lookup index + pending-writes table.
+    # The index speeds up ``load_latest`` (ORDER BY sequence DESC LIMIT 1)
+    # and ``list`` (ORDER BY sequence ASC) for sessions with many checkpoints.
+    # The ``checkpoint_writes`` table persists LangGraph's intermediate task
+    # writes so a crash between ``aput_writes`` and the next ``aput`` no
+    # longer loses pending writes (spec §11 — Phase 4c hardening).
+    if "checkpoints" in tables:
+        sync_conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS idx_checkpoints_session_seq "
+            "ON checkpoints (session_id, sequence DESC)"
+        )
+    if "workspaces" in tables:
+        sync_conn.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS checkpoint_writes ("
+            "session_id VARCHAR(32) NOT NULL,"
+            "task_id VARCHAR(64) NOT NULL,"
+            "task_path VARCHAR(255) NOT NULL DEFAULT '',"
+            "channel VARCHAR(64) NOT NULL,"
+            "value TEXT NOT NULL,"
+            "created_at DATETIME NOT NULL,"
+            "PRIMARY KEY (session_id, task_id, task_path, channel)"
+            ")"
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
