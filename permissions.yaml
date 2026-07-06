@@ -15,6 +15,11 @@ roles:
       - sessions:read
       - agents:read
       - quota:read
+      - tools:read
+      - skills:read
+      - memory:read
+      - guardrails:read
+      - mcp:read
 
   member:
     label: "普通成员"
@@ -23,6 +28,12 @@ roles:
       - sessions:write
       - agents:read
       - quota:read
+      - tools:read
+      - skills:read
+      - memory:read
+      - memory:write
+      - guardrails:read
+      - mcp:read
 
   workspace_admin:
     label: "工作区管理员"
@@ -44,6 +55,15 @@ roles:
       - members:write
       - workspace:delete
       - workspace:archive
+      - tools:read
+      - tools:write
+      - skills:read
+      - memory:read
+      - memory:write
+      - guardrails:read
+      - guardrails:write
+      - mcp:read
+      - mcp:write
       # scoped admin — 仅能看到自己管理的工作区数据
       - admin:workspaces:read
       - admin:users:read
@@ -62,6 +82,11 @@ frontend_tabs:
   /requests:         null
   /quota:            quota:read
   /agents:           agents:read
+  /tools:            tools:read
+  /skills:           skills:read
+  /memory:           memory:read
+  /guardrails:       guardrails:read
+  /mcp:              mcp:read
   /api-keys:         api_keys:read
   /admin:            admin:workspaces:read
   /admin/users:      admin:users:read

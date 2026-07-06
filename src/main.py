@@ -17,6 +17,11 @@ from src.gateway.routes.sessions import router as sessions_router
 from src.gateway.routes.invitations import router as invitations_router
 from src.gateway.routes.agents import router as agents_router
 from src.gateway.routes.api_keys import router as api_keys_router
+from src.gateway.routes.tools import router as tools_router
+from src.gateway.routes.mcp import router as mcp_router
+from src.gateway.routes.skills import router as skills_router
+from src.gateway.routes.memory import router as memory_router
+from src.gateway.routes.guardrails import router as guardrails_router
 from src.gateway.middleware.auth import AuthMiddleware
 from src.gateway.middleware.audit import AuditMiddleware
 from src.infra.db.engine import engine
@@ -449,6 +454,11 @@ def create_app() -> FastAPI:
     app.include_router(invitations_router)
     app.include_router(agents_router)
     app.include_router(api_keys_router)
+    app.include_router(tools_router)
+    app.include_router(mcp_router)
+    app.include_router(skills_router)
+    app.include_router(memory_router)
+    app.include_router(guardrails_router)
 
     app.add_middleware(AuthMiddleware)
     app.add_middleware(AuditMiddleware)
