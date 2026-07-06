@@ -215,7 +215,7 @@ class TestCreateAgent:
             resp = await ac.post(
                 f"/api/v1/workspaces/ws-{suffix}/agents",
                 headers={"Authorization": f"Bearer {tok}"},
-                json={"name": "No Config", "framework": "adk"},
+                json={"name": "No Config", "framework": "deepagents"},
             )
         assert resp.status_code == 201
         assert resp.json()["config"] == {}
@@ -385,10 +385,10 @@ class TestUpdateAgent:
             resp = await ac.patch(
                 f"/api/v1/workspaces/{ws}/agents/{created['id']}",
                 headers={"Authorization": f"Bearer {tok}"},
-                json={"framework": "langgraph"},
+                json={"framework": "deepagents"},
             )
         assert resp.status_code == 200
-        assert resp.json()["framework"] == "langgraph"
+        assert resp.json()["framework"] == "deepagents"
 
     @pytest.mark.asyncio
     async def test_update_invalid_framework_400(self, app):
@@ -573,3 +573,163 @@ class TestAdminAgentCount:
             by_id = {w["id"]: w for w in resp.json()}
             assert by_id[ws_a]["agent_count"] == 0
             assert by_id[ws_b]["agent_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 8. Phase 4b: Subagents field
+# ---------------------------------------------------------------------------
+class TestSubagentsField:
+    """Phase 4b: /agents accepts and persists the subagents field."""
+
+    @pytest.mark.asyncio
+    async def test_create_with_subagents_persists_field(self, app):
+        suffix = _uuid.uuid4().hex[:8]
+        ws = f"ws-{suffix}"
+        tok = await _seed(ws, f"t-{suffix}", f"admin-{suffix}", ws_role="workspace_admin")
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post(
+                f"/api/v1/workspaces/{ws}/agents",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={
+                    "name": "research-agent",
+                    "framework": "deepagents",
+                    "subagents": [
+                        {
+                            "name": "web-searcher",
+                            "description": "Delegates web searches.",
+                            "system_prompt": "You are a search specialist.",
+                            "tools": ["search"],
+                            "model": "deepseek-chat",
+                        },
+                        {
+                            "name": "summarizer",
+                            "description": "Summarizes text.",
+                            "system_prompt": "You summarize faithfully.",
+                            "tools": [],
+                        },
+                    ],
+                },
+            )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert len(body["subagents"]) == 2
+        assert body["subagents"][0]["name"] == "web-searcher"
+        assert body["subagents"][1]["model"] is None  # inherited
+
+    @pytest.mark.asyncio
+    async def test_create_without_subagents_defaults_to_empty(self, app):
+        suffix = _uuid.uuid4().hex[:8]
+        ws = f"ws-{suffix}"
+        tok = await _seed(ws, f"t-{suffix}", f"admin-{suffix}", ws_role="workspace_admin")
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post(
+                f"/api/v1/workspaces/{ws}/agents",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={"name": "plain", "framework": "direct_llm"},
+            )
+        assert resp.status_code == 201
+        assert resp.json()["subagents"] == []
+
+    @pytest.mark.asyncio
+    async def test_update_clears_subagents_with_empty_list(self, app):
+        """PATCH with subagents=[] clears the field (None means leave unchanged)."""
+        suffix = _uuid.uuid4().hex[:8]
+        ws = f"ws-{suffix}"
+        tok = await _seed(ws, f"t-{suffix}", f"admin-{suffix}", ws_role="workspace_admin")
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            created = await ac.post(
+                f"/api/v1/workspaces/{ws}/agents",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={
+                    "name": "with-sub",
+                    "framework": "deepagents",
+                    "subagents": [
+                        {
+                            "name": "x",
+                            "description": "d",
+                            "system_prompt": "s",
+                        }
+                    ],
+                },
+            )
+            agent_id = created.json()["id"]
+            # Now clear subagents.
+            resp = await ac.patch(
+                f"/api/v1/workspaces/{ws}/agents/{agent_id}",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={"subagents": []},
+            )
+        assert resp.status_code == 200
+        assert resp.json()["subagents"] == []
+
+    @pytest.mark.asyncio
+    async def test_update_without_subagents_leaves_unchanged(self, app):
+        """PATCH omitting subagents leaves the stored value intact."""
+        suffix = _uuid.uuid4().hex[:8]
+        ws = f"ws-{suffix}"
+        tok = await _seed(ws, f"t-{suffix}", f"admin-{suffix}", ws_role="workspace_admin")
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            created = await ac.post(
+                f"/api/v1/workspaces/{ws}/agents",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={
+                    "name": "keep-sub",
+                    "framework": "deepagents",
+                    "subagents": [
+                        {
+                            "name": "y",
+                            "description": "d",
+                            "system_prompt": "s",
+                        }
+                    ],
+                },
+            )
+            agent_id = created.json()["id"]
+            # PATCH a different field; subagents should remain.
+            resp = await ac.patch(
+                f"/api/v1/workspaces/{ws}/agents/{agent_id}",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={"name": "renamed"},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["name"] == "renamed"
+        assert len(body["subagents"]) == 1
+        assert body["subagents"][0]["name"] == "y"
+
+    @pytest.mark.asyncio
+    async def test_get_agent_returns_subagents(self, app):
+        suffix = _uuid.uuid4().hex[:8]
+        ws = f"ws-{suffix}"
+        tok = await _seed(ws, f"t-{suffix}", f"admin-{suffix}", ws_role="workspace_admin")
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            created = await ac.post(
+                f"/api/v1/workspaces/{ws}/agents",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={
+                    "name": "deep",
+                    "framework": "deepagents",
+                    "subagents": [
+                        {
+                            "name": "z",
+                            "description": "d",
+                            "system_prompt": "s",
+                            "tools": ["t1", "t2"],
+                        }
+                    ],
+                },
+            )
+            agent_id = created.json()["id"]
+            resp = await ac.get(
+                f"/api/v1/workspaces/{ws}/agents/{agent_id}",
+                headers={"Authorization": f"Bearer {tok}"},
+            )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["subagents"]) == 1
+        assert body["subagents"][0]["tools"] == ["t1", "t2"]

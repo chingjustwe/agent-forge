@@ -508,3 +508,157 @@ class TestRunOrchestration:
         assert len(messages) == 1
         assert messages[0]["role"] == "user"
         assert messages[0]["content"] == "hello"
+
+
+# ── Phase 4b: subagent wiring ──────────────────────────────────────────
+
+
+class TestSubagentWiring:
+    """Phase 4b: DeepAgentsAdapter wires SubagentMapper output into
+    create_deep_agent(subagents=...)."""
+
+    @pytest.mark.asyncio
+    async def test_run_passes_subagent_specs_to_create_deep_agent(self):
+        """When agent.subagents is non-empty, the mapped list should be
+        passed to create_deep_agent as the subagents kwarg."""
+        from src.runtime.harness.agents import AgentDefinition, SubagentSpec
+
+        agent = AgentDefinition(
+            id="a-sub",
+            name="parent",
+            workspace_id="ws-1",
+            adapter="deepagents",
+            system_prompt="x",
+            subagents=[
+                SubagentSpec(
+                    name="child",
+                    description="A child subagent.",
+                    system_prompt="You are a child.",
+                    tools=[],
+                    model="deepseek-chat",
+                ),
+            ],
+        )
+        adapter = DeepAgentsAdapter(api_key="fake")
+        ctx = _make_ctx(agent=agent)
+
+        mock_deep_agent = MagicMock()
+        async def _mock_astream_events(*args, **kwargs):
+            return
+            yield  # type: ignore[unreachable]
+        mock_deep_agent.astream_events = _mock_astream_events
+
+        with patch("deepagents.create_deep_agent", return_value=mock_deep_agent) as mock_create, \
+             patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
+            await _collect(adapter.run(
+                [{"role": "user", "content": "x"}], ctx
+            ))
+
+        call_kwargs = mock_create.call_args.kwargs
+        subagents = call_kwargs.get("subagents")
+        assert subagents is not None
+        assert len(subagents) == 1
+        assert subagents[0]["name"] == "child"
+        assert subagents[0]["model"] == "deepseek-chat"
+
+    @pytest.mark.asyncio
+    async def test_run_subagent_mapping_failure_falls_back_to_empty(self):
+        """If SubagentMapper raises, the run must continue with no subagents
+        (best-effort, per spec §2.1)."""
+        from src.runtime.harness.agents import AgentDefinition, SubagentSpec
+
+        agent = AgentDefinition(
+            id="a-fail",
+            name="parent",
+            workspace_id="ws-1",
+            adapter="deepagents",
+            system_prompt="x",
+            subagents=[
+                SubagentSpec(
+                    name="boom",
+                    description="d",
+                    system_prompt="s",
+                ),
+            ],
+        )
+        adapter = DeepAgentsAdapter(api_key="fake")
+        ctx = _make_ctx(agent=agent)
+
+        mock_deep_agent = MagicMock()
+        async def _mock_astream_events(*args, **kwargs):
+            return
+            yield  # type: ignore[unreachable]
+        mock_deep_agent.astream_events = _mock_astream_events
+
+        with patch("deepagents.create_deep_agent", return_value=mock_deep_agent) as mock_create, \
+             patch("langchain.chat_models.init_chat_model", return_value=MagicMock()), \
+             patch(
+                 "src.runtime.harness.subagents.SubagentMapper.to_subagents",
+                 side_effect=RuntimeError("boom"),
+             ):
+            await _collect(adapter.run(
+                [{"role": "user", "content": "x"}], ctx
+            ))
+
+        # SubagentMapper raised → subagents=None passed (empty list → None).
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs.get("subagents") is None
+
+    @pytest.mark.asyncio
+    async def test_run_yields_subagent_event_on_task_chain_start(self):
+        """on_chain_start with name='task' → StreamEvent(type='subagent',
+        action='start')."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        ctx = _make_ctx()
+
+        task_event = _make_event(
+            "on_chain_start",
+            name="task",
+            data={"input": {"name": "researcher", "subagent_type": "web"}},
+        )
+
+        mock_deep_agent = MagicMock()
+        async def _mock_astream_events(*args, **kwargs):
+            yield task_event
+        mock_deep_agent.astream_events = _mock_astream_events
+
+        with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
+             patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
+            events = await _collect(adapter.run(
+                [{"role": "user", "content": "x"}], ctx
+            ))
+
+        subagent_events = [e for e in events if e.type == "subagent"]
+        assert len(subagent_events) == 1
+        assert subagent_events[0].data["action"] == "start"
+        assert subagent_events[0].data["name"] == "researcher"
+        assert subagent_events[0].data["subagent_type"] == "web"
+
+    @pytest.mark.asyncio
+    async def test_run_yields_subagent_event_on_task_chain_end(self):
+        """on_chain_end with name='task' → StreamEvent(type='subagent',
+        action='end')."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        ctx = _make_ctx()
+
+        task_event = _make_event(
+            "on_chain_end",
+            name="task",
+            data={"output": "subagent result"},
+        )
+
+        mock_deep_agent = MagicMock()
+        async def _mock_astream_events(*args, **kwargs):
+            yield task_event
+        mock_deep_agent.astream_events = _mock_astream_events
+
+        with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
+             patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
+            events = await _collect(adapter.run(
+                [{"role": "user", "content": "x"}], ctx
+            ))
+
+        subagent_events = [e for e in events if e.type == "subagent"]
+        assert len(subagent_events) == 1
+        assert subagent_events[0].data["action"] == "end"
+        assert "subagent result" in subagent_events[0].data["output"]

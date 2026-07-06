@@ -32,13 +32,28 @@ from src.infra.db.session import get_db
 
 router = APIRouter()
 
-ALLOWED_FRAMEWORKS = ("direct_llm", "adk", "langgraph")
+# Phase 4: "adk" and "langgraph" removed (never functional); "deepagents" added.
+ALLOWED_FRAMEWORKS = ("direct_llm", "deepagents")
 
 
 class MemoryConfigPayload(BaseModel):
     enable_short_term: bool = True
     enable_long_term: bool = False
     recall_top_k: int = 5
+
+
+class SubagentPayload(BaseModel):
+    """Phase 4b: subagent definition accepted by POST/PATCH /agents.
+
+    Mirrors ``SubagentSpec`` (agents.py) but kept as a separate API
+    model so the harness layer stays API-agnostic.
+    """
+    name: str = Field(..., min_length=1, max_length=100)
+    description: str = Field(..., min_length=1)
+    system_prompt: str = Field(..., min_length=1)
+    tools: list[str] = Field(default_factory=list)
+    model: str | None = None  # None = inherit parent's model
+    skills: list[str] = Field(default_factory=list)
 
 
 class CreateAgentRequest(BaseModel):
@@ -55,6 +70,8 @@ class CreateAgentRequest(BaseModel):
     skills: list[str] | None = None
     hooks: list[str] | None = None
     memory_config: MemoryConfigPayload | None = None
+    # Phase 4b: subagent specs (only used when framework="deepagents").
+    subagents: list[SubagentPayload] | None = None
 
 
 class UpdateAgentRequest(BaseModel):
@@ -71,6 +88,8 @@ class UpdateAgentRequest(BaseModel):
     skills: list[str] | None = None
     hooks: list[str] | None = None
     memory_config: MemoryConfigPayload | None = None
+    # Phase 4b: None = leave unchanged; [] = clear all subagents.
+    subagents: list[SubagentPayload] | None = None
 
 
 def _serialize_agent(a: AgentConfig) -> dict:
@@ -96,6 +115,8 @@ def _serialize_agent(a: AgentConfig) -> dict:
         "skills": a.skills or [],
         "hooks": a.hooks or [],
         "memory_config": a.memory_config,
+        # Phase 4b: subagent specs (only meaningful for adapter="deepagents").
+        "subagents": a.subagents or [],
         # Metadata
         "created_by": a.created_by,
         "created_at": a.created_at.isoformat() if a.created_at else None,
@@ -123,6 +144,8 @@ def _apply_create_fields(agent: AgentConfig, body: CreateAgentRequest) -> None:
         agent.hooks = body.hooks
     if body.memory_config is not None:
         agent.memory_config = body.memory_config.model_dump()
+    if body.subagents is not None:
+        agent.subagents = [s.model_dump() for s in body.subagents]
 
 
 async def _write_audit(
@@ -312,6 +335,9 @@ async def update_agent(
     if body.memory_config is not None:
         agent.memory_config = body.memory_config.model_dump()
         details["memory_config"] = body.memory_config.model_dump()
+    if body.subagents is not None:
+        agent.subagents = [s.model_dump() for s in body.subagents]
+        details["subagents"] = agent.subagents
 
     user = request.state.user
     await _write_audit(
@@ -434,6 +460,7 @@ async def copy_agent_to(
         skills=source.skills,
         hooks=source.hooks,
         memory_config=source.memory_config,
+        subagents=source.subagents or [],
     )
     db.add(copy)
     await db.flush()  # populate copy.id before audit log references it

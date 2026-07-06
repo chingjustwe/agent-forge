@@ -292,7 +292,7 @@ class TestCopyAgentTo:
                 headers={"Authorization": f"Bearer {admin_tok}"},
                 json={
                     "name": "ADK Agent",
-                    "framework": "adk",
+                    "framework": "deepagents",
                     "config": {"model": "gpt-4", "tools": ["search", "calc"], "nested": {"a": 1}},
                 },
             )).json()
@@ -303,5 +303,5 @@ class TestCopyAgentTo:
             )
         assert resp.status_code == 201
         body = resp.json()
-        assert body["framework"] == "adk"
+        assert body["framework"] == "deepagents"
         assert body["config"] == {"model": "gpt-4", "tools": ["search", "calc"], "nested": {"a": 1}}
