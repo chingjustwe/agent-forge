@@ -195,7 +195,22 @@ class DeepAgentsAdapter(RunAdapter):
 
         # 7. Stream events
         config: dict[str, Any] = {"configurable": {"thread_id": ctx.session_id}}
-        input_payload = {"messages": self._normalize_messages(messages)}
+        normalized = self._normalize_messages(messages)
+        # When a checkpointer is present, the graph already has the full
+        # conversation history in its state. Passing the full history
+        # again causes langgraph to attempt redundant state reconciliation
+        # which can fail with a ValueError unpacking tuple mismatch.
+        # Instead, only pass the *new* message(s) — the last user message.
+        if checkpointer and normalized:
+            # Find the last user message in the normalized list.
+            last_user = None
+            for m in reversed(normalized):
+                if m.get("role") == "user":
+                    last_user = m
+                    break
+            input_payload = {"messages": [last_user] if last_user else normalized[-1:]}
+        else:
+            input_payload = {"messages": normalized}
 
         # Phase 4c: optional LangSmith tracing. Only enabled when
         # ``LANGSMITH_API_KEY`` is set in settings; otherwise zero-

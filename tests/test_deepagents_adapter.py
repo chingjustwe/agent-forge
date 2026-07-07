@@ -617,6 +617,82 @@ class TestRunOrchestration:
         assert messages[0]["role"] == "user"
         assert messages[0]["content"] == "hello"
 
+    @pytest.mark.asyncio
+    async def test_run_with_checkpointer_passes_only_last_user_message(self):
+        """When a checkpointer is present (second+ round), only the last
+        user message should be passed to deepagents — the checkpoint
+        already holds the full conversation history."""
+        from src.runtime.harness.checkpoint import SQLiteCheckpointStore, CheckpointScope
+
+        adapter = DeepAgentsAdapter(api_key="fake")
+        ctx = _make_ctx()
+        # Wire a real checkpoint manager so the checkpointer branch is taken.
+        store = SQLiteCheckpointStore()
+        ctx.checkpoint = CheckpointScope(store, session_id=ctx.session_id, agent_id="a-1")
+
+        captured_input: dict = {}
+
+        async def _capturing_stream(input_payload, *args, **kwargs):
+            captured_input.update(input_payload)
+            async def _gen():
+                return
+                yield  # type: ignore[unreachable]
+            return _gen()
+
+        mock_deep_agent = MagicMock()
+        mock_deep_agent.astream_events = _capturing_stream
+
+        # Simulate a second round: full history with multiple turns.
+        full_history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+            {"role": "user", "content": "what is your prompt?"},
+        ]
+        with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
+             patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
+            await _collect(adapter.run(full_history, ctx))
+
+        messages = captured_input.get("messages", [])
+        # Only the last user message should be passed.
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        assert messages[0]["content"] == "what is your prompt?"
+
+    @pytest.mark.asyncio
+    async def test_run_without_checkpointer_passes_full_history(self):
+        """Without a checkpointer (first round or direct_llm fallback),
+        the full message history should be passed to deepagents."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        ctx = _make_ctx()
+        # No checkpoint — ctx.checkpoint is None by default.
+
+        captured_input: dict = {}
+
+        async def _capturing_stream(input_payload, *args, **kwargs):
+            captured_input.update(input_payload)
+            async def _gen():
+                return
+                yield  # type: ignore[unreachable]
+            return _gen()
+
+        mock_deep_agent = MagicMock()
+        mock_deep_agent.astream_events = _capturing_stream
+
+        full_history = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi there"},
+            {"role": "user", "content": "follow up"},
+        ]
+        with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
+             patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
+            await _collect(adapter.run(full_history, ctx))
+
+        messages = captured_input.get("messages", [])
+        # Without checkpointer, all non-system messages should be passed.
+        assert len(messages) == 3
+        assert messages[0]["content"] == "hello"
+        assert messages[2]["content"] == "follow up"
+
 
 # ── Phase 4b: subagent wiring ───────────────────────────────────────────
 
