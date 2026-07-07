@@ -461,12 +461,62 @@ def _migrate_schema(sync_conn):
         sync_conn.exec_driver_sql(
             "CREATE TABLE IF NOT EXISTS checkpoint_writes ("
             "session_id VARCHAR(32) NOT NULL,"
+            "checkpoint_id VARCHAR(64) NOT NULL DEFAULT '',"
             "task_id VARCHAR(64) NOT NULL,"
             "task_path VARCHAR(255) NOT NULL DEFAULT '',"
             "channel VARCHAR(64) NOT NULL,"
             "value TEXT NOT NULL,"
             "created_at DATETIME NOT NULL,"
-            "PRIMARY KEY (session_id, task_id, task_path, channel)"
+            "PRIMARY KEY (session_id, checkpoint_id, task_id, task_path, channel)"
+            ")"
+        )
+        # M20: add checkpoint_id column to pre-existing checkpoint_writes
+        # tables (added in M18). ``ALTER TABLE … ADD COLUMN`` with
+        # ``IF NOT EXISTS`` isn't supported on SQLite, so introspect.
+        cols = {
+            row[1]
+            for row in sync_conn.exec_driver_sql("PRAGMA table_info(checkpoint_writes)")
+        }
+        if "checkpoint_id" not in cols:
+            sync_conn.exec_driver_sql(
+                "ALTER TABLE checkpoint_writes ADD COLUMN checkpoint_id "
+                "VARCHAR(64) NOT NULL DEFAULT ''"
+            )
+            # Rebuild the primary key to include checkpoint_id. SQLite
+            # cannot ALTER a PK in place, so rename → recreate → copy.
+            sync_conn.exec_driver_sql("ALTER TABLE checkpoint_writes RENAME TO checkpoint_writes_old")
+            sync_conn.exec_driver_sql(
+                "CREATE TABLE checkpoint_writes ("
+                "session_id VARCHAR(32) NOT NULL,"
+                "checkpoint_id VARCHAR(64) NOT NULL DEFAULT '',"
+                "task_id VARCHAR(64) NOT NULL,"
+                "task_path VARCHAR(255) NOT NULL DEFAULT '',"
+                "channel VARCHAR(64) NOT NULL,"
+                "value TEXT NOT NULL,"
+                "created_at DATETIME NOT NULL,"
+                "PRIMARY KEY (session_id, checkpoint_id, task_id, task_path, channel)"
+                ")"
+            )
+            sync_conn.exec_driver_sql(
+                "INSERT INTO checkpoint_writes "
+                "(session_id, checkpoint_id, task_id, task_path, channel, value, created_at) "
+                "SELECT session_id, checkpoint_id, task_id, task_path, channel, value, created_at "
+                "FROM checkpoint_writes_old"
+            )
+            sync_conn.exec_driver_sql("DROP TABLE checkpoint_writes_old")
+        # M20: channel-value blobs. LangGraph 1.2+ stores each channel's
+        # value separately (keyed by version) rather than inline in the
+        # checkpoint dict — the ``checkpoint_blobs`` table mirrors
+        # MemorySaver's ``blobs`` dict so ``aget_tuple`` can rebuild
+        # ``channel_values`` from ``channel_versions``.
+        sync_conn.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS checkpoint_blobs ("
+            "session_id VARCHAR(32) NOT NULL,"
+            "channel VARCHAR(64) NOT NULL,"
+            "version VARCHAR(64) NOT NULL,"
+            "type VARCHAR(16) NOT NULL DEFAULT 'json',"
+            "payload TEXT NOT NULL,"
+            "PRIMARY KEY (session_id, channel, version)"
             ")"
         )
 

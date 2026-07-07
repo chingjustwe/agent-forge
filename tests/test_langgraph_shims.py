@@ -40,16 +40,23 @@ from src.runtime.harness.tool_engine import ToolDefinition, ToolResult
 
 @pytest.fixture(autouse=True)
 async def setup_db():
-    """Create checkpoints + checkpoint_writes tables before each test.
+    """Create checkpoints + checkpoint_writes + checkpoint_blobs tables
+    before each test.
 
-    Both tables are raw-SQL (M13 / M18 migrations) so we create them
-    here explicitly, mirroring test_checkpoint.py.
+    All three tables are raw-SQL (M13 / M18 / M20 migrations) so we
+    create them here explicitly, mirroring test_checkpoint.py. We DROP
+    first because the DB is file-based and a leftover table from a
+    previous test run may have an older schema (e.g. checkpoint_writes
+    without the M20 checkpoint_id column).
     """
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("DROP TABLE IF EXISTS checkpoint_blobs"))
+        await conn.execute(text("DROP TABLE IF EXISTS checkpoint_writes"))
+        await conn.execute(text("DROP TABLE IF EXISTS checkpoints"))
         await conn.execute(
             text(
-                "CREATE TABLE IF NOT EXISTS checkpoints ("
+                "CREATE TABLE checkpoints ("
                 "session_id VARCHAR(32) NOT NULL,"
                 "sequence INTEGER NOT NULL,"
                 "messages TEXT NOT NULL,"
@@ -63,19 +70,33 @@ async def setup_db():
         )
         await conn.execute(
             text(
-                "CREATE TABLE IF NOT EXISTS checkpoint_writes ("
+                "CREATE TABLE checkpoint_writes ("
                 "session_id VARCHAR(32) NOT NULL,"
+                "checkpoint_id VARCHAR(64) NOT NULL DEFAULT '',"
                 "task_id VARCHAR(64) NOT NULL,"
                 "task_path VARCHAR(255) NOT NULL DEFAULT '',"
                 "channel VARCHAR(64) NOT NULL,"
                 "value TEXT NOT NULL,"
                 "created_at DATETIME NOT NULL,"
-                "PRIMARY KEY (session_id, task_id, task_path, channel)"
+                "PRIMARY KEY (session_id, checkpoint_id, task_id, task_path, channel)"
+                ")"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE TABLE checkpoint_blobs ("
+                "session_id VARCHAR(32) NOT NULL,"
+                "channel VARCHAR(64) NOT NULL,"
+                "version VARCHAR(64) NOT NULL,"
+                "type VARCHAR(16) NOT NULL DEFAULT 'json',"
+                "payload TEXT NOT NULL,"
+                "PRIMARY KEY (session_id, channel, version)"
                 ")"
             )
         )
     yield
     async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS checkpoint_blobs"))
         await conn.execute(text("DROP TABLE IF EXISTS checkpoint_writes"))
         await conn.execute(text("DROP TABLE IF EXISTS checkpoints"))
 
@@ -87,14 +108,24 @@ def _make_checkpoint_dict(
     *,
     messages: list[dict] | None = None,
     seq_id: str = "1",
+    channel_versions: dict | None = None,
 ) -> dict:
-    """Build a minimal LangGraph Checkpoint dict for testing."""
+    """Build a minimal LangGraph Checkpoint dict for testing.
+
+    ``channel_versions`` defaults to ``{"messages": "1"}`` when messages
+    are provided so the M20 blob-rebuild path in ``aget_tuple`` can
+    recover them — mirroring how real LangGraph 1.2+ populates
+    ``channel_versions`` for any channel that changed this step.
+    """
+    msgs = messages or []
+    if channel_versions is None:
+        channel_versions = {"messages": "1"} if msgs else {}
     return {
         "v": 1,
         "id": seq_id,
         "ts": datetime.now(timezone.utc).isoformat(),
-        "channel_values": {"messages": messages or []},
-        "channel_versions": {},
+        "channel_values": {"messages": msgs},
+        "channel_versions": channel_versions,
         "versions_seen": {},
         "pending_sends": [],
     }
@@ -171,14 +202,18 @@ class TestLangGraphCheckpointShim:
             seq_id="42",
         )
 
-        await shim.aput(config, original_cp, {"step": 1}, {})
+        # M20: pass new_versions matching channel_versions so the
+        # messages channel is persisted as a blob and rebuilt by
+        # aget_tuple. (Real LangGraph always populates new_versions for
+        # any channel that changed this step.)
+        await shim.aput(config, original_cp, {"step": 1}, {"messages": "1"})
         result = await shim.aget_tuple(config)
 
         assert result is not None
         assert isinstance(result, CheckpointTuple)
         # The checkpoint id should round-trip
         assert result.checkpoint["id"] == "42"
-        # Messages should be preserved in channel_values
+        # Messages should be preserved in channel_values (rebuilt from blobs)
         messages = result.checkpoint["channel_values"]["messages"]
         assert len(messages) == 1
         assert messages[0]["content"] == "hello"
@@ -189,9 +224,12 @@ class TestLangGraphCheckpointShim:
         shim = LangGraphCheckpointShim(store, "s-list", "a-1")
         config = {"configurable": {"thread_id": "s-list"}}
 
-        # Insert 3 checkpoints in order
+        # Insert 3 checkpoints in order. Use seq_id matching the
+        # internal sequence (1, 2, 3) so the checkpoint_id returned in
+        # each tuple's config (which is now the langgraph id stashed
+        # by aput, NOT str(cp.sequence)) lines up with insertion order.
         for i in range(3):
-            cp = _make_checkpoint_dict(seq_id=str(i))
+            cp = _make_checkpoint_dict(seq_id=str(i + 1))
             await shim.aput(config, cp, {"step": i}, {})
 
         # alist should yield newest-first (highest sequence first)
@@ -211,7 +249,7 @@ class TestLangGraphCheckpointShim:
         config = {"configurable": {"thread_id": "s-lim"}}
 
         for i in range(5):
-            cp = _make_checkpoint_dict(seq_id=str(i))
+            cp = _make_checkpoint_dict(seq_id=str(i + 1))
             await shim.aput(config, cp, {"step": i}, {})
 
         results = []
@@ -392,18 +430,24 @@ class TestLangGraphCheckpointShim:
 
     @pytest.mark.asyncio
     async def test_aget_tuple_loads_pending_writes(self):
-        """aget_tuple must surface pending writes from checkpoint_writes."""
+        """aget_tuple must surface pending writes from checkpoint_writes.
+
+        M20: writes are scoped to a checkpoint_id, so aput_writes must
+        be called with the config returned by aput (which carries the
+        checkpoint_id) for aget_tuple to find them.
+        """
         store = SQLiteCheckpointStore()
         shim = LangGraphCheckpointShim(store, "s-pw-4", "a-1")
         config = {"configurable": {"thread_id": "s-pw-4"}}
 
         # First persist a checkpoint so aget_tuple has something to load.
         cp = _make_checkpoint_dict(messages=[{"role": "user", "content": "x"}])
-        await shim.aput(config, cp, {}, {})
+        cp_config = await shim.aput(config, cp, {}, {"messages": "1"})
 
-        # Then persist writes.
+        # Then persist writes using the config returned by aput (which
+        # carries checkpoint_id).
         await shim.aput_writes(
-            config,
+            cp_config,
             [("messages", {"role": "assistant", "content": "pending"})],
             task_id="task-1",
         )
@@ -411,7 +455,9 @@ class TestLangGraphCheckpointShim:
         tuple_ = await shim.aget_tuple(config)
         assert tuple_ is not None
         assert len(tuple_.pending_writes) == 1
-        assert tuple_.pending_writes[0][0] == "messages"
+        # pending_writes are (task_id, channel, value) triples.
+        assert tuple_.pending_writes[0][0] == "task-1"
+        assert tuple_.pending_writes[0][1] == "messages"
 
     @pytest.mark.asyncio
     async def test_adelete_thread_clears_pending_writes(self):
@@ -421,9 +467,9 @@ class TestLangGraphCheckpointShim:
         config = {"configurable": {"thread_id": "s-pw-5"}}
 
         cp = _make_checkpoint_dict(messages=[])
-        await shim.aput(config, cp, {}, {})
+        cp_config = await shim.aput(config, cp, {}, {})
         await shim.aput_writes(
-            config, [("messages", {"v": 1})], task_id="task-1"
+            cp_config, [("messages", {"v": 1})], task_id="task-1"
         )
 
         await shim.adelete_thread("s-pw-5")
@@ -449,19 +495,64 @@ class TestLangGraphCheckpointShim:
         config = {"configurable": {"thread_id": "s-pw-6"}}
 
         cp = _make_checkpoint_dict(messages=[])
-        await shim.aput(config, cp, {}, {})
+        cp_config = await shim.aput(config, cp, {}, {})
 
         nested = {"k": {"nested": [1, 2, {"three": 3}]}, "flag": True}
         await shim.aput_writes(
-            config, [("state", nested)], task_id="task-1"
+            cp_config, [("state", nested)], task_id="task-1"
         )
 
         tuple_ = await shim.aget_tuple(config)
         assert tuple_ is not None
         assert len(tuple_.pending_writes) == 1
-        channel, value = tuple_.pending_writes[0]
+        # pending_writes are (task_id, channel, value) triples — see
+        # langgraph.checkpoint.base.PendingWrite.
+        task_id, channel, value = tuple_.pending_writes[0]
+        assert task_id == "task-1"
         assert channel == "state"
         assert value == nested
+
+    @pytest.mark.asyncio
+    async def test_load_writes_returns_pending_write_triples(self):
+        """Regression: _load_writes must return ``(task_id, channel,
+        value)`` triples — not ``(channel, value)`` pairs.
+
+        langgraph 1.2+ unpacks each pending write as
+        ``for tid, k, v in saved.pending_writes``. Returning 2-tuples
+        caused ``ValueError: not enough values to unpack (expected 3,
+        got 2)`` on the second turn of any checkpointed conversation
+        (see langgraph/pregel/_loop.py __aenter__).
+        """
+        store = SQLiteCheckpointStore()
+        shim = LangGraphCheckpointShim(store, "s-pw-7", "a-1")
+        config = {"configurable": {"thread_id": "s-pw-7"}}
+
+        # Persist two writes from two different tasks to verify
+        # task_id is correctly threaded through.
+        await shim.aput_writes(
+            config,
+            [("messages", {"role": "assistant", "content": "a"}),
+             ("state", {"k": 1})],
+            task_id="task-A",
+        )
+        await shim.aput_writes(
+            config,
+            [("messages", {"role": "assistant", "content": "b"})],
+            task_id="task-B",
+        )
+
+        writes = await shim._load_writes("s-pw-7")
+        assert len(writes) == 3
+        # Every entry must be a 3-tuple matching PendingWrite.
+        for w in writes:
+            assert len(w) == 3, f"expected 3-tuple, got {w!r}"
+            assert isinstance(w[0], str)  # task_id
+            assert isinstance(w[1], str)  # channel
+        # Sanity-check task_ids and channels.
+        task_ids = {w[0] for w in writes}
+        channels = {w[1] for w in writes}
+        assert task_ids == {"task-A", "task-B"}
+        assert channels == {"messages", "state"}
 
 
 # ── LangChainToolShim ───────────────────────────────────────────────────
