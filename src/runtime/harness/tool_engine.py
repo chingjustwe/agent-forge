@@ -233,8 +233,15 @@ class ToolEngine:
             raw = await self._mcp.call_tool(
                 tool.mcp_server, tool.name, args
             )
+            if isinstance(raw, dict):
+                output = raw.get("text") or raw.get("output") or str(raw)
+                error = raw.get("error") or (raw.get("isError") and "MCP tool returned an error")
+            else:
+                output = str(raw)
+                error = None
             return ToolResult(
-                name=tool.name, output=str(raw), metadata={"mcp_server": tool.mcp_server}
+                name=tool.name, output=output, error=error,
+                metadata={"mcp_server": tool.mcp_server},
             )
         except Exception as exc:
             return ToolResult(

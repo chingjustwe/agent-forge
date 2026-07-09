@@ -42,7 +42,9 @@ class PromptAssembler:
         if agent.skills and hasattr(ctx, "skills") and ctx.skills is not None:
             for skill_name in agent.skills:
                 try:
-                    skill = await ctx.skills.load(skill_name)
+                    skill = await ctx.skills.load(
+                        skill_name, getattr(ctx, "workspace_id", None)
+                    )
                     sections.append(
                         f"## Skill: {skill.name}\n{skill.instructions}"
                     )

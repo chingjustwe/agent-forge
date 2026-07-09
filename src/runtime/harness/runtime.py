@@ -24,6 +24,8 @@ import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from src.infra.db.engine import async_session
 from src.runtime.abc import AgentRuntime
 from src.runtime.adapters.base import RunAdapter
@@ -82,6 +84,11 @@ class HarnessRuntime(AgentRuntime):
             )
             return
 
+        # 1. Build per-run context. First materialize the tools exposed by the
+        # MCP servers this agent is explicitly bound to (server-level granularity
+        # + union with ``agent.tools``).
+        mcp_tool_names = await self._resolve_mcp_tools(agent, config.workspace_id)
+
         # 1. Build per-run context
         ctx = self._build_context(
             agent=agent,
@@ -91,6 +98,7 @@ class HarnessRuntime(AgentRuntime):
             trace_id=trace_id,
             workspace_settings=workspace_settings or {},
             workspace_root=workspace_root,
+            extra_allowed=mcp_tool_names,
         )
 
         # 2. Track last user message for memory recall (P2)
@@ -226,13 +234,64 @@ class HarnessRuntime(AgentRuntime):
         async with async_session() as db:
             agent = await self._registry.agents.get(db, config.agent)
             if agent is not None:
-                return agent
+                return await self._resolve_subagent_refs(agent, db)
             agent = await self._registry.agents.get_by_name(
                 db, config.workspace_id, config.agent
             )
             if agent is not None:
-                return agent
+                return await self._resolve_subagent_refs(agent, db)
         return self._default_agent(config)
+
+    async def _resolve_subagent_refs(
+        self, agent: "AgentDefinition", db: "AsyncSession"
+    ) -> "AgentDefinition":
+        """Expand ``agent.subagents`` references into full ``SubagentSpec``s.
+
+        A subagent may be stored as a *reference* (``agent_id`` pointing at
+        another agent in the same workspace). At run time we resolve each
+        reference to a full spec built from the referenced agent's own
+        config, so the subagent inherits the referenced agent's
+        system_prompt / tools / model / skills. Inline specs pass through
+        unchanged.
+
+        Missing or self-referential references are dropped (best-effort) so
+        a misconfigured subagent never crashes the parent run.
+        """
+        from .agents import SubagentSpec
+
+        if not agent.subagents:
+            return agent
+
+        resolved: list[SubagentSpec] = []
+        for spec in agent.subagents:
+            if not spec.agent_id:
+                resolved.append(spec)
+                continue
+            if spec.agent_id == agent.id:
+                logger.warning(
+                    "Subagent reference to self (%s) ignored for agent %s",
+                    spec.agent_id,
+                    agent.id,
+                )
+                continue
+            ref = await self._registry.agents.get(db, spec.agent_id)
+            if ref is None:
+                logger.warning(
+                    "Subagent reference %s not found; skipping",
+                    spec.agent_id,
+                )
+                continue
+            resolved.append(
+                SubagentSpec(
+                    name=ref.name,
+                    description=f"Subagent: {ref.name}",
+                    system_prompt=ref.system_prompt,
+                    tools=ref.tools,
+                    model=ref.model or None,
+                    skills=ref.skills,
+                )
+            )
+        return agent.model_copy(update={"subagents": resolved})
 
     def _default_agent(self, config: RuntimeConfig) -> AgentDefinition:
         """Build a synthetic default agent from RuntimeConfig fields."""
@@ -253,6 +312,55 @@ class HarnessRuntime(AgentRuntime):
             metadata={},
         )
 
+    async def _resolve_mcp_tools(
+        self, agent: "AgentDefinition", workspace_id: str
+    ) -> set[str]:
+        """Materialize the agent's bound MCP servers' tools into the platform
+        ``ToolRegistry`` and return their names.
+
+        The agent's ``mcp_servers`` whitelist grants access to *every* tool
+        exposed by each selected server (server-level granularity). Tool
+        registration is idempotent — keyed by ``(workspace_id, tool_name)`` in
+        the ``ToolRegistry`` — so re-running across requests is safe. Discovery
+        failures are logged and skipped; they never abort the run.
+
+        The returned names are merged into the agent's tool allowlist by the
+        caller (union with ``agent.tools``).
+        """
+        from .tool_engine import ToolDefinition
+
+        extra: set[str] = set()
+        names = getattr(agent, "mcp_servers", None) or []
+        if not names:
+            return extra
+        mcp = self._registry.mcp
+        if mcp is None:
+            return extra
+        for server_name in names:
+            try:
+                tools = await mcp.list_tools(server_name, workspace_id)
+            except Exception as exc:
+                logger.warning(
+                    "Agent %s: MCP tool discovery failed for server %r: %s",
+                    agent.id or agent.name,
+                    server_name,
+                    exc,
+                )
+                continue
+            for t in tools:
+                self._registry.tools.register(
+                    ToolDefinition(
+                        name=t["name"],
+                        description=t.get("description", ""),
+                        input_schema=t.get("input_schema", {}),
+                        source="mcp",
+                        mcp_server=server_name,
+                        workspace_id=workspace_id,
+                    )
+                )
+                extra.add(t["name"])
+        return extra
+
     def _build_context(
         self,
         *,
@@ -263,13 +371,19 @@ class HarnessRuntime(AgentRuntime):
         trace_id: str,
         workspace_settings: dict,
         workspace_root: str,
+        extra_allowed: set[str] | None = None,
     ) -> HarnessContext:
         """Build a per-run HarnessContext with all P1/P2 subsystems wired."""
         from .tools import BUILTIN_HANDLERS
 
+        # Allowlist = agent.tools (builtin/custom) ∪ tools of bound MCP servers.
+        allowed = set(agent.tools)
+        if extra_allowed:
+            allowed |= set(extra_allowed)
+
         tool_engine = ToolEngine(
             registry=self._registry.tools,
-            allowed_tools=agent.tools,
+            allowed_tools=list(allowed),
             builtin_handlers=BUILTIN_HANDLERS,
             mcp_manager=self._registry.mcp,
             sandbox=self._registry.sandbox,

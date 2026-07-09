@@ -180,10 +180,21 @@ class TestPromptAssembler:
 class _MockSkillRegistry:
     """Minimal SkillRegistry mock for PromptAssembler tests."""
 
-    def __init__(self, skills: dict[str, SkillPackage] | None = None):
+    def __init__(
+        self,
+        skills: dict[str, SkillPackage] | None = None,
+        ws_skills: dict[str, SkillPackage] | None = None,
+    ):
         self._skills = skills or {}
+        # Workspace-layer skills keyed by name — take priority when a
+        # workspace_id is supplied (mirrors SkillRegistry resolution).
+        self._ws_skills = ws_skills or {}
 
-    async def load(self, name: str) -> SkillPackage:
+    async def load(
+        self, name: str, workspace_id: str | None = None
+    ) -> SkillPackage:
+        if workspace_id and name in self._ws_skills:
+            return self._ws_skills[name]
         if name not in self._skills:
             raise KeyError(f"Skill {name!r} not found")
         return self._skills[name]
@@ -262,6 +273,33 @@ class TestPromptAssemblerSkills:
         assert prompt.index("You are a helpful assistant.") < prompt.index(
             "## Skill: my-skill"
         )
+
+    @pytest.mark.asyncio
+    async def test_workspace_skill_overrides_global(self):
+        # Same-named skill in both the global (directory) and workspace
+        # layers — passing workspace_id must resolve to the workspace one.
+        global_skill = SkillPackage(name="shared", instructions="Global body.")
+        ws_skill = SkillPackage(
+            name="shared",
+            instructions="Workspace body.",
+            layer="workspace",
+            editable=True,
+            workspace_id="ws-1",
+        )
+        agent = _make_agent(
+            system_prompt="You are a helpful assistant.",
+            skills=["shared"],
+        )
+        ctx = _make_ctx(
+            agent,
+            skills=_MockSkillRegistry(
+                {"shared": global_skill}, ws_skills={"shared": ws_skill}
+            ),
+        )
+        assembler = PromptAssembler()
+        prompt = await assembler.assemble(agent, ctx)
+        assert "Workspace body." in prompt
+        assert "Global body." not in prompt
 
 
 # ── P2: Memory recall ───────────────────────────────────────────────────
