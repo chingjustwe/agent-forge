@@ -17,6 +17,8 @@ import Settings from "./pages/Settings";
 import WorkspaceInvitations from "./pages/WorkspaceInvitations";
 import Agents from "./pages/Agents";
 import ApiKeys from "./pages/ApiKeys";
+import AdminMCP from "./pages/AdminMCP";
+import AdminSkills from "./pages/AdminSkills";
 import Layout from "./components/Layout";
 import { ToastProvider } from "./components/Toast";
 import { WorkspaceProvider } from "./context/WorkspaceContext";
@@ -86,7 +88,6 @@ function App() {
           <Route path="/login" element={token ? <Navigate to="/" replace /> : <LoginPage />} />
           <Route path="/" element={<Navigate to="/sessions" replace />} />
           <Route path="/sessions" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
-          <Route path="/sessions/new" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
           <Route path="/sessions/:sessionId" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
           <Route path="/admin" element={<ProtectedRoute><AdminPage /></ProtectedRoute>} />
           <Route path="/admin/dashboard" element={<ProtectedRoute><AdminDashboard /></ProtectedRoute>} />
@@ -104,6 +105,8 @@ function App() {
           <Route path="/invitations/:token" element={<WorkspaceInvitations />} />
           <Route path="/agents" element={<ProtectedRoute><Agents /></ProtectedRoute>} />
           <Route path="/api-keys" element={<ProtectedRoute><ApiKeys /></ProtectedRoute>} />
+          <Route path="/admin/mcp" element={<ProtectedRoute><AdminMCP /></ProtectedRoute>} />
+          <Route path="/admin/skills" element={<ProtectedRoute><AdminSkills /></ProtectedRoute>} />
         </Routes>
       </WorkspaceProvider>
     </ToastProvider>

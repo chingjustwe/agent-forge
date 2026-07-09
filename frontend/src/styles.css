@@ -1055,6 +1055,23 @@ tbody tr.clickable {
   margin-bottom: 6px;
 }
 
+/* Inline checkbox + label (e.g. "Enable Long-Term Memory") */
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+}
+.checkbox-label input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+}
+
 /* Catch inputs without explicit type (defaults to text) + explicit types */
 input:not([type]),
 input[type="text"],
@@ -1253,6 +1270,184 @@ textarea {
   color: var(--primary);
 }
 
+/* Source badges for the tool picker */
+.badge-source-builtin,
+.badge-source-mcp,
+.badge-source-custom {
+  min-width: 64px;
+  justify-content: center;
+}
+.badge-source-builtin {
+  background: var(--badge-primary-bg);
+  color: var(--primary);
+}
+.badge-source-mcp {
+  background: var(--badge-info-bg);
+  color: var(--info);
+}
+.badge-source-custom {
+  background: var(--badge-warning-bg);
+  color: var(--warning);
+}
+
+/* ─── Tool picker (Phase B) ────────────────────────────────────────────── */
+.tool-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+.tool-group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.tool-group-count {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.tool-row {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  align-items: start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: 1px solid transparent;
+  min-height: 40px;
+}
+.tool-row:hover {
+  background: var(--bg-hover);
+}
+.tool-row.selected {
+  border-color: var(--primary);
+  background: var(--badge-primary-bg);
+}
+.tool-row input[type="checkbox"] {
+  margin-top: 2px;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+}
+.tool-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.tool-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tool-desc {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Muted badge (disabled / unknown status) */
+.badge-muted {
+  background: var(--bg-hover, rgba(128, 128, 128, 0.15));
+  color: var(--text-muted);
+}
+
+/* ─── Check list (skills / guardrails / hooks) ─────────────────────────── */
+.check-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.check-row:hover {
+  background: var(--bg-hover);
+}
+.check-row.selected {
+  border-color: var(--primary);
+  background: var(--badge-primary-bg);
+}
+.check-row input[type="checkbox"] {
+  margin-top: 3px;
+  accent-color: var(--primary);
+}
+.check-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.check-name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-family: var(--font-mono, monospace);
+}
+.check-desc {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+/* ─── MCP tools drawer ─────────────────────────────────────────────────── */
+.mcp-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 2px;
+}
+.mcp-tool-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+
+/* ─── Skill instructions preview ──────────────────────────────────────── */
+pre.skill-instructions {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  max-height: 420px;
+  overflow-y: auto;
+  margin: 0;
+}
+
 /* ─── Messages / Alerts ────────────────────────────────────────────────── */
 .alert {
   padding: 12px 16px;
@@ -1303,6 +1498,9 @@ textarea {
 .modal-card {
   width: 100%;
   max-width: 480px;
+  max-height: calc(100vh - 40px);
+  display: flex;
+  flex-direction: column;
   background: var(--bg-elevated);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
@@ -1311,7 +1509,7 @@ textarea {
 }
 
 .modal-sm { max-width: 380px; }
-.modal-md { max-width: 560px; }
+.modal-md { max-width: 680px; }
 .modal-lg { max-width: 720px; }
 
 .modal-header {
@@ -1352,6 +1550,8 @@ textarea {
   font-size: 0.88rem;
   color: var(--text-secondary);
   line-height: 1.5;
+  flex: 1 1 auto;
+  overflow-y: auto;
 }
 
 .modal-footer {
@@ -1366,7 +1566,7 @@ textarea {
   width: 100%;
 }
 
-.modal-body .form-group input,
+.modal-body .form-group input:not([type="checkbox"]),
 .modal-body .form-group select,
 .modal-body .form-group textarea {
   width: 100%;

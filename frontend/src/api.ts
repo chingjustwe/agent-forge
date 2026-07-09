@@ -918,20 +918,121 @@ export async function acceptWorkspaceInvitation(token: string): Promise<{ worksp
 
 export type AgentFramework = "direct_llm" | "deepagents";
 
+export interface MemoryConfig {
+  enable_short_term: boolean;
+  enable_long_term: boolean;
+  recall_top_k: number;
+}
+
+export interface AgentSubagent {
+  /** Reference to an existing agent in the same workspace, used as a subagent. */
+  agent_id: string;
+  name: string | null;
+}
+
 export interface AgentConfig {
   id: string;
   workspace_id: string;
   name: string;
   framework: AgentFramework;
-  config: Record<string, unknown>;
-  system_prompt?: string;
-  model?: string;
-  temperature?: number;
-  max_tokens?: number;
-  subagents?: Array<{ name: string; description: string; system_prompt?: string; tools?: string[]; model?: string }>;
+  config: Record<string, unknown>;  // 保留向后兼容
+  // 结构化字段（从后端 _serialize_agent 返回）
+  system_prompt: string;
+  model: string;
+  temperature: number;
+  max_tokens: number;
+  tools: string[];
+  guardrails: string[];
+  skills: string[];
+  hooks: string[];
+  memory_config: MemoryConfig | null;
+  subagents: AgentSubagent[];
+  /** MCP server names (workspace-scoped) this agent is bound to. */
+  mcp_servers: string[];
   created_by: string;
   created_at: string;
   updated_at?: string;
+}
+
+/** A tool available to a workspace (builtin + MCP + custom). */
+export interface ToolInfo {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+  source: "builtin" | "mcp" | "custom";
+  timeout: number;
+}
+
+/** List all tools available to this workspace (builtin + MCP + custom). */
+export async function fetchAvailableTools(wsId: string): Promise<ToolInfo[]> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/tools`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to load tools");
+  }
+  return resp.json();
+}
+
+/** Which layer a skill originates from. */
+export type SkillLayer = "user" | "project" | "workspace";
+
+/** A skill available to a workspace, loaded from the SkillRegistry. */
+export interface SkillInfo {
+  name: string;
+  description: string;
+  tools: string[];
+  version: string;
+  /** Origin layer: user / project (read-only) or workspace (writable). */
+  layer: SkillLayer;
+  /** Whether this skill can be edited/deleted via the API (workspace only). */
+  editable: boolean;
+  /** Owning workspace id (workspace layer only; null otherwise). */
+  workspace_id: string | null;
+}
+
+/** List all skills available to this workspace. */
+export async function fetchAvailableSkills(wsId: string): Promise<SkillInfo[]> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/skills`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to load skills");
+  }
+  return resp.json();
+}
+
+/** A guardrail registered in the harness pipeline. */
+export interface GuardrailInfo {
+  name: string;
+  direction: string;
+  type: string;
+  description: string;
+}
+
+/** List all guardrails available to this workspace. */
+export async function fetchAvailableGuardrails(wsId: string): Promise<GuardrailInfo[]> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/guardrails`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to load guardrails");
+  }
+  return resp.json();
+}
+
+/** A lifecycle hook registered in the harness registry. */
+export interface HookInfo {
+  name: string;
+  events: string[];
+  description: string;
+}
+
+/** List all lifecycle hooks available to this workspace. */
+export async function fetchAvailableHooks(wsId: string): Promise<HookInfo[]> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/hooks`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to load hooks");
+  }
+  return resp.json();
 }
 
 export async function listAgents(wsId: string): Promise<AgentConfig[]> {
@@ -954,12 +1055,43 @@ export async function getAgent(wsId: string, agentId: string): Promise<AgentConf
 
 export async function createAgent(
   wsId: string,
-  data: { name: string; framework: AgentFramework; config?: Record<string, unknown> },
+  data: {
+    name: string;
+    framework: AgentFramework;
+    // 顶层结构化字段（替代旧的 config dict）
+    model?: string;
+    system_prompt?: string;
+    temperature?: number;
+    max_tokens?: number;
+    tools?: string[];
+    skills?: string[];
+    guardrails?: string[];
+    hooks?: string[];
+    memory_config?: MemoryConfig | null;
+    subagents?: { agent_id: string; name?: string | null }[];
+    mcp_servers?: string[];
+  },
 ): Promise<AgentConfig> {
+  const payload: Record<string, unknown> = {
+    name: data.name,
+    framework: data.framework,
+  };
+  // 仅发送被显式提供的字段；未提供的字段由后端保留默认值/原值。
+  if (data.model !== undefined) payload.model = data.model;
+  if (data.system_prompt !== undefined) payload.system_prompt = data.system_prompt;
+  if (data.temperature !== undefined) payload.temperature = data.temperature;
+  if (data.max_tokens !== undefined) payload.max_tokens = data.max_tokens;
+  if (data.tools !== undefined) payload.tools = data.tools;
+  if (data.skills !== undefined) payload.skills = data.skills;
+  if (data.guardrails !== undefined) payload.guardrails = data.guardrails;
+  if (data.hooks !== undefined) payload.hooks = data.hooks;
+  if (data.memory_config !== undefined) payload.memory_config = data.memory_config;
+  if (data.subagents !== undefined) payload.subagents = data.subagents;
+  if (data.mcp_servers !== undefined) payload.mcp_servers = data.mcp_servers;
   const resp = await apiFetch(`/api/v1/workspaces/${wsId}/agents`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: data.name, framework: data.framework, config: data.config || {} }),
+    body: JSON.stringify(payload),
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
@@ -971,12 +1103,40 @@ export async function createAgent(
 export async function updateAgent(
   wsId: string,
   agentId: string,
-  data: { name?: string; framework?: AgentFramework; config?: Record<string, unknown> },
+  data: {
+    name?: string;
+    framework?: AgentFramework;
+    model?: string;
+    system_prompt?: string;
+    temperature?: number;
+    max_tokens?: number;
+    tools?: string[];
+    skills?: string[];
+    guardrails?: string[];
+    hooks?: string[];
+    memory_config?: MemoryConfig | null;
+    subagents?: { agent_id: string; name?: string | null }[];
+    mcp_servers?: string[];
+  },
 ): Promise<AgentConfig> {
+  const payload: Record<string, unknown> = {};
+  if (data.name !== undefined) payload.name = data.name;
+  if (data.framework !== undefined) payload.framework = data.framework;
+  if (data.model !== undefined) payload.model = data.model;
+  if (data.system_prompt !== undefined) payload.system_prompt = data.system_prompt;
+  if (data.temperature !== undefined) payload.temperature = data.temperature;
+  if (data.max_tokens !== undefined) payload.max_tokens = data.max_tokens;
+  if (data.tools !== undefined) payload.tools = data.tools;
+  if (data.skills !== undefined) payload.skills = data.skills;
+  if (data.guardrails !== undefined) payload.guardrails = data.guardrails;
+  if (data.hooks !== undefined) payload.hooks = data.hooks;
+  if (data.memory_config !== undefined) payload.memory_config = data.memory_config;
+  if (data.subagents !== undefined) payload.subagents = data.subagents;
+  if (data.mcp_servers !== undefined) payload.mcp_servers = data.mcp_servers;
   const resp = await apiFetch(`/api/v1/workspaces/${wsId}/agents/${agentId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
+    body: JSON.stringify(payload),
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
@@ -992,6 +1152,181 @@ export async function deleteAgent(wsId: string, agentId: string): Promise<void> 
   if (!resp.ok && resp.status !== 204) {
     const err = await resp.json().catch(() => ({}));
     throw new Error(err.error?.message || "Failed to delete agent");
+  }
+}
+
+// ─── MCP Servers (P3a §6.3) ────────────────────────────────────────────────
+
+export interface MCPServerInfo {
+  name: string;
+  endpoint: string;
+  transport: string;
+  enabled: boolean;
+}
+
+export interface MCPToolInfo {
+  name: string;
+  description?: string;
+  input_schema?: Record<string, unknown>;
+}
+
+export async function listMCPServers(wsId: string): Promise<MCPServerInfo[]> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/mcp/servers`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to load MCP servers");
+  }
+  return resp.json();
+}
+
+export async function createMCPServer(
+  wsId: string,
+  data: { name: string; endpoint: string; transport?: string; auth_token?: string | null; enabled?: boolean },
+): Promise<MCPServerInfo> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/mcp/servers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to register MCP server");
+  }
+  return resp.json();
+}
+
+export async function updateMCPServer(
+  wsId: string,
+  name: string,
+  data: { endpoint?: string; transport?: string; auth_token?: string | null; enabled?: boolean },
+): Promise<MCPServerInfo> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/mcp/servers/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to update MCP server");
+  }
+  return resp.json();
+}
+
+export async function deleteMCPServer(wsId: string, name: string): Promise<void> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/mcp/servers/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok && resp.status !== 204) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to delete MCP server");
+  }
+}
+
+export async function discoverMCPTools(wsId: string, name: string): Promise<MCPToolInfo[]> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/mcp/servers/${encodeURIComponent(name)}/tools`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to discover MCP tools");
+  }
+  const data = await resp.json();
+  return data.tools || [];
+}
+
+export interface MCPHealthResult {
+  healthy: boolean;
+  error?: string | null;
+}
+
+export async function checkMCPHealth(wsId: string, name: string): Promise<MCPHealthResult> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/mcp/servers/${encodeURIComponent(name)}/health`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to check MCP health");
+  }
+  const data = await resp.json();
+  return { healthy: !!data.healthy, error: data.error ?? null };
+}
+
+// ─── Skills management (P3a §6.4) ──────────────────────────────────────────
+
+/** Hot-reload a single skill from disk. */
+export async function reloadSkill(wsId: string, name: string): Promise<SkillInfo> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/skills/${encodeURIComponent(name)}/reload`, {
+    method: "POST",
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to reload skill");
+  }
+  return resp.json();
+}
+
+/** Detailed skill content, including its markdown instructions. */
+export interface SkillDetail extends SkillInfo {
+  instructions: string;
+  required_memory: boolean;
+}
+
+/** Fetch a single skill's full content (instructions). */
+export async function fetchSkill(wsId: string, name: string): Promise<SkillDetail> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/skills/${encodeURIComponent(name)}`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to load skill");
+  }
+  return resp.json();
+}
+
+/** Payload for creating/updating a workspace-level skill. */
+export interface SkillPayload {
+  name?: string;
+  description?: string;
+  instructions?: string;
+  tools?: string[];
+  required_memory?: boolean;
+  version?: string;
+}
+
+/** Create a new workspace-level skill (default: DB backend). */
+export async function createSkill(wsId: string, payload: SkillPayload): Promise<SkillDetail> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/skills`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to create skill");
+  }
+  return resp.json();
+}
+
+/** Update an existing workspace-level skill. */
+export async function updateSkill(
+  wsId: string,
+  name: string,
+  payload: SkillPayload,
+): Promise<SkillDetail> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/skills/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to update skill");
+  }
+  return resp.json();
+}
+
+/** Delete a workspace-level skill. */
+export async function deleteSkill(wsId: string, name: string): Promise<void> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/skills/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to delete skill");
   }
 }
 

@@ -7,8 +7,18 @@ import {
   createAgent,
   deleteAgent,
   fetchAdminWorkspaces,
+  fetchAvailableGuardrails,
+  fetchAvailableHooks,
+  fetchAvailableSkills,
+  fetchAvailableTools,
   getCurrentUser,
+  GuardrailInfo,
+  HookInfo,
   listAgents,
+  listMCPServers,
+  MCPServerInfo,
+  SkillInfo,
+  ToolInfo,
   updateAgent,
   User,
 } from "../api";
@@ -32,6 +42,15 @@ const EMPTY_FORM: AgentFormState = {
   model: "",
   systemPrompt: "",
   temperature: "0.7",
+  maxTokens: "",
+  tools: [],
+  memoryEnabled: false,
+  memoryRecallTopK: "5",
+  skills: [],
+  guardrails: [],
+  hooks: [],
+  subagents: [],
+  mcp_servers: [],
 };
 
 interface AgentFormState {
@@ -40,23 +59,66 @@ interface AgentFormState {
   model: string;
   systemPrompt: string;
   temperature: string;
+  maxTokens: string;
+  tools: string[];
+  memoryEnabled: boolean;
+  memoryRecallTopK: string;
+  skills: string[];
+  guardrails: string[];
+  hooks: string[];
+  /** Selected existing agent ids that act as subagents (deepagents only). */
+  subagents: string[];
+  /** MCP server names (workspace-scoped) this agent is bound to. */
+  mcp_servers: string[];
 }
 
-function formToConfig(form: AgentFormState): Record<string, unknown> {
-  const cfg: Record<string, unknown> = {};
-  if (form.model.trim()) cfg.model = form.model.trim();
-  if (form.systemPrompt.trim()) cfg.system_prompt = form.systemPrompt.trim();
-  const t = parseFloat(form.temperature);
-  if (!isNaN(t)) cfg.temperature = t;
-  return cfg;
+/** 表单 → 请求体载荷：所有结构化字段作为顶层字段发送，而非塞进 config dict。 */
+interface AgentPayload {
+  name: string;
+  framework: AgentFramework;
+  model?: string;
+  system_prompt?: string;
+  temperature?: number;
+  max_tokens?: number;
+  tools?: string[];
+  memory_config?: { enable_short_term: boolean; enable_long_term: boolean; recall_top_k: number } | null;
+  skills?: string[];
+  guardrails?: string[];
+  hooks?: string[];
+  subagents?: Array<{ agent_id: string }>;
+  mcp_servers?: string[];
 }
 
-function configFields(config: Record<string, unknown>): { model: string; systemPrompt: string; temperature: string } {
-  return {
-    model: typeof config.model === "string" ? config.model : "",
-    systemPrompt: typeof config.system_prompt === "string" ? config.system_prompt : "",
-    temperature: typeof config.temperature === "number" ? String(config.temperature) : "0.7",
+function formToPayload(form: AgentFormState): AgentPayload {
+  const payload: AgentPayload = {
+    name: form.name.trim(),
+    framework: form.framework,
   };
+  if (form.model.trim()) payload.model = form.model.trim();
+  if (form.systemPrompt.trim()) payload.system_prompt = form.systemPrompt.trim();
+  const t = parseFloat(form.temperature);
+  if (!isNaN(t)) payload.temperature = t;
+  const mt = parseInt(form.maxTokens, 10);
+  if (!isNaN(mt) && mt > 0) payload.max_tokens = mt;
+  // 工具白名单：始终发送（空数组表示清空）
+  payload.tools = form.tools;
+  // 内存配置
+  payload.memory_config = form.memoryEnabled
+    ? {
+        enable_short_term: true,
+        enable_long_term: true,
+        recall_top_k: parseInt(form.memoryRecallTopK, 10) || 5,
+      }
+    : null;
+  // Phase C: skills / guardrails / hooks / subagents — 始终发送（空数组表示清空）
+  payload.skills = form.skills;
+  payload.guardrails = form.guardrails;
+  payload.hooks = form.hooks;
+  // Subagents are references to existing agents (deepagents only).
+  payload.subagents = form.subagents.map(id => ({ agent_id: id }));
+  // MCP server binding: agent gets every tool exposed by each selected server.
+  payload.mcp_servers = form.mcp_servers;
+  return payload;
 }
 
 export default function Agents() {
@@ -83,7 +145,20 @@ export default function Agents() {
   const [targetWorkspaces, setTargetWorkspaces] = useState<AdminWorkspace[]>([]);
   const [copying, setCopying] = useState(false);
 
+  // Phase B: list of tools available for the multi-select whitelist.
+  const [availableTools, setAvailableTools] = useState<ToolInfo[]>([]);
+  // Phase C: lists for skills / guardrails / hooks multi-selects.
+  const [availableSkills, setAvailableSkills] = useState<SkillInfo[]>([]);
+  const [availableGuardrails, setAvailableGuardrails] = useState<GuardrailInfo[]>([]);
+  const [availableHooks, setAvailableHooks] = useState<HookInfo[]>([]);
+  // Phase 5: MCP servers available to bind to this agent.
+  const [availableMCPServers, setAvailableMCPServers] = useState<MCPServerInfo[]>([]);
+
   const isTenantAdmin = user?.role === "tenant_admin";
+
+  // Agents eligible to be used as subagents: every agent in the workspace
+  // except the one currently being edited (self-reference is not allowed).
+  const candidateSubagents = agents.filter(a => a.id !== editingId);
 
   const canManage =
     currentRole === "workspace_admin" ||
@@ -111,6 +186,19 @@ export default function Agents() {
   useEffect(() => {
     getCurrentUser().then(setUser).catch(() => {});
   }, []);
+
+  // Phase B/C: when the create/edit modal opens, fetch the available tool /
+  // skill / guardrail / hook lists used by the multi-selects.
+  useEffect(() => {
+    if (formModalOpen && currentWorkspaceId) {
+      const ws = currentWorkspaceId;
+      fetchAvailableTools(ws).then(setAvailableTools).catch(() => setAvailableTools([]));
+      fetchAvailableSkills(ws).then(setAvailableSkills).catch(() => setAvailableSkills([]));
+      fetchAvailableGuardrails(ws).then(setAvailableGuardrails).catch(() => setAvailableGuardrails([]));
+      fetchAvailableHooks(ws).then(setAvailableHooks).catch(() => setAvailableHooks([]));
+      listMCPServers(ws).then(setAvailableMCPServers).catch(() => setAvailableMCPServers([]));
+    }
+  }, [formModalOpen, currentWorkspaceId]);
 
   // P3-2: load the target-workspace list when the copy modal opens.
   async function openCopyModal(agent: AgentConfig) {
@@ -153,13 +241,23 @@ export default function Agents() {
   }
 
   function startEdit(agent: AgentConfig) {
-    const cfg = configFields(agent.config || {});
     setForm({
       name: agent.name,
       framework: agent.framework,
-      model: cfg.model,
-      systemPrompt: cfg.systemPrompt,
-      temperature: cfg.temperature,
+      model: agent.model || "",
+      systemPrompt: agent.system_prompt || "",
+      temperature: agent.temperature !== undefined ? String(agent.temperature) : "0.7",
+      maxTokens: agent.max_tokens !== undefined ? String(agent.max_tokens) : "",
+      tools: agent.tools || [],
+      memoryEnabled: !!(agent.memory_config?.enable_long_term),
+      memoryRecallTopK: String(agent.memory_config?.recall_top_k || 5),
+      skills: agent.skills || [],
+      guardrails: agent.guardrails || [],
+      hooks: agent.hooks || [],
+      subagents: (agent.subagents || [])
+        .map(s => (typeof s.agent_id === "string" ? s.agent_id : ""))
+        .filter(Boolean),
+      mcp_servers: agent.mcp_servers || [],
     });
     setEditingId(agent.id);
     setFormModalOpen(true);
@@ -177,20 +275,12 @@ export default function Agents() {
     }
     setSaving(true);
     try {
-      const config = formToConfig(form);
+      const payload = formToPayload(form);
       if (editingId) {
-        await updateAgent(currentWorkspaceId, editingId, {
-          name: form.name.trim(),
-          framework: form.framework,
-          config,
-        });
+        await updateAgent(currentWorkspaceId, editingId, payload);
         toast.success("Agent updated");
       } else {
-        await createAgent(currentWorkspaceId, {
-          name: form.name.trim(),
-          framework: form.framework,
-          config,
-        });
+        await createAgent(currentWorkspaceId, payload);
         toast.success("Agent created");
       }
       setFormModalOpen(false);
@@ -271,7 +361,7 @@ export default function Agents() {
             </thead>
             <tbody>
               {agents.map(agent => {
-                const model = typeof agent.config?.model === "string" ? agent.config.model : "";
+                const model = agent.model || "";
                 return (
                   <tr key={agent.id}>
                     <td>{agent.name}</td>
@@ -352,6 +442,47 @@ export default function Agents() {
             />
           </div>
           <div className="form-group">
+            <label className="form-label">Tools</label>
+            {availableTools.length === 0 ? (
+              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
+                No tools available for this workspace.
+              </p>
+            ) : (
+              <ToolPicker
+                tools={availableTools}
+                selected={form.tools}
+                onToggle={(name) => {
+                  const next = form.tools.includes(name)
+                    ? form.tools.filter(t => t !== name)
+                    : [...form.tools, name];
+                  setForm({ ...form, tools: next });
+                }}
+              />
+            )}
+          </div>
+          <div className="form-group">
+            <label className="form-label">MCP Servers</label>
+            <p style={{ color: "var(--text-secondary)", fontSize: "0.82rem", margin: "0 0 8px" }}>
+              Bind this agent to workspace MCP servers. The agent gets access to <strong>every tool</strong> exposed by each selected server (in addition to the tools chosen above).
+            </p>
+            {availableMCPServers.length === 0 ? (
+              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
+                No MCP servers registered in this workspace. Add one under Admin → MCP Servers.
+              </p>
+            ) : (
+              <CheckList
+                items={availableMCPServers.map(s => ({ name: s.name, description: s.endpoint }))}
+                selected={form.mcp_servers}
+                onToggle={(name) => {
+                  const next = form.mcp_servers.includes(name)
+                    ? form.mcp_servers.filter(t => t !== name)
+                    : [...form.mcp_servers, name];
+                  setForm({ ...form, mcp_servers: next });
+                }}
+              />
+            )}
+          </div>
+          <div className="form-group">
             <label className="form-label">Temperature</label>
             <input
               type="number"
@@ -361,6 +492,143 @@ export default function Agents() {
               value={form.temperature}
               onChange={e => setForm({ ...form, temperature: e.target.value })}
             />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Max Tokens</label>
+            <input
+              type="number"
+              min="1"
+              max="32768"
+              value={form.maxTokens}
+              onChange={e => setForm({ ...form, maxTokens: e.target.value })}
+              placeholder="4096"
+            />
+          </div>
+          <div className="form-group">
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={form.memoryEnabled}
+                onChange={e => setForm({ ...form, memoryEnabled: e.target.checked })}
+              />
+              Enable Long-Term Memory
+            </label>
+            {form.memoryEnabled && (
+              <div style={{ marginTop: 8 }}>
+                <label className="form-label">Recall Top-K</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={form.memoryRecallTopK}
+                  onChange={e => setForm({ ...form, memoryRecallTopK: e.target.value })}
+                  placeholder="5"
+                />
+              </div>
+            )}
+          </div>
+          <div className="form-group">
+            <label className="form-label">Skills</label>
+            {availableSkills.length === 0 ? (
+              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
+                No skills available for this workspace.
+              </p>
+            ) : (
+              <CheckList
+                items={availableSkills.map(s => ({
+                  name: s.name,
+                  description: `${s.layer}${s.description ? " · " + s.description : ""}`,
+                }))}
+                selected={form.skills}
+                onToggle={(name) => {
+                  const next = form.skills.includes(name)
+                    ? form.skills.filter(t => t !== name)
+                    : [...form.skills, name];
+                  setForm({ ...form, skills: next });
+                }}
+              />
+            )}
+          </div>
+          {form.framework === "deepagents" && (
+            <div className="form-group">
+              <label className="form-label">Subagents</label>
+              <p style={{ color: "var(--text-secondary)", fontSize: "0.82rem", margin: "0 0 8px" }}>
+                Select existing agents in this workspace to use as subagents.
+              </p>
+              {candidateSubagents.length === 0 ? (
+                <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
+                  No other agents available in this workspace.
+                </p>
+              ) : (
+                <div className="check-list">
+                  {candidateSubagents.map(a => {
+                    const checked = form.subagents.includes(a.id);
+                    return (
+                      <label
+                        key={a.id}
+                        className={`check-row${checked ? " selected" : ""}`}
+                        title={a.name}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            const next = checked
+                              ? form.subagents.filter(id => id !== a.id)
+                              : [...form.subagents, a.id];
+                            setForm({ ...form, subagents: next });
+                          }}
+                        />
+                        <span className="check-meta">
+                          <span className="check-name">{a.name}</span>
+                          <span className="check-desc">
+                            {a.framework}{a.model ? ` · ${a.model}` : ""}
+                          </span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="form-group">
+            <label className="form-label">Guardrails</label>
+            {availableGuardrails.length === 0 ? (
+              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
+                No guardrails available for this workspace.
+              </p>
+            ) : (
+              <CheckList
+                items={availableGuardrails.map(g => ({ name: g.name, description: g.description }))}
+                selected={form.guardrails}
+                onToggle={(name) => {
+                  const next = form.guardrails.includes(name)
+                    ? form.guardrails.filter(t => t !== name)
+                    : [...form.guardrails, name];
+                  setForm({ ...form, guardrails: next });
+                }}
+              />
+            )}
+          </div>
+          <div className="form-group">
+            <label className="form-label">Hooks</label>
+            {availableHooks.length === 0 ? (
+              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
+                No hooks available for this workspace.
+              </p>
+            ) : (
+              <CheckList
+                items={availableHooks.map(h => ({ name: h.name, description: h.description }))}
+                selected={form.hooks}
+                onToggle={(name) => {
+                  const next = form.hooks.includes(name)
+                    ? form.hooks.filter(t => t !== name)
+                    : [...form.hooks, name];
+                  setForm({ ...form, hooks: next });
+                }}
+              />
+            )}
           </div>
         </div>
       </Modal>
@@ -415,6 +683,95 @@ export default function Agents() {
           )}
         </div>
       </Modal>
+    </div>
+  );
+}
+
+// Phase B: grouped, multi-select tool whitelist.
+const SOURCE_ORDER: ToolInfo["source"][] = ["builtin", "mcp", "custom"];
+const SOURCE_LABELS: Record<ToolInfo["source"], string> = {
+  builtin: "Builtin",
+  mcp: "MCP",
+  custom: "Custom",
+};
+
+function ToolPicker({
+  tools,
+  selected,
+  onToggle,
+}: {
+  tools: ToolInfo[];
+  selected: string[];
+  onToggle: (name: string) => void;
+}) {
+  const grouped: Record<string, ToolInfo[]> = {};
+  for (const t of tools) {
+    (grouped[t.source] ||= []).push(t);
+  }
+  return (
+    <div className="tool-picker">
+      {SOURCE_ORDER.filter(src => grouped[src]?.length).map(src => (
+        <div key={src} className="tool-group">
+          <div className="tool-group-title">
+            <span className={`badge badge-source-${src}`}>{SOURCE_LABELS[src]}</span>
+            <span className="tool-group-count">{grouped[src].length}</span>
+          </div>
+          {grouped[src].map(tool => {
+            const checked = selected.includes(tool.name);
+            return (
+              <label key={tool.name} className={`tool-row${checked ? " selected" : ""}`}>
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={() => onToggle(tool.name)}
+                />
+                <span className="tool-meta">
+                  <span className="tool-name" title={tool.name}>{tool.name}</span>
+                  <span className="tool-desc" title={tool.description || undefined}>{tool.description || "—"}</span>
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Phase C: generic checkbox list (skills / guardrails / hooks).
+function CheckList({
+  items,
+  selected,
+  onToggle,
+}: {
+  items: { name: string; description?: string }[];
+  selected: string[];
+  onToggle: (name: string) => void;
+}) {
+  return (
+    <div className="check-list">
+      {items.map(item => {
+        const checked = selected.includes(item.name);
+        return (
+          <label
+            key={item.name}
+            className={`check-row${checked ? " selected" : ""}`}
+            title={item.name}
+          >
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={() => onToggle(item.name)}
+            />
+            <span className="check-meta">
+              <span className="check-name">{item.name}</span>
+              {item.description && (
+                <span className="check-desc">{item.description}</span>
+              )}
+            </span>
+          </label>
+        );
+      })}
     </div>
   );
 }

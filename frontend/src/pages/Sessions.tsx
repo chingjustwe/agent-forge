@@ -238,6 +238,12 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
   const navigate = useNavigate();
   const toast = useToast();
 
+  // Tracks a session id that was just created client-side during an in-flight
+  // stream. When the URL updates to this id, the load effect must NOT re-fetch
+  // from the server -- doing so would clobber the live streaming messages that
+  // haven't been persisted yet (e.g. the assistant response mid-stream).
+  const justCreatedIdRef = useRef<string | null>(null);
+
   // Agent selector state. Workspace must have at least one agent to chat.
   const [agents, setAgents] = useState<AgentConfig[]>([]);
   const [selectedAgentName, setSelectedAgentName] = useState("");
@@ -272,6 +278,17 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
       // New session: no need to load from server. Show a blank chat UI.
       setSession(null);
       setMessages([]);
+      setLoading(false);
+      return;
+    }
+    // Skip the reload when the URL just switched to a session we created
+    // client-side during an active stream. The local `messages` state already
+    // holds the live (and still-streaming) conversation; re-fetching here would
+    // overwrite it and drop the in-progress assistant response.
+    if (justCreatedIdRef.current === sessionId) {
+      // Consume the flag: this guard only applies to the single new->id URL
+      // transition. A later revisit to the same id should reload from server.
+      justCreatedIdRef.current = null;
       setLoading(false);
       return;
     }
@@ -372,8 +389,12 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
               created_at: new Date().toISOString(),
               updated_at: new Date().toISOString(),
             } as ChatSessionInfo);
-            // Replace the URL so a refresh keeps the new session id,
-            // without triggering a re-render of the (now stale) new route.
+            // Mark this id as client-created BEFORE navigating so the load
+            // effect (which fires when sessionId changes from "new") skips the
+            // server re-fetch and preserves the live streaming messages.
+            justCreatedIdRef.current = newSessionId;
+            // Replace the URL so a refresh keeps the new session id, without
+            // clobbering the in-progress conversation.
             navigate(`/sessions/${newSessionId}`, { replace: true });
           }
           continue;

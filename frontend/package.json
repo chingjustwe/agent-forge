@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build"
+    "check:no-js": "node scripts/check-no-js.mjs",
+    "lint": "npm run check:no-js",
+    "build": "tsc -b && npm run check:no-js && vite build"
   },
   "dependencies": {
     "react": "^18.3.1",
