@@ -229,3 +229,130 @@ class TestSkillRegistry:
         assert skills == []
         # list() auto-scans when cache is empty; still empty
         assert await reg.list() == []
+
+
+# ── TestSkillLayers ─────────────────────────────────────────────────────
+
+
+def _write_skill(d, name, *, description="", body="body"):
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name}.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n"
+    )
+
+
+class TestSkillLayers:
+    def _reg(self, tmp_path):
+        from src.runtime.harness.skill_store import FilesystemSkillStore
+
+        user_dir = tmp_path / "user"
+        project_dir = tmp_path / "agents" / "skills"
+        store = FilesystemSkillStore(tmp_path / "store")
+        return (
+            SkillRegistry(user_dir=user_dir, project_dir=project_dir, store=store),
+            user_dir,
+            project_dir,
+            store,
+        )
+
+    @pytest.mark.asyncio
+    async def test_scan_tags_layers(self, tmp_path):
+        reg, user_dir, project_dir, _ = self._reg(tmp_path)
+        _write_skill(user_dir, "u-skill")
+        _write_skill(project_dir, "p-skill")
+        await reg.scan()
+        by_name = {s.name: s for s in await reg.list()}
+        assert by_name["u-skill"].layer == "user"
+        assert by_name["u-skill"].editable is False
+        assert by_name["p-skill"].layer == "project"
+
+    @pytest.mark.asyncio
+    async def test_list_merges_workspace_layer(self, tmp_path):
+        reg, user_dir, project_dir, store = self._reg(tmp_path)
+        _write_skill(project_dir, "p-skill")
+        await reg.scan()
+        await store.save(
+            "ws-1",
+            SkillPackage(name="w-skill", instructions="ws body"),
+        )
+        names = {s.name: s.layer for s in await reg.list("ws-1")}
+        assert names["p-skill"] == "project"
+        assert names["w-skill"] == "workspace"
+        # Without a workspace_id the workspace layer is not included.
+        names_global = {s.name for s in await reg.list()}
+        assert "w-skill" not in names_global
+
+    @pytest.mark.asyncio
+    async def test_project_overrides_user(self, tmp_path):
+        reg, user_dir, project_dir, _ = self._reg(tmp_path)
+        _write_skill(user_dir, "shared", body="user body")
+        _write_skill(project_dir, "shared", body="project body")
+        await reg.scan()
+        loaded = await reg.load("shared")
+        assert loaded.layer == "project"
+        assert "project body" in loaded.instructions
+
+    @pytest.mark.asyncio
+    async def test_workspace_overrides_directory_layers(self, tmp_path):
+        reg, user_dir, project_dir, store = self._reg(tmp_path)
+        _write_skill(project_dir, "shared", body="project body")
+        await reg.scan()
+        await store.save(
+            "ws-1",
+            SkillPackage(name="shared", instructions="workspace body"),
+        )
+        loaded = await reg.load("shared", "ws-1")
+        assert loaded.layer == "workspace"
+        assert "workspace body" in loaded.instructions
+        # Different workspace does not see it → falls back to project.
+        fallback = await reg.load("shared", "ws-other")
+        assert fallback.layer == "project"
+
+    @pytest.mark.asyncio
+    async def test_get_readonly_ignores_store(self, tmp_path):
+        reg, user_dir, project_dir, store = self._reg(tmp_path)
+        _write_skill(project_dir, "p-skill")
+        await reg.scan()
+        await store.save("ws-1", SkillPackage(name="w-skill"))
+        ro = await reg.get_readonly("p-skill")
+        assert ro.layer == "project"
+        with pytest.raises(KeyError):
+            await reg.get_readonly("w-skill")
+
+    @pytest.mark.asyncio
+    async def test_legacy_project_dir_scanned(self, tmp_path):
+        # Backward compatibility: an extra legacy dir added via add_dir is
+        # scanned as the project layer (this is how registry.create wires the
+        # old ``.agents/skills`` alongside ``agents/skills``).
+        project_dir = tmp_path / "agents" / "skills"
+        legacy_dir = tmp_path / ".agents" / "skills"
+        _write_skill(legacy_dir, "legacy-skill")
+        reg = SkillRegistry(user_dir=None, project_dir=project_dir, store=None)
+        reg.add_dir(legacy_dir, "project")
+        await reg.scan()
+        names = {s.name for s in await reg.list()}
+        assert "legacy-skill" in names
+
+    @pytest.mark.asyncio
+    async def test_nested_skill_dir_with_skill_md(self, tmp_path):
+        # Real-world layout: each skill is a folder containing SKILL.md
+        # (e.g. ~/.agents/skills/fastapi-python/SKILL.md). The scanner must
+        # discover it and name it after the folder, not "SKILL".
+        reg, user_dir, project_dir, _ = self._reg(tmp_path)
+        skill_dir = project_dir / "fastapi-python"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: fastapi-python\ndescription: FastAPI tips\n---\n\nuse pydantic\n"
+        )
+        await reg.scan()
+        by_name = {s.name: s for s in await reg.list()}
+        assert "fastapi-python" in by_name
+        assert by_name["fastapi-python"].layer == "project"
+        assert by_name["fastapi-python"].file_path.endswith("SKILL.md")
+        # Cold-load path also resolves the nested layout.
+        loaded = await reg.load("fastapi-python")
+        assert loaded.layer == "project"
+        assert "use pydantic" in loaded.instructions
+        # Reload works for nested directories too.
+        reloaded = await reg.reload("fastapi-python")
+        assert reloaded.name == "fastapi-python"
