@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Column, String, Integer, Float, DateTime, JSON, ForeignKey, Text, text
+from sqlalchemy import Column, String, Integer, Float, DateTime, JSON, ForeignKey, Text, text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -307,6 +307,10 @@ class AgentConfig(Base):
     # Phase 4 (M17): subagent specs (list of SubagentSpec dicts).
     # Only used when framework='deepagents'. Empty list = no subagents.
     subagents: Mapped[list] = mapped_column(JSON, default=list)
+    # Phase 5 (M20): MCP servers this agent is explicitly bound to.
+    # The agent gets access to EVERY tool exposed by each selected server
+    # (union with ``tools``). Empty list = no MCP servers bound.
+    mcp_servers: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class ApiKey(Base):
@@ -372,3 +376,64 @@ class CheckpointWrite(Base):
     channel: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class MCPServer(Base):
+    """P3a §6.3: persisted MCP server registration, scoped per workspace.
+
+    Mirrors the ``mcp_servers`` table created by migration M14. ``MCPManager``
+    reads/writes this table so registrations survive process restarts (the
+    original P1 implementation was in-memory only and lost all servers on
+    restart).
+    """
+
+    __tablename__ = "mcp_servers"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("workspaces.id"), nullable=False, index=True
+    )
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    transport: Mapped[str] = mapped_column(String(20), default="http")
+    auth_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "name", name="uq_mcp_server_ws_name"),
+    )
+
+
+class Skill(Base):
+    """Workspace-scoped, UI-writable skill (Skills layers spec, M21).
+
+    The platform aggregates skills from three layers: ``user``
+    (``skill_user_dir``) and ``project`` (``agents/skills``) are read-only
+    directory sources; ``workspace`` skills live here (or in the filesystem
+    backend) and are editable via the API. Field semantics mirror
+    ``SkillPackage``: ``name / description / instructions / tools /
+    required_memory / version``. ``instructions`` is the markdown body
+    injected into the system prompt by ``PromptAssembler``.
+    """
+
+    __tablename__ = "skills"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    workspace_id: Mapped[str] = mapped_column(
+        String(32), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="")
+    instructions: Mapped[str] = mapped_column(Text, default="")
+    tools: Mapped[list] = mapped_column(JSON, default=list)
+    required_memory: Mapped[int] = mapped_column(Integer, default=0)
+    version: Mapped[str] = mapped_column(String(32), default="1.0")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, onupdate=_now, nullable=True
+    )
+
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "name", name="uq_skill_ws_name"),
+    )

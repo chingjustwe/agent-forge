@@ -24,6 +24,7 @@ from src.gateway.routes.mcp import router as mcp_router
 from src.gateway.routes.skills import router as skills_router
 from src.gateway.routes.memory import router as memory_router
 from src.gateway.routes.guardrails import router as guardrails_router
+from src.gateway.routes.hooks import router as hooks_router
 from src.gateway.routes.scheduler import router as scheduler_router
 from src.gateway.middleware.auth import AuthMiddleware
 from src.gateway.middleware.audit import AuditMiddleware
@@ -446,6 +447,44 @@ def _migrate_schema(sync_conn):
             except Exception as exc:  # pragma: no cover — defensive
                 print(f"[migration] M17 add subagents skipped: {exc}")
 
+    # Migration M20 (Phase 5): add ``mcp_servers`` JSON column to agent_configs.
+    # Declarative binding of an agent to workspace-scoped MCP servers; the
+    # agent receives every tool exposed by each selected server. Empty list
+    # (default) means no MCP servers bound. Idempotent: checks column list.
+    if "agent_configs" in tables:
+        cols = {c["name"] for c in insp.get_columns("agent_configs")}
+        if "mcp_servers" not in cols:
+            try:
+                sync_conn.exec_driver_sql(
+                    "ALTER TABLE agent_configs ADD COLUMN mcp_servers JSON DEFAULT '[]'"
+                )
+            except Exception as exc:  # pragma: no cover — defensive
+                print(f"[migration] M20 add mcp_servers skipped: {exc}")
+
+    # Migration M21 (Skills layers spec): create skills table (idempotent).
+    # Stores workspace-scoped, UI-writable skills (the "workspace" layer).
+    # The "user" / "project" layers remain read-only directory sources.
+    if "workspaces" in tables:
+        sync_conn.exec_driver_sql(
+            "CREATE TABLE IF NOT EXISTS skills ("
+            "id VARCHAR(32) NOT NULL PRIMARY KEY,"
+            "workspace_id VARCHAR(32) NOT NULL,"
+            "name VARCHAR(255) NOT NULL,"
+            "description TEXT DEFAULT '',"
+            "instructions TEXT DEFAULT '',"
+            "tools JSON DEFAULT '[]',"
+            "required_memory INTEGER DEFAULT 0,"
+            "version VARCHAR(32) DEFAULT '1.0',"
+            "created_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,"
+            "UNIQUE (workspace_id, name)"
+            ")"
+        )
+        sync_conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_skills_workspace_id "
+            "ON skills (workspace_id)"
+        )
+
     # Migration M18 (Phase 4c): checkpoint lookup index + pending-writes table.
     # The index speeds up ``load_latest`` (ORDER BY sequence DESC LIMIT 1)
     # and ``list`` (ORDER BY sequence ASC) for sessions with many checkpoints.
@@ -570,17 +609,28 @@ async def lifespan(app: FastAPI):
     # and HarnessRuntime (sole orchestrator). Both are idempotent —
     # HarnessRegistry.create() skips already-registered tools/guardrails,
     # and set_runtime() overwrites any previous instance.
-    from src.runtime.harness.registry import HarnessRegistry, reset_registry
+    from src.runtime.harness.registry import (
+        HarnessRegistry,
+        reset_registry,
+        set_registry,
+    )
     from src.runtime.harness.runtime import HarnessRuntime, set_runtime
 
     reset_registry()
     registry = HarnessRegistry.create()
     app.state.registry = registry
+    # Share the exact same instance with get_registry() used by route
+    # handlers — otherwise they'd lazily build a fresh (empty) registry and
+    # never see persisted MCP servers / the started scheduler.
+    set_registry(registry)
     app.state.runtime = HarnessRuntime(registry)
     set_runtime(app.state.runtime)
     # P3: inject runtime into scheduler and start it
     registry.scheduler.set_runtime(app.state.runtime)
     await registry.scheduler.start()
+
+    # P3a: load persisted MCP server registrations so they survive restarts.
+    await registry.mcp.load_from_db()
 
     yield
 
@@ -611,6 +661,7 @@ def create_app() -> FastAPI:
     app.include_router(skills_router)
     app.include_router(memory_router)
     app.include_router(guardrails_router)
+    app.include_router(hooks_router)
     app.include_router(scheduler_router)
 
     app.add_middleware(AuthMiddleware)

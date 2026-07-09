@@ -28,6 +28,7 @@ class GuardrailOut(BaseModel):
     name: str
     direction: str
     type: str = ""
+    description: str = ""
 
 
 class CreateGuardrailRequest(BaseModel):
@@ -50,6 +51,7 @@ async def list_guardrails(
             name=g.name,
             direction=getattr(g, "direction", "both"),
             type=_infer_type(g),
+            description=_infer_description(g, _infer_type(g)),
         ).model_dump()
         for g in pipeline.list()
     ]
@@ -127,3 +129,16 @@ def _infer_type(guardrail) -> str:
     if "quota" in cls_name:
         return "quota"
     return "custom"
+
+
+def _infer_description(guardrail, gtype: str) -> str:
+    """Best-effort human-readable description for the frontend picker."""
+    direction = getattr(guardrail, "direction", "both")
+    base = {
+        "content_filter": "Blocks messages matching forbidden keywords/patterns.",
+        "pii_redaction": "Redacts emails, phone numbers, and SSNs from messages.",
+        "policy": "Enforces per-workspace model/tool allow-list policy.",
+        "quota": "Enforces workspace token/cost quota limits.",
+        "custom": f"Custom guardrail: {getattr(guardrail, 'name', gtype)}.",
+    }.get(gtype, f"Guardrail: {getattr(guardrail, 'name', gtype)}.")
+    return f"{base} (applies to {direction})"

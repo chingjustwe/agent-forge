@@ -91,6 +91,28 @@ class HarnessRegistry:
         """
         registry = cls()
 
+        # ── Wire the layered SkillRegistry (Skills layers spec) ──
+        from pathlib import Path
+
+        from src.infra.settings import settings
+
+        from .skill_store import build_skill_store
+
+        store = build_skill_store(
+            settings.skill_store_backend, fs_root=settings.skill_fs_root
+        )
+        registry.skills = SkillRegistry(
+            user_dir=Path(settings.skill_user_dir),
+            project_dir=Path("agents") / "skills",
+            store=store,
+        )
+        # Backward compatibility: the legacy project skill directory lived at
+        # the repo-root ``.agents/skills``. Scan it too (project layer) so
+        # existing skills keep loading after the rename to ``agents/skills``.
+        legacy_project = Path(".agents") / "skills"
+        if legacy_project.is_dir():
+            registry.skills.add_dir(legacy_project, "project")
+
         # ── Scan for skill files (P2) ──
         import asyncio
         try:
@@ -159,6 +181,18 @@ def get_registry() -> HarnessRegistry:
     if registry is None:
         registry = HarnessRegistry.create()
     return registry
+
+
+def set_registry(r: HarnessRegistry) -> None:
+    """Install the wired singleton (called by ``main.py`` lifespan).
+
+    Without this, ``get_registry()`` lazily creates a *fresh* registry on the
+    first route call — which would be a different ``MCPManager`` instance
+    than the one the lifespan loaded from the DB, so persisted MCP servers
+    (and the started scheduler) would never be visible to request handlers.
+    """
+    global registry
+    registry = r
 
 
 def reset_registry() -> None:

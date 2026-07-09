@@ -20,6 +20,7 @@ roles:
       - memory:read
       - guardrails:read
       - mcp:read
+      - hooks:read
       - scheduler:read
 
   member:
@@ -35,6 +36,7 @@ roles:
       - memory:write
       - guardrails:read
       - mcp:read
+      - hooks:read
       - scheduler:read
 
   workspace_admin:
@@ -60,12 +62,14 @@ roles:
       - tools:read
       - tools:write
       - skills:read
+      - skills:write
       - memory:read
       - memory:write
       - guardrails:read
       - guardrails:write
       - mcp:read
       - mcp:write
+      - hooks:read
       - scheduler:read
       - scheduler:write
       # scoped admin — 仅能看到自己管理的工作区数据
@@ -90,7 +94,8 @@ frontend_tabs:
   /skills:           skills:read
   /memory:           memory:read
   /guardrails:       guardrails:read
-  /mcp:              mcp:read
+  /admin/mcp:        mcp:read
+  /admin/skills:      skills:read
   /scheduler:        scheduler:read
   /api-keys:         api_keys:read
   /admin:            admin:workspaces:read

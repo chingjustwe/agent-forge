@@ -1,3 +1,6 @@
+from pathlib import Path
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +30,16 @@ class Settings(BaseSettings):
     langsmith_api_key: str = ""
     langsmith_project: str = "agent-platform"
     langsmith_endpoint: str = "https://api.smith.langchain.com"
+
+    # ── Skills (Skills layers spec) ──
+    # Writable backend for the workspace layer: "db" (default) persists to
+    # the ``skills`` table; "filesystem" writes markdown files under
+    # ``skill_fs_root``.
+    skill_store_backend: Literal["db", "filesystem"] = "db"
+    skill_fs_root: str = "./data/skills"
+    # User-level skill directory (the "user" layer). Defaults to
+    # ~/.agents/skills; override for container deployments via a mounted path.
+    skill_user_dir: str = str(Path.home() / ".agents" / "skills")
 
 
 settings = Settings()
