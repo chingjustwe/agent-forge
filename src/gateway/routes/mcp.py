@@ -110,7 +110,7 @@ async def update_mcp_server(
             status_code=404,
             content={"error": {"code": "NOT_FOUND", "message": f"MCP server {name!r} not found"}},
         )
-    # Re-register with updated fields
+    # Re-register with updated fields (preserving created_at).
     updated = MCPServerConfig(
         name=existing.name,
         workspace_id=existing.workspace_id,
@@ -118,6 +118,7 @@ async def update_mcp_server(
         transport=body.transport or existing.transport,
         auth_token=body.auth_token if body.auth_token is not None else existing.auth_token,
         enabled=body.enabled if body.enabled is not None else existing.enabled,
+        created_at=existing.created_at,
     )
     await mcp.register_server(updated)
     return MCPServerOut(
@@ -168,7 +169,7 @@ async def discover_mcp_tools(
         )
 
 
-@router.post("/api/v1/workspaces/{workspace_id}/mcp/servers/{name}/health")
+@router.get("/api/v1/workspaces/{workspace_id}/mcp/servers/{name}/health")
 async def check_mcp_health(
     workspace_id: str,
     name: str,
@@ -181,5 +182,5 @@ async def check_mcp_health(
             status_code=404,
             content={"error": {"code": "NOT_FOUND", "message": f"MCP server {name!r} not found"}},
         )
-    healthy = await mcp.health_check(name, workspace_id)
-    return {"healthy": healthy}
+    healthy, error = await mcp.health_check(name, workspace_id)
+    return {"healthy": healthy, "error": error}

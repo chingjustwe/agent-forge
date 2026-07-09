@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,21 +36,44 @@ class MemoryConfig(BaseModel):
 class SubagentSpec(BaseModel):
     """Declarative subagent definition stored in ``AgentDefinition.subagents``.
 
-    Mirrors deepagents' SubAgent dict shape but uses our field names
-    for consistency with ``AgentDefinition``. ``SubagentMapper.to_subagents()``
-    (Phase 4b) converts these to the dict shape deepagents expects.
+    Two shapes are accepted:
+
+    - **Reference** (preferred, UI-driven): only ``agent_id`` set. The
+      runtime resolves it to a full spec via the referenced agent's own
+      config (system_prompt / tools / model / skills) at run time — see
+      ``HarnessRuntime._resolve_subagent_refs``. ``name`` may carry a
+      denormalized display label.
+    - **Inline** (legacy / API-imported): ``name`` + ``description`` +
+      ``system_prompt`` provided directly.
+
+    ``SubagentMapper.to_subagents()`` (Phase 4b) converts these to the
+    dict shape deepagents expects. It only ever receives *resolved* (full)
+    specs — references are expanded before the adapter runs.
 
     Per spec D9: if ``tools`` is empty the subagent receives NO tools
     (not the parent's set). This is the opposite of deepagents' default
     and is a defense-in-depth measure.
     """
 
-    name: str
-    description: str
-    system_prompt: str
+    agent_id: str | None = None  # reference mode: points at an existing agent
+    name: str = ""
+    description: str = ""
+    system_prompt: str = ""
     tools: list[str] = Field(default_factory=list)
     model: str | None = None  # None = inherit parent agent's model
     skills: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _require_ref_or_full(self) -> "SubagentSpec":
+        """A spec must be either a reference or a complete inline definition."""
+        if self.agent_id:
+            return self
+        if not self.name or not self.description or not self.system_prompt:
+            raise ValueError(
+                "SubagentSpec requires either 'agent_id' or all of "
+                "name/description/system_prompt"
+            )
+        return self
 
 
 class AgentDefinition(BaseModel):
@@ -80,6 +103,10 @@ class AgentDefinition(BaseModel):
     adapter: Literal["direct_llm", "deepagents"] = "direct_llm"
     # Phase 4 (spec D3): subagent specs; only used when adapter="deepagents"
     subagents: list[SubagentSpec] = Field(default_factory=list)
+    # Phase 5: explicitly bound MCP servers (workspace-scoped names). The
+    # agent receives every tool exposed by each selected server (union with
+    # ``tools``). Empty list = no MCP servers bound.
+    mcp_servers: list[str] = Field(default_factory=list)
     metadata: dict = Field(default_factory=dict)
     created_by: str = ""
     created_at: datetime | None = None
@@ -120,6 +147,7 @@ class AgentRegistry:
         memory_config: dict | None = None,
         metadata: dict | None = None,
         subagents: list[dict] | None = None,
+        mcp_servers: list[str] | None = None,
     ) -> AgentDefinition:
         """Insert a new agent row and return the Pydantic model.
 
@@ -153,6 +181,7 @@ class AgentRegistry:
             hooks=hooks or [],
             memory_config=memory_config,
             subagents=subagents or [],
+            mcp_servers=mcp_servers or [],
         )
         db.add(row)
         await db.flush()
@@ -218,11 +247,12 @@ class AgentRegistry:
             "guardrails",
             "skills",
             "hooks",
-            "memory_config",
-            "metadata",
-            "config",
-            "subagents",
-        }
+        "memory_config",
+        "metadata",
+        "config",
+        "subagents",
+        "mcp_servers",
+    }
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"Unknown agent fields: {sorted(unknown)}")
@@ -276,6 +306,7 @@ class AgentRegistry:
             memory=memory_cfg,
             adapter=row.framework,
             subagents=subagent_specs,
+            mcp_servers=row.mcp_servers or [],
             metadata=row.config or {},
             created_by=row.created_by or "",
             created_at=row.created_at,

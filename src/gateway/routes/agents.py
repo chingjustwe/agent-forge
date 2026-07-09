@@ -42,18 +42,14 @@ class MemoryConfigPayload(BaseModel):
     recall_top_k: int = 5
 
 
-class SubagentPayload(BaseModel):
-    """Phase 4b: subagent definition accepted by POST/PATCH /agents.
-
-    Mirrors ``SubagentSpec`` (agents.py) but kept as a separate API
-    model so the harness layer stays API-agnostic.
+class SubagentRefPayload(BaseModel):
+    """Phase 4b: a subagent is a *reference* to an existing agent in the
+    same workspace (selected from a dropdown in the UI), not an inline
+    definition. The runtime resolves ``agent_id`` into a full subagent
+    spec at run time (see ``HarnessRuntime._resolve_subagent_refs``).
     """
-    name: str = Field(..., min_length=1, max_length=100)
-    description: str = Field(..., min_length=1)
-    system_prompt: str = Field(..., min_length=1)
-    tools: list[str] = Field(default_factory=list)
-    model: str | None = None  # None = inherit parent's model
-    skills: list[str] = Field(default_factory=list)
+    agent_id: str = Field(..., min_length=1)
+    name: str | None = None  # denormalized display name (optional)
 
 
 class CreateAgentRequest(BaseModel):
@@ -70,8 +66,11 @@ class CreateAgentRequest(BaseModel):
     skills: list[str] | None = None
     hooks: list[str] | None = None
     memory_config: MemoryConfigPayload | None = None
-    # Phase 4b: subagent specs (only used when framework="deepagents").
-    subagents: list[SubagentPayload] | None = None
+    # Phase 4b: subagent *references* (only used when framework="deepagents").
+    subagents: list[SubagentRefPayload] | None = None
+    # Phase 5: explicitly bound MCP server names (workspace-scoped). The
+    # agent receives every tool exposed by each selected server.
+    mcp_servers: list[str] | None = None
 
 
 class UpdateAgentRequest(BaseModel):
@@ -89,7 +88,9 @@ class UpdateAgentRequest(BaseModel):
     hooks: list[str] | None = None
     memory_config: MemoryConfigPayload | None = None
     # Phase 4b: None = leave unchanged; [] = clear all subagents.
-    subagents: list[SubagentPayload] | None = None
+    subagents: list[SubagentRefPayload] | None = None
+    # Phase 5: None = leave unchanged; [] = unbind all MCP servers.
+    mcp_servers: list[str] | None = None
 
 
 def _serialize_agent(a: AgentConfig) -> dict:
@@ -117,6 +118,8 @@ def _serialize_agent(a: AgentConfig) -> dict:
         "memory_config": a.memory_config,
         # Phase 4b: subagent specs (only meaningful for adapter="deepagents").
         "subagents": a.subagents or [],
+        # Phase 5: bound MCP servers (agent gets all their tools).
+        "mcp_servers": a.mcp_servers or [],
         # Metadata
         "created_by": a.created_by,
         "created_at": a.created_at.isoformat() if a.created_at else None,
@@ -146,6 +149,8 @@ def _apply_create_fields(agent: AgentConfig, body: CreateAgentRequest) -> None:
         agent.memory_config = body.memory_config.model_dump()
     if body.subagents is not None:
         agent.subagents = [s.model_dump() for s in body.subagents]
+    if body.mcp_servers is not None:
+        agent.mcp_servers = body.mcp_servers
 
 
 async def _write_audit(
@@ -187,6 +192,27 @@ def _not_found(message: str = "Agent not found") -> JSONResponse:
     )
 
 
+def _validate_mcp_servers(workspace_id: str, names: list[str]) -> str | None:
+    """Return an error message if any named MCP server is not registered in
+    ``workspace_id`` (so we don't bind an agent to a non-existent server).
+
+    Reads the ``MCPManager`` in-memory cache — the same source of truth the
+    runtime uses to resolve servers at run time. Returns ``None`` when valid.
+    """
+    if not names:
+        return None
+    from src.runtime.harness.registry import get_registry
+
+    mcp = get_registry().mcp
+    if mcp is None:
+        return None
+    available = {c.name for c in mcp.list_servers(workspace_id)}
+    missing = sorted(n for n in names if n not in available)
+    if missing:
+        return f"MCP server(s) not found in workspace: {', '.join(missing)}"
+    return None
+
+
 @router.post("/api/v1/workspaces/{workspace_id}/agents")
 async def create_agent(
     workspace_id: str,
@@ -200,6 +226,12 @@ async def create_agent(
         return _bad_request(
             f"framework must be one of {ALLOWED_FRAMEWORKS}"
         )
+
+    # Validate bound MCP servers exist in this workspace (400 otherwise).
+    if body.mcp_servers:
+        err = _validate_mcp_servers(workspace_id, body.mcp_servers)
+        if err:
+            return _bad_request(err)
 
     user = request.state.user
     user_id = user.get("sub") or user.get("id", "")
@@ -297,6 +329,12 @@ async def update_agent(
             f"framework must be one of {ALLOWED_FRAMEWORKS}"
         )
 
+    # Validate bound MCP servers exist in this workspace (400 otherwise).
+    if body.mcp_servers is not None:
+        err = _validate_mcp_servers(workspace_id, body.mcp_servers)
+        if err:
+            return _bad_request(err)
+
     details: dict = {}
     if body.name is not None:
         agent.name = body.name
@@ -338,6 +376,9 @@ async def update_agent(
     if body.subagents is not None:
         agent.subagents = [s.model_dump() for s in body.subagents]
         details["subagents"] = agent.subagents
+    if body.mcp_servers is not None:
+        agent.mcp_servers = body.mcp_servers
+        details["mcp_servers"] = body.mcp_servers
 
     user = request.state.user
     await _write_audit(
@@ -461,6 +502,7 @@ async def copy_agent_to(
         hooks=source.hooks,
         memory_config=source.memory_config,
         subagents=source.subagents or [],
+        mcp_servers=source.mcp_servers or [],
     )
     db.add(copy)
     await db.flush()  # populate copy.id before audit log references it

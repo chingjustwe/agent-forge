@@ -5,17 +5,39 @@ connections, tool discovery, and tool invocation. MCP-discovered tools
 are registered into ``ToolRegistry`` with ``source="mcp"`` so they
 appear uniformly to ``ToolEngine``.
 
-P1 supports HTTP transport via httpx. ``stdio`` transport is stubbed
-(not needed for 3a — no stdio MCP servers in scope).
+This module implements the *real* MCP protocol (JSON-RPC over the
+configured transport) using the official ``mcp`` SDK client:
+
+- ``sse``    — MCP SSE transport (server exposes an ``/sse`` endpoint that
+  streams an ``endpoint`` event with the POST URL for JSON-RPC messages).
+- ``http``   — MCP Streamable HTTP transport (a single ``/mcp``-style URL
+  speaking JSON-RPC over HTTP).
+- ``stdio``  — launches a local subprocess that speaks MCP over stdio.
+
+The earlier P1 implementation assumed a bespoke REST API
+(``GET /health``, ``GET /list_tools``, ``POST /call_tool``) which does
+NOT match a real MCP server, so every operation against a real server
+failed (the symptom was "Health → unreachable" and empty tool lists).
 """
 from __future__ import annotations
 
 import logging
+import os
+import shlex
+import time
+import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Literal
 
-import httpx
-from pydantic import BaseModel, Field
+from mcp import ClientSession
+from mcp.client.sse import sse_client
+from mcp.client.stdio import StdioServerParameters, stdio_client
+from mcp.client.streamable_http import streamable_http_client
+from pydantic import BaseModel
+from sqlalchemy import text
+
+from src.infra.db.engine import async_session
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +47,7 @@ class MCPServerConfig(BaseModel):
 
     name: str
     workspace_id: str
-    endpoint: str  # URL or stdio command
+    endpoint: str  # URL (sse/http) or command (stdio)
     transport: Literal["stdio", "http", "sse"] = "http"
     auth_token: str | None = None
     enabled: bool = True
@@ -33,110 +55,216 @@ class MCPServerConfig(BaseModel):
 
 
 class MCPConnection:
-    """Lazy-initialized connection to one MCP server."""
+    """Lazy MCP protocol client for a single registered server.
+
+    Each operation (``health_check`` / ``list_tools`` / ``call``) opens its
+    own JSON-RPC session, performs the ``initialize`` handshake, issues the
+    request, then closes the session. The ``MCPManager`` caches the
+    lightweight ``MCPConnection`` wrapper but does not keep long-lived
+    sockets open, which keeps the harness cheap and robust across restarts.
+    """
 
     def __init__(self, config: MCPServerConfig) -> None:
         self.config = config
-        self.is_connected: bool = False
-        self._client: httpx.AsyncClient | None = None
 
-    async def ensure_connected(self) -> None:
-        if self.is_connected:
-            return
-        if self.config.transport == "http":
-            headers: dict[str, str] = {}
-            if self.config.auth_token:
-                headers["Authorization"] = f"Bearer {self.config.auth_token}"
-            self._client = httpx.AsyncClient(
-                base_url=self.config.endpoint,
-                headers=headers,
-                timeout=30.0,
+    @asynccontextmanager
+    async def _open_session(self):
+        """Yield an initialized ``ClientSession`` for the configured transport."""
+        config = self.config
+        headers: dict[str, str] = {}
+        if config.auth_token:
+            headers["Authorization"] = f"Bearer {config.auth_token}"
+        transport = config.transport
+        if transport == "sse":
+            async with sse_client(config.endpoint, headers=headers) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session
+        elif transport == "http":
+            async with streamable_http_client(
+                config.endpoint, headers=headers
+            ) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session
+        elif transport == "stdio":
+            parts = shlex.split(config.endpoint)
+            if not parts:
+                raise ValueError("stdio endpoint must be a command")
+            server_params = StdioServerParameters(
+                command=parts[0],
+                args=parts[1:],
+                env=dict(os.environ),
             )
-        elif self.config.transport == "sse":
-            # SSE uses the same httpx client but with streaming
-            headers: dict[str, str] = {}
-            if self.config.auth_token:
-                headers["Authorization"] = f"Bearer {self.config.auth_token}"
-            self._client = httpx.AsyncClient(
-                base_url=self.config.endpoint,
-                headers=headers,
-                timeout=60.0,
-            )
-        elif self.config.transport == "stdio":
-            # stdio transport would spawn a subprocess; deferred to future phase.
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session
+        else:
+            raise ValueError(f"Unsupported MCP transport: {transport!r}")
+
+    async def health_check(self) -> tuple[bool, str | None]:
+        """Return ``(ok, error)``.
+
+        ``ok`` is True if the server is reachable and speaks MCP (a
+        successful ``initialize`` handshake proves both). ``error`` carries
+        the exception message when ``ok`` is False, so callers can surface
+        the *reason* instead of a silent "unreachable".
+        """
+        try:
+            async with self._open_session() as _:
+                # initialize() already succeeded inside the context manager.
+                return True, None
+        except Exception as exc:  # noqa: BLE001 - any failure => unreachable
             logger.warning(
-                "MCP stdio transport not yet implemented for %r",
+                "MCP health_check failed for %s (%s): %s",
                 self.config.name,
+                self.config.transport,
+                exc,
             )
-            return
-        self.is_connected = True
-        logger.info("MCP connected: %s (%s)", self.config.name, self.config.transport)
-
-    async def close(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-        self.is_connected = False
-
-    async def call(self, tool: str, args: dict) -> dict:
-        """Call a tool on the connected MCP server."""
-        await self.ensure_connected()
-        if self._client is None:
-            raise RuntimeError(f"MCP server {self.config.name!r} not connected")
-        resp = await self._client.post(
-            "/call_tool",
-            json={"name": tool, "arguments": args},
-        )
-        resp.raise_for_status()
-        return resp.json()
+            return False, f"{type(exc).__name__}: {exc}"
 
     async def list_tools(self) -> list[dict]:
-        """Discover tools exposed by the MCP server."""
-        await self.ensure_connected()
-        if self._client is None:
-            return []
-        resp = await self._client.get("/list_tools")
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("tools", []) if isinstance(data, dict) else data
+        """Discover tools exposed by the MCP server (real ``tools/list``)."""
+        async with self._open_session() as session:
+            result = await session.list_tools()
+            return [
+                {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "input_schema": tool.inputSchema or {},
+                }
+                for tool in result.tools
+            ]
 
-    async def health_check(self) -> bool:
-        """Check if the MCP server is reachable."""
-        try:
-            await self.ensure_connected()
-            if self._client is None:
-                return False
-            resp = await self._client.get("/health")
-            return resp.status_code == 200
-        except Exception:
-            return False
+    async def call(self, tool: str, args: dict) -> dict:
+        """Call a tool on the MCP server (real ``tools/call``).
+
+        Returns a dict with a ``text`` field (joined text content, ideal for
+        agent output) plus ``isError`` and the raw structured content.
+        """
+        async with self._open_session() as session:
+            result = await session.call_tool(tool, arguments=args or {})
+            text_parts: list[str] = []
+            for block in result.content:
+                block_type = getattr(block, "type", None)
+                if block_type == "text":
+                    text_parts.append(block.text)
+                elif block_type == "resource":
+                    text_parts.append(getattr(block, "uri", str(block)))
+                else:
+                    text_parts.append(str(block))
+            return {
+                "text": "\n".join(text_parts),
+                "isError": bool(result.isError),
+                "structured": [b.model_dump() for b in result.content]
+                if not result.isError
+                else None,
+            }
+
+    async def close(self) -> None:
+        """No-op: sessions are opened/closed per operation."""
+        return None
 
 
 class MCPManager:
     """Platform-level MCP server registry + connection pool.
 
-    Servers are stored in-memory (P1); a future phase will persist to
-    the ``mcp_servers`` table. The manager maintains a pool of
-    ``MCPConnection`` objects keyed by ``(workspace_id, name)``.
+    Server *configs* are persisted to the ``mcp_servers`` table (model
+    ``MCPServer``) so registrations survive process restarts — the original
+    P1 implementation was in-memory only and lost all servers on restart.
+    ``self._servers`` is an in-memory cache of configs (populated at startup
+    via ``load_from_db()`` and kept warm by every mutation) so that the
+    synchronous ``list_servers`` / ``get_server`` used by the routes stay
+    allocation-free. ``MCPConnection`` objects are lazily created and cached
+    per ``(workspace_id, name)``.
     """
 
     def __init__(self) -> None:
         self._servers: dict[tuple[str, str], MCPServerConfig] = {}
         self._connections: dict[tuple[str, str], MCPConnection] = {}
+        # Discovered-tool cache (key = (workspace_id, name)) so per-run
+        # agent tool resolution (``HarnessRuntime._resolve_mcp_tools``) does
+        # not re-hit the network on every chat message. Entries expire after
+        # ``tool_cache_ttl`` seconds; invalidated on (un)register.
+        self._tool_cache: dict[tuple[str, str], tuple[float, list[dict]]] = {}
+        self.tool_cache_ttl = 30.0
+
+    async def load_from_db(self) -> None:
+        """Populate the in-memory cache from the ``mcp_servers`` table.
+
+        Called once at startup (``main.py`` lifespan) so previously
+        registered servers are available after a restart.
+        """
+        async with async_session() as db:
+            result = await db.execute(
+                text(
+                    "SELECT id, name, workspace_id, endpoint, transport, "
+                    "auth_token, enabled, created_at FROM mcp_servers"
+                )
+            )
+            for row in result.fetchall():
+                self._servers[(row.workspace_id, row.name)] = self._row_to_config(row)
+        logger.info("MCP: loaded %d servers from DB", len(self._servers))
 
     async def register_server(self, config: MCPServerConfig) -> None:
+        # Set created_at in place (preserves object identity for callers that
+        # rely on ``get_server() is config``).
+        if config.created_at is None:
+            config.created_at = datetime.now(timezone.utc)
         key = (config.workspace_id, config.name)
-        self._servers[key] = config
+        # Persist to DB. Upsert on (workspace_id, name) so re-registration
+        # (incl. updates routed through this method) replaces the row without
+        # changing its id or created_at.
+        async with async_session() as db:
+            await db.execute(
+                text(
+                    "INSERT INTO mcp_servers "
+                    "(id, name, workspace_id, endpoint, transport, "
+                    "auth_token, enabled, created_at) "
+                    "VALUES (:id, :name, :ws, :endpoint, :transport, "
+                    ":auth_token, :enabled, :created_at) "
+                    "ON CONFLICT(workspace_id, name) DO UPDATE SET "
+                    "endpoint=excluded.endpoint, "
+                    "transport=excluded.transport, "
+                    "auth_token=excluded.auth_token, "
+                    "enabled=excluded.enabled"
+                ),
+                {
+                    "id": uuid.uuid4().hex,
+                    "name": config.name,
+                    "ws": config.workspace_id,
+                    "endpoint": config.endpoint,
+                    "transport": config.transport,
+                    "auth_token": config.auth_token,
+                    "enabled": 1 if config.enabled else 0,
+                    "created_at": config.created_at.isoformat(),
+                },
+            )
+            await db.commit()
         # Drop any existing connection so the next call re-connects.
+        self._servers[key] = config
         old = self._connections.pop(key, None)
+        self._tool_cache.pop(key, None)
         if old is not None:
             await old.close()
         logger.info("MCP server registered: %s", config.name)
 
     async def unregister_server(self, name: str, workspace_id: str) -> bool:
         key = (workspace_id, name)
-        removed = self._servers.pop(key, None) is not None
+        async with async_session() as db:
+            result = await db.execute(
+                text(
+                    "DELETE FROM mcp_servers "
+                    "WHERE workspace_id = :ws AND name = :name"
+                ),
+                {"ws": workspace_id, "name": name},
+            )
+            await db.commit()
+            removed = result.rowcount > 0
+        self._servers.pop(key, None)
         old = self._connections.pop(key, None)
+        self._tool_cache.pop(key, None)
         if old is not None:
             await old.close()
         return removed
@@ -152,10 +280,28 @@ class MCPManager:
     ) -> MCPServerConfig | None:
         return self._servers.get((workspace_id, name))
 
+    @staticmethod
+    def _row_to_config(row) -> MCPServerConfig:
+        created_at = row.created_at
+        if isinstance(created_at, str):
+            try:
+                created_at = datetime.fromisoformat(created_at)
+            except (ValueError, TypeError):
+                created_at = None
+        return MCPServerConfig(
+            name=row.name,
+            workspace_id=row.workspace_id,
+            endpoint=row.endpoint,
+            transport=row.transport or "http",
+            auth_token=row.auth_token,
+            enabled=bool(row.enabled),
+            created_at=created_at,
+        )
+
     async def connect(
         self, name: str, workspace_id: str
     ) -> MCPConnection:
-        """Get or create a connection for the named server."""
+        """Get or create a (stateless) connection for the named server."""
         key = (workspace_id, name)
         if key in self._connections:
             return self._connections[key]
@@ -171,26 +317,33 @@ class MCPManager:
     async def list_tools(
         self, name: str, workspace_id: str
     ) -> list[dict]:
-        """Discover tools from an MCP server."""
+        """Discover tools from an MCP server (real MCP ``tools/list``).
+
+        Results are cached for ``tool_cache_ttl`` seconds (keyed by
+        ``(workspace_id, name)``) so repeated agent runs don't re-hit the
+        network on every message. Invalidation happens on (un)register.
+        """
+        cache_key = (workspace_id, name)
+        cached = self._tool_cache.get(cache_key)
+        now = time.monotonic()
+        if cached is not None and (now - cached[0]) < self.tool_cache_ttl:
+            return cached[1]
         conn = await self.connect(name, workspace_id)
-        return await conn.list_tools()
+        tools = await conn.list_tools()
+        self._tool_cache[cache_key] = (now, tools)
+        return tools
 
     async def call_tool(
         self, server: str, tool: str, args: dict
     ) -> dict:
         """Call a tool on an MCP server.
 
-        Note: ``server`` is the server name; workspace_id is resolved
-        from the connection's config. This matches the ``ToolEngine``
-        call signature which only passes the server name.
+        Note: ``server`` is the server name; workspace_id is resolved from
+        the first matching registered config. This matches the
+        ``ToolEngine`` call signature which only passes the server name.
         """
-        # Find the connection by server name (first match)
-        for (ws_id, srv_name), conn in self._connections.items():
-            if srv_name == server:
-                return await conn.call(tool, args)
-        # Try to find the config and connect
         for (ws_id, srv_name), config in self._servers.items():
-            if srv_name == server:
+            if srv_name == server and config.enabled:
                 conn = await self.connect(server, ws_id)
                 return await conn.call(tool, args)
         raise KeyError(f"MCP server {server!r} not found")
@@ -204,18 +357,18 @@ class MCPManager:
 
     async def health_check(
         self, name: str, workspace_id: str
-    ) -> bool:
+    ) -> tuple[bool, str | None]:
         config = self._servers.get((workspace_id, name))
         if config is None:
-            return False
+            return False, f"server {name!r} not registered in workspace {workspace_id!r}"
         try:
             conn = await self.connect(name, workspace_id)
             return await conn.health_check()
-        except Exception:
-            return False
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
 
     async def close_all(self) -> None:
-        """Close all connections. Called by HarnessRegistry.shutdown()."""
+        """Drop all cached connection wrappers. Called on shutdown."""
         for conn in self._connections.values():
             await conn.close()
         self._connections.clear()

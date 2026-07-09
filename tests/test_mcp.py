@@ -4,12 +4,14 @@ Covers:
 - MCPServerConfig defaults
 - MCPManager: register/list/unregister/get, workspace isolation,
   connect caching, disabled/unknown error paths, scoped calls,
-  health_check on unknown servers, close_all
-- MCPConnection: lazy http connect, stdio stub, close idempotency
+  health_check on unknown servers, close_all, DB persistence across reload
+- MCPConnection: real MCP protocol session handling; unreachable (no live
+  server) error paths for health/list/call; safe close
+- Registry wiring: ``set_registry`` makes ``get_registry`` return the wired
+  instance (regression for "MCP servers disappear after restart").
 
-Tests that would make real HTTP calls (call_tool, list_tools,
-health_check on a live server) are avoided — only error paths that
-do not require network access are exercised.
+Tests that would make real HTTP calls against a live MCP server are avoided —
+only unreachable endpoints (connection refused) are exercised.
 """
 import pytest
 
@@ -17,6 +19,12 @@ from src.runtime.harness.mcp import (
     MCPConnection,
     MCPManager,
     MCPServerConfig,
+)
+from src.runtime.harness.registry import (
+    HarnessRegistry,
+    get_registry,
+    reset_registry,
+    set_registry,
 )
 
 
@@ -145,7 +153,8 @@ class TestMCPManager:
     @pytest.mark.asyncio
     async def test_health_check_unknown_returns_false(self):
         mgr = MCPManager()
-        assert await mgr.health_check("nope", "ws-1") is False
+        ok, _err = await mgr.health_check("nope", "ws-1")
+        assert ok is False
 
     @pytest.mark.asyncio
     async def test_close_all(self):
@@ -158,49 +167,103 @@ class TestMCPManager:
         await mgr.close_all()
         assert len(mgr._connections) == 0
 
+    @pytest.mark.asyncio
+    async def test_persisted_across_reload(self):
+        """Regression: registered servers must survive a manager reload
+        (i.e. a process restart) by being written to the DB and re-read by
+        ``load_from_db``."""
+        mgr = MCPManager()
+        await mgr.register_server(
+            _make_config(name="persist1", workspace_id="ws-reload", endpoint="http://reload:1")
+        )
+        # Simulate restart: brand-new manager, no in-memory cache.
+        reloaded = MCPManager()
+        await reloaded.load_from_db()
+        loaded = reloaded.get_server("persist1", "ws-reload")
+        assert loaded is not None
+        assert loaded.endpoint == "http://reload:1"
+
+    @pytest.mark.asyncio
+    async def test_unregister_persisted(self):
+        """Regression: removing a server must delete it from the DB, not
+        just the in-memory cache."""
+        mgr = MCPManager()
+        await mgr.register_server(_make_config(name="gone", workspace_id="ws-del"))
+        assert await mgr.unregister_server("gone", "ws-del") is True
+        # A fresh manager loading from DB must NOT see the removed server.
+        reloaded = MCPManager()
+        await reloaded.load_from_db()
+        assert reloaded.get_server("gone", "ws-del") is None
+
 
 # ── MCPConnection ───────────────────────────────────────────────────────
 
 
 class TestMCPConnection:
     @pytest.mark.asyncio
-    async def test_ensure_connected_http(self):
-        cfg = _make_config(transport="http")
+    async def test_health_check_unreachable_returns_false(self):
+        # No live server on port 1 → connection refused → unreachable.
+        cfg = _make_config(transport="http", endpoint="http://127.0.0.1:1/mcp")
         conn = MCPConnection(cfg)
-        assert conn.is_connected is False
-        assert conn._client is None
-        await conn.ensure_connected()
-        assert conn.is_connected is True
-        assert conn._client is not None
-        await conn.close()
+        ok, _err = await conn.health_check()
+        assert ok is False
 
     @pytest.mark.asyncio
-    async def test_ensure_connected_stdio_warns(self):
-        cfg = _make_config(transport="stdio")
+    async def test_list_tools_unreachable_raises(self):
+        cfg = _make_config(transport="http", endpoint="http://127.0.0.1:1/mcp")
         conn = MCPConnection(cfg)
-        await conn.ensure_connected()
-        # stdio transport is stubbed — connection stays disconnected.
-        assert conn.is_connected is False
-        assert conn._client is None
+        with pytest.raises(Exception):
+            await conn.list_tools()
 
     @pytest.mark.asyncio
-    async def test_close_resets(self):
-        cfg = _make_config(transport="http")
+    async def test_call_unreachable_raises(self):
+        cfg = _make_config(transport="http", endpoint="http://127.0.0.1:1/mcp")
         conn = MCPConnection(cfg)
-        await conn.ensure_connected()
-        assert conn.is_connected is True
-        assert conn._client is not None
-        await conn.close()
-        assert conn.is_connected is False
-        assert conn._client is None
+        with pytest.raises(Exception):
+            await conn.call("some_tool", {})
 
     @pytest.mark.asyncio
-    async def test_close_idempotent(self):
+    async def test_close_is_safe(self):
+        # close() is a no-op now (sessions are per-operation).
         cfg = _make_config(transport="http")
         conn = MCPConnection(cfg)
-        await conn.ensure_connected()
-        await conn.close()
-        # Second close must not raise.
-        await conn.close()
-        assert conn.is_connected is False
-        assert conn._client is None
+        await conn.close()  # must not raise
+
+
+class TestMCPToolCache:
+    @pytest.mark.asyncio
+    async def test_list_tools_is_cached(self):
+        """``list_tools`` must hit the network only once per TTL so that
+        per-run agent tool resolution stays cheap across messages."""
+        mgr = MCPManager()
+        await mgr.register_server(_make_config(name="s1", workspace_id="ws"))
+
+        calls = {"n": 0}
+
+        async def _fake_list(self):
+            calls["n"] += 1
+            return [{"name": "t1", "description": "", "input_schema": {}}]
+
+        orig = MCPConnection.list_tools
+        MCPConnection.list_tools = _fake_list
+        try:
+            first = await mgr.list_tools("s1", "ws")
+            second = await mgr.list_tools("s1", "ws")
+        finally:
+            MCPConnection.list_tools = orig
+
+        assert calls["n"] == 1
+        assert first == second
+
+
+
+class TestRegistryWiring:
+    def test_set_registry_makes_get_registry_return_same_instance(self):
+        """Regression for MCP servers disappearing after restart: the wired
+        registry (whose MCPManager was loaded from DB) must be the one
+        returned to route handlers via ``get_registry``."""
+        reset_registry()
+        reg = HarnessRegistry.create()
+        set_registry(reg)
+        assert get_registry() is reg
+        reset_registry()
