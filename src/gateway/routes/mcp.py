@@ -23,6 +23,23 @@ class MCPServerOut(BaseModel):
     enabled: bool
 
 
+def _auto_detect_transport(endpoint: str, transport: str) -> str:
+    """Auto-correct the transport based on the endpoint URL.
+
+    An endpoint ending in ``/sse`` speaks the MCP SSE protocol; using the
+    default ``http`` (Streamable HTTP) transport against it will fail.  We
+    only auto-switch from ``http`` → ``sse`` so an explicit ``stdio`` choice
+    is never overridden.
+    """
+    if (
+        transport == "http"
+        and isinstance(endpoint, str)
+        and endpoint.rstrip("/").endswith("/sse")
+    ):
+        return "sse"
+    return transport
+
+
 class CreateMCPServerRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     endpoint: str = Field(..., min_length=1)
@@ -72,11 +89,12 @@ async def create_mcp_server(
             status_code=409,
             content={"error": {"code": "CONFLICT", "message": f"MCP server {body.name!r} already exists"}},
         )
+    transport = _auto_detect_transport(body.endpoint, body.transport)
     config = MCPServerConfig(
         name=body.name,
         workspace_id=workspace_id,
         endpoint=body.endpoint,
-        transport=body.transport,
+        transport=transport,
         auth_token=body.auth_token,
         enabled=body.enabled,
     )
@@ -111,11 +129,14 @@ async def update_mcp_server(
             content={"error": {"code": "NOT_FOUND", "message": f"MCP server {name!r} not found"}},
         )
     # Re-register with updated fields (preserving created_at).
+    new_endpoint = body.endpoint or existing.endpoint
+    new_transport = body.transport or existing.transport
+    new_transport = _auto_detect_transport(new_endpoint, new_transport)
     updated = MCPServerConfig(
         name=existing.name,
         workspace_id=existing.workspace_id,
-        endpoint=body.endpoint or existing.endpoint,
-        transport=body.transport or existing.transport,
+        endpoint=new_endpoint,
+        transport=new_transport,
         auth_token=body.auth_token if body.auth_token is not None else existing.auth_token,
         enabled=body.enabled if body.enabled is not None else existing.enabled,
         created_at=existing.created_at,

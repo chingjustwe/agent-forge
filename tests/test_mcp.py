@@ -209,6 +209,40 @@ class TestMCPConnection:
         assert ok is False
 
     @pytest.mark.asyncio
+    async def test_health_check_sse_endpoint_with_http_transport_autocorrects(self):
+        """Regression: an endpoint ending in /sse that was registered with
+        the default transport='http' must be auto-switched to 'sse' so the
+        SSE handshake is used instead of Streamable HTTP (which fails with
+        ``streamable_http_client() got an unexpected keyword argument
+        'headers'`` or a protocol mismatch)."""
+        # Use a dead port so the connection fails — but we only care that
+        # the SSE client (not streamable_http_client) is attempted.
+        cfg = _make_config(
+            transport="http",
+            endpoint="http://127.0.0.1:1/sse",
+        )
+        conn = MCPConnection(cfg)
+        ok, err = await conn.health_check()
+        assert ok is False
+        # The error should come from the SSE client (sse_client), not from
+        # streamable_http_client complaining about 'headers'.
+        assert err is not None
+        assert "headers" not in err
+
+    @pytest.mark.asyncio
+    async def test_sse_endpoint_with_trailing_slash_autocorrects(self):
+        """Trailing slash on /sse/ should also trigger auto-correction."""
+        cfg = _make_config(
+            transport="http",
+            endpoint="http://127.0.0.1:1/sse/",
+        )
+        conn = MCPConnection(cfg)
+        ok, err = await conn.health_check()
+        assert ok is False
+        assert err is not None
+        assert "headers" not in err
+
+    @pytest.mark.asyncio
     async def test_list_tools_unreachable_raises(self):
         cfg = _make_config(transport="http", endpoint="http://127.0.0.1:1/mcp")
         conn = MCPConnection(cfg)

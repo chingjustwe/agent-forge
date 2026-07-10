@@ -25,6 +25,8 @@ import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, AsyncIterator, Optional, Sequence
 
+logger = logging.getLogger(__name__)
+
 from langchain_core.callbacks import AsyncCallbackManagerForToolRun
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
@@ -728,8 +730,14 @@ class LangChainToolShim(BaseTool):
             # ToolError, ToolPermissionError, ToolNotFoundError, etc. —
             # return as ERROR: string so deepagents sees a tool failure
             # rather than crashing the agent loop.
+            logger.exception(
+                "Tool execution failed: %s (args=%s)", tool_def.name, kwargs
+            )
             return f"ERROR: {type(exc).__name__}: {exc}"
         if result.error:
+            logger.warning(
+                "Tool %s returned error: %s", tool_def.name, result.error
+            )
             return f"ERROR: {result.error}"
         return result.output
 

@@ -332,19 +332,51 @@ class HarnessRuntime(AgentRuntime):
         extra: set[str] = set()
         names = getattr(agent, "mcp_servers", None) or []
         if not names:
+            logger.info(
+                "Agent %s (%s): no MCP servers bound — skip tool discovery",
+                agent.id or agent.name, agent.adapter,
+            )
             return extra
         mcp = self._registry.mcp
         if mcp is None:
+            logger.warning("MCP manager not initialized — cannot discover tools")
             return extra
         for server_name in names:
             try:
                 tools = await mcp.list_tools(server_name, workspace_id)
             except Exception as exc:
-                logger.warning(
-                    "Agent %s: MCP tool discovery failed for server %r: %s",
+                # Discovery failures are fatal to tool availability but were
+                # previously swallowed as a ``warning`` (so the run still
+                # returned HTTP 200 and the agent silently lost the tools).
+                # Promote to ERROR and emit a concrete misconfiguration hint
+                # so the operator can see *why* an MCP-bound agent has no
+                # tools. A common case: endpoint ends in ``/sse`` but the
+                # server was registered with the default ``transport="http"``
+                # (Streamable HTTP), which cannot speak the SSE handshake.
+                cfg = mcp.get_server(server_name, workspace_id)
+                transport = cfg.transport if cfg else "?"
+                endpoint = cfg.endpoint if cfg else ""
+                hint = ""
+                if (
+                    transport == "http"
+                    and isinstance(endpoint, str)
+                    and endpoint.rstrip("/").endswith("/sse")
+                ):
+                    hint = (
+                        " The endpoint ends with '/sse' but transport is "
+                        "'http'. This server speaks the MCP SSE protocol — "
+                        "register it with transport='sse'."
+                    )
+                logger.error(
+                    "Agent %s: MCP tool discovery FAILED for server %r "
+                    "(transport=%s, endpoint=%s): %s: %s.%s",
                     agent.id or agent.name,
                     server_name,
+                    transport,
+                    endpoint,
+                    type(exc).__name__,
                     exc,
+                    hint,
                 )
                 continue
             for t in tools:
@@ -359,6 +391,12 @@ class HarnessRuntime(AgentRuntime):
                     )
                 )
                 extra.add(t["name"])
+            logger.info(
+                "Agent %s: discovered %d tools from MCP server %r",
+                agent.id or agent.name,
+                len(tools),
+                server_name,
+            )
         return extra
 
     def _build_context(

@@ -21,6 +21,7 @@ failed (the symptom was "Health → unreachable" and empty tool lists).
 """
 from __future__ import annotations
 
+import httpx
 import logging
 import os
 import shlex
@@ -75,18 +76,51 @@ class MCPConnection:
         if config.auth_token:
             headers["Authorization"] = f"Bearer {config.auth_token}"
         transport = config.transport
+        # Auto-correct: an endpoint ending in ``/sse`` speaks the MCP SSE
+        # protocol, not Streamable HTTP.  This catches the common
+        # misconfiguration where the server was registered with the default
+        # ``transport="http"`` against an ``/sse`` URL (the symptom is a
+        # protocol handshake failure or an ``unexpected keyword argument
+        # 'headers'`` error from ``streamable_http_client``).
+        if (
+            transport == "http"
+            and isinstance(config.endpoint, str)
+            and config.endpoint.rstrip("/").endswith("/sse")
+        ):
+            logger.info(
+                "MCP %s: endpoint %s ends with '/sse'; auto-switching "
+                "transport from 'http' to 'sse'",
+                config.name,
+                config.endpoint,
+            )
+            transport = "sse"
+
         if transport == "sse":
             async with sse_client(config.endpoint, headers=headers) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     yield session
         elif transport == "http":
-            async with streamable_http_client(
-                config.endpoint, headers=headers
-            ) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    yield session
+            # In mcp>=1.x the StreamableHTTP client no longer accepts
+            # ``headers``; custom headers/timeout/auth must be configured on a
+            # pre-built ``httpx.AsyncClient`` passed via ``http_client=``.
+            if headers:
+                async with httpx.AsyncClient(headers=headers) as http_client:
+                    async with streamable_http_client(
+                        config.endpoint, http_client=http_client
+                    ) as (read, write, _):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            yield session
+            else:
+                async with streamable_http_client(config.endpoint) as (
+                    read,
+                    write,
+                    _,
+                ):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        yield session
         elif transport == "stdio":
             parts = shlex.split(config.endpoint)
             if not parts:

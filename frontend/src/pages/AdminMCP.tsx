@@ -17,6 +17,13 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
 import { SkeletonTable } from "../components/Skeleton";
 
+/** Auto-detect MCP transport from endpoint URL: /sse → sse, else http. */
+function detectTransport(endpoint: string): string {
+  const trimmed = endpoint.trim().replace(/\/+$/, "");
+  if (trimmed.endsWith("/sse")) return "sse";
+  return "http";
+}
+
 export default function AdminMCP() {
   const { currentWorkspaceId } = useWorkspace();
   const toast = useToast();
@@ -70,6 +77,20 @@ export default function AdminMCP() {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentWorkspaceId]);
+
+  // Auto-switch transport to "sse" when the create-form endpoint ends with /sse
+  useEffect(() => {
+    if (newEndpoint.trim().replace(/\/+$/, "").endsWith("/sse")) {
+      setNewTransport("sse");
+    }
+  }, [newEndpoint]);
+
+  // Auto-switch transport to "sse" when the edit-form endpoint ends with /sse
+  useEffect(() => {
+    if (editEndpoint.trim().replace(/\/+$/, "").endsWith("/sse")) {
+      setEditTransport("sse");
+    }
+  }, [editEndpoint]);
 
   function openCreate() {
     setNewName("");

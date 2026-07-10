@@ -18,6 +18,7 @@ from src.infra.db.models import AgentConfig, Tenant, Workspace, WorkspaceMember
 from src.runtime.harness.agents import AgentDefinition, AgentRegistry
 from src.runtime.harness.registry import HarnessRegistry, get_registry
 from src.runtime.harness.runtime import HarnessRuntime
+from src.runtime.harness.tool_engine import ToolDefinition, ToolEngine, ToolRegistry
 from src.runtime.models import RuntimeConfig
 
 
@@ -265,3 +266,89 @@ class TestRuntimeMCPBinding:
         # Should not raise; missing server just yields nothing.
         extra = await rt._resolve_mcp_tools(agent, "ws")
         assert extra == set()
+
+
+class TestMCPToolExecution:
+    """Regression: ToolEngine._exec_mcp must handle boolean isError correctly."""
+
+    @pytest.mark.asyncio
+    async def test_exec_mcp_success_with_isError_false(self):
+        """When MCP call_tool returns ``isError=False`` (boolean), the
+        ToolResult.error field must be ``None``, not the boolean ``False``.
+        The old ``raw.get("error") or (raw.get("isError") and "...")``
+        short-circuit produced ``False`` (bool), which Pydantic rejected
+        because ``ToolResult.error`` is ``str | None``."""
+        # StructuredMock Callable
+        class _MockMCP:
+            async def call_tool(self, server, tool, args):
+                return {"text": "ok", "isError": False}
+
+        from src.runtime.harness.context import HarnessContext
+
+        reg = ToolRegistry()
+        reg.register(ToolDefinition(
+            name="mcp_ok",
+            description="",
+            input_schema={},
+            source="mcp",
+            mcp_server="srv",
+            workspace_id="ws",
+        ))
+
+        engine = ToolEngine(
+            registry=reg,
+            allowed_tools=["mcp_ok"],
+            mcp_manager=_MockMCP(),
+        )
+
+        ctx = HarnessContext(
+            workspace_id="ws",
+            user_id="u",
+            session_id="s",
+            trace_id="t",
+            agent=AgentDefinition(id="a", name="a", workspace_id="ws"),
+            tool_engine=engine,
+        )
+
+        # This must not raise Pydantic ValidationError.
+        result = await engine.execute("mcp_ok", {}, ctx)
+        assert result.error is None
+        assert result.output == "ok"
+
+    @pytest.mark.asyncio
+    async def test_exec_mcp_error_with_isError_true(self):
+        """When ``isError=True``, the error message should be set."""
+        class _MockMCP:
+            async def call_tool(self, server, tool, args):
+                return {"text": "", "isError": True}
+
+        from src.runtime.harness.context import HarnessContext
+
+        reg = ToolRegistry()
+        reg.register(ToolDefinition(
+            name="mcp_err",
+            description="",
+            input_schema={},
+            source="mcp",
+            mcp_server="srv",
+            workspace_id="ws",
+        ))
+
+        engine = ToolEngine(
+            registry=reg,
+            allowed_tools=["mcp_err"],
+            mcp_manager=_MockMCP(),
+        )
+
+        ctx = HarnessContext(
+            workspace_id="ws",
+            user_id="u",
+            session_id="s",
+            trace_id="t",
+            agent=AgentDefinition(id="a", name="a", workspace_id="ws"),
+            tool_engine=engine,
+        )
+
+        result = await engine.execute("mcp_err", {}, ctx)
+        assert result.error == "MCP tool returned an error"
+        assert result.output == ""

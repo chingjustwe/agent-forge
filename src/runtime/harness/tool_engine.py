@@ -234,8 +234,21 @@ class ToolEngine:
                 tool.mcp_server, tool.name, args
             )
             if isinstance(raw, dict):
-                output = raw.get("text") or raw.get("output") or str(raw)
-                error = raw.get("error") or (raw.get("isError") and "MCP tool returned an error")
+                text = raw.get("text")
+                if isinstance(text, str):
+                    output = text
+                elif isinstance(raw.get("output"), str):
+                    output = raw["output"]
+                else:
+                    output = str(raw)
+                error = raw.get("error")
+                # ``raw.get("isError") and "..."`` must NOT be collapsed
+                # with ``or``: Python short-circuit on boolean ``False``
+                # returns ``False`` (bool) instead of ``None``, which
+                # Pydantic rejects because ``ToolResult.error`` is
+                # ``str | None``.
+                if error is None and raw.get("isError"):
+                    error = "MCP tool returned an error"
             else:
                 output = str(raw)
                 error = None
