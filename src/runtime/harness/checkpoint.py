@@ -4,10 +4,9 @@ Persists per-session state (messages + tool state) so that a crashed
 run can resume from the last checkpoint. The ``Checkpoints`` table
 stores JSON snapshots keyed by ``(session_id, sequence)``.
 
-``CheckpointScope`` is the per-run accessor injected into
-``HarnessContext``. ``HarnessRuntime`` calls ``checkpoint.commit()`` at
-the end of a successful run; on crash, the next run calls
-``load_latest()`` to pick up where it left off.
+Wave 2.5: ``CheckpointScope`` (the DirectLLM-only per-run accessor)
+was removed alongside the DirectLLM adapter. The deepagents adapter
+now consumes the ``CheckpointStore`` directly via ``ctx.checkpoint``.
 """
 from __future__ import annotations
 
@@ -168,62 +167,3 @@ class SQLiteCheckpointStore(CheckpointStore):
             metadata=metadata,
             created_at=created_at,
         )
-
-
-class CheckpointScope:
-    """Per-run checkpoint accessor.
-
-    Injected into ``HarnessContext.checkpoint``. The runtime calls
-    ``save()`` mid-run (e.g., after each tool call) and ``commit()`` at
-    the end of a successful run. On crash, ``load_latest()`` retrieves
-    the last committed checkpoint for resume.
-    """
-
-    def __init__(
-        self,
-        store: CheckpointStore,
-        session_id: str,
-        agent_id: str,
-    ) -> None:
-        self._store = store
-        self._session_id = session_id
-        self._agent_id = agent_id
-        self._sequence: int = 0
-        self._pending: Checkpoint | None = None
-        self._committed = False
-
-    async def initialize(self) -> None:
-        """Get the next sequence number for this session."""
-        self._sequence = await self._store.next_sequence(self._session_id)
-
-    async def save(
-        self,
-        messages: list[dict],
-        tool_state: dict,
-        metadata: dict | None = None,
-    ) -> None:
-        """Save a mid-run checkpoint (not yet committed)."""
-        self._pending = Checkpoint(
-            session_id=self._session_id,
-            sequence=self._sequence,
-            messages=messages,
-            tool_state=tool_state,
-            agent_id=self._agent_id,
-            metadata=metadata or {},
-            created_at=datetime.now(timezone.utc),
-        )
-
-    async def load_latest(self) -> Checkpoint | None:
-        """Load the latest committed checkpoint for this session."""
-        return await self._store.load(self._session_id)
-
-    async def commit(self) -> None:
-        """Persist the pending checkpoint (called at run end)."""
-        if self._pending is not None and not self._committed:
-            await self._store.save(self._pending)
-            self._committed = True
-            logger.debug(
-                "Checkpoint committed: session=%s seq=%d",
-                self._session_id,
-                self._sequence,
-            )

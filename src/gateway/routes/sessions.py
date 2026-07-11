@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Any
 
 from src.gateway.auth.rbac import get_workspace_member_role
 from src.infra.db.models import ChatMessage, ChatSession, ChatSessionShare, User
@@ -641,3 +642,339 @@ async def delete_share(
         await db.delete(share)
         await db.commit()
     return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# Wave 2: Manual checkpoint restore (deepagents sessions)
+# ---------------------------------------------------------------------------
+
+class CheckpointInfo(BaseModel):
+    sequence: int
+    created_at: str | None = None
+    message_count: int = 0
+    preview: str = ""
+
+
+class RestoreResponse(BaseModel):
+    session_id: str
+    title: str
+    restored_from_session_id: str
+    restored_from_sequence: int
+
+
+def _checkpoint_preview(messages: list[dict]) -> str:
+    """Build a short preview from a checkpoint's messages.
+
+    Each checkpoint stores the FULL cumulative conversation up to that
+    turn, so using the *first* user message would make every restore
+    point preview identical (the opening prompt). Instead use the *last*
+    user message — the prompt that produced this checkpoint's turn — so
+    each restore point shows the prompt it actually represents.
+    """
+    if not messages:
+        return ""
+    last_user = ""
+    last = ""
+    for m in messages:
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if content:
+            last = content
+        if role == "user" and content:
+            last_user = content
+    if last_user:
+        part = last_user[:40].replace("\n", " ")
+        return f"用户：{part}{'…' if len(last_user) > 40 else ''}"
+    if last:
+        part = last[:40].replace("\n", " ")
+        return f"助手：{part}{'…' if len(last) > 40 else ''}"
+    return ""
+
+
+@router.get(
+    "/api/v1/workspaces/{workspace_id}/sessions/{session_id}/checkpoints",
+    response_model=list[CheckpointInfo],
+)
+async def list_checkpoints(
+    workspace_id: str,
+    session_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """List checkpoints for a session (deepagents only).
+
+    Returns checkpoints ordered by sequence (oldest first). Each entry
+    includes a short preview derived from the checkpoint's messages.
+    """
+    user = getattr(request.state, "user", None)
+    if not user:
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"code": "UNAUTHORIZED", "message": "Not authenticated"}},
+        )
+
+    role = await get_workspace_member_role(workspace_id, user, db)
+    if role is None:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": {
+                    "code": "FORBIDDEN",
+                    "message": "Not a member of this workspace",
+                }
+            },
+        )
+
+    cs = await db.get(ChatSession, session_id)
+    if not cs or cs.workspace_id != workspace_id or cs.archived:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND", "message": "Session not found"}},
+        )
+
+    # Load checkpoints via the framework-agnostic store.
+    from src.runtime.adapters.langgraph_bridge import LangGraphCheckpointShim
+    from src.runtime.harness.checkpoint import SQLiteCheckpointStore
+
+    store = SQLiteCheckpointStore()
+    cps = await store.list(session_id)
+    shim = LangGraphCheckpointShim(store, session_id, "")
+
+    # Reconstruct the full message list for each checkpoint (the stored
+    # ``messages`` column may be empty for rows written before the fix).
+    rebuilt: list[tuple[Any, list[dict]]] = []
+    for cp in cps:
+        messages = await shim.reconstruct_checkpoint_messages(cp)
+        rebuilt.append((cp, messages))
+
+    # Filter to one restore point per user turn. LangGraph writes one
+    # checkpoint per graph-node execution, so a single user prompt
+    # produces several internal rows (start/agent/tools/end) with
+    # monotonically increasing message counts. Group checkpoints by the
+    # number of USER messages in the reconstructed conversation — each
+    # distinct count is one prompt/turn — and keep the LAST (most
+    # complete) checkpoint of each group. This collapses the ~5 internal
+    # rows per prompt down to a single, meaningful restore point.
+    result: list[CheckpointInfo] = []
+    seen_user_counts: set[int] = set()
+    for cp, messages in reversed(rebuilt):
+        user_count = sum(1 for m in messages if m.get("role") == "user")
+        if user_count not in seen_user_counts:
+            seen_user_counts.add(user_count)
+            preview = _checkpoint_preview(messages)
+            result.append(CheckpointInfo(
+                sequence=cp.sequence,
+                created_at=cp.created_at.isoformat() if cp.created_at else None,
+                message_count=len(messages),
+                preview=preview,
+            ))
+    # Built newest-first above; return oldest-first.
+    result.reverse()
+    return result
+
+
+@router.post(
+    "/api/v1/workspaces/{workspace_id}/sessions/{session_id}/checkpoints/{sequence}/restore",
+    response_model=RestoreResponse,
+)
+async def restore_checkpoint(
+    workspace_id: str,
+    session_id: str,
+    sequence: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Branch-restore from a checkpoint: creates a new session seeded with
+    the checkpoint's messages (deepagents only).
+
+    Returns the new session_id so the frontend can navigate to it. The
+    original session is never modified — this is a branch, not a rollback.
+    """
+    user = getattr(request.state, "user", None)
+    if not user:
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"code": "UNAUTHORIZED", "message": "Not authenticated"}},
+        )
+
+    role = await get_workspace_member_role(workspace_id, user, db)
+    if role is None:
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": {
+                    "code": "FORBIDDEN",
+                    "message": "Not a member of this workspace",
+                }
+            },
+        )
+
+    cs = await db.get(ChatSession, session_id)
+    if not cs or cs.workspace_id != workspace_id or cs.archived:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND", "message": "Session not found"}},
+        )
+
+    # Only members+ can restore (viewers cannot).
+    user_id = user.get("sub") or user.get("id", "")
+    tenant_role = user.get("role", "member")
+    if not _can_mutate(cs, user_id, role, tenant_role):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": {
+                    "code": "FORBIDDEN",
+                    "message": "You do not have permission to restore from this session",
+                }
+            },
+        )
+
+    # Load the target checkpoint.
+    from src.runtime.adapters.langgraph_bridge import LangGraphCheckpointShim
+    from src.runtime.harness.checkpoint import SQLiteCheckpointStore
+
+    store = SQLiteCheckpointStore()
+    cp = await store.load(session_id, sequence)
+    if cp is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND", "message": "Checkpoint not found"}},
+        )
+
+    # Reconstruct the full message list at this checkpoint (the stored
+    # ``messages`` column may be empty for rows written before the fix).
+    shim = LangGraphCheckpointShim(store, session_id, "")
+    messages = await shim.reconstruct_checkpoint_messages(cp)
+
+    # Create a new session (branch from parent).
+    import uuid as _uuid
+
+    new_session_id = _uuid.uuid4().hex[:32]
+    new_title = f"{cs.title} (restored from #{sequence})"
+    new_cs = ChatSession(
+        id=new_session_id,
+        workspace_id=workspace_id,
+        owner_id=user_id,
+        title=new_title,
+        visibility="private",
+        agent_name=cs.agent_name,
+    )
+    db.add(new_cs)
+
+    # Seed the new session with the checkpoint's messages.
+    for msg in messages:
+        db.add(ChatMessage(
+            session_id=new_session_id,
+            role=msg.get("role", "user"),
+            content=msg.get("content", ""),
+            tokens=0,
+        ))
+
+    # Append a system note about the restore.
+    db.add(ChatMessage(
+        session_id=new_session_id,
+        role="system",
+        content=f"已从 checkpoint #{sequence} 恢复（原会话: {session_id}）",
+        tokens=0,
+    ))
+
+    # Persist a resumable checkpoint for the new branch session so the
+    # agent can continue the conversation with the restored history.
+    #
+    # Mirrors a NORMAL turn-1 checkpoint produced by the shim: the
+    # LangGraph envelope carries an EMPTY ``channel_values`` (aput pops
+    # messages before serializing) and the authoritative conversation
+    # lives in ``checkpoint_writes`` — one ``messages`` write per message,
+    # each wrapped as a single-element list (exactly how langgraph 1.2+
+    # routes appended messages). ``aget_tuple`` then rebuilds the full
+    # history from those writes on resume, and subsequent turns append to
+    # the same table so the post-restore conversation stays consistent.
+    #
+    # Seeding the writes (not stuffing them into the envelope) is what
+    # prevents the restore from losing the pre-restore history after the
+    # first continued turn — without it, only the new messages would ever
+    # reach ``checkpoint_writes``.
+    if messages:
+        import base64 as _b64
+        from datetime import datetime, timezone
+
+        from src.runtime.harness.checkpoint import Checkpoint as CPCheckpoint
+
+        new_checkpoint_id = _uuid.uuid4().hex
+        lc_messages = shim._to_langchain_messages(messages)
+        envelope = {
+            "v": 1,
+            "id": new_checkpoint_id,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "channel_values": {},
+            # Channel versions MUST be integers. LangGraph's pregel loop
+            # does ``max(checkpoint["channel_versions"].values())`` when
+            # applying the seeded pending writes on resume
+            # (_algo.py:apply_writes); a mixed str/int value raises
+            # ``TypeError: '>' not supported between instances of 'int'
+            # and 'str'``. The base ``messages`` version is 0 — the
+            # channel is empty until the seeded writes (one per restored
+            # message) are re-applied, exactly like a normal resume.
+            "channel_versions": {
+                "messages": 0,
+                "__start__": 1,
+            },
+            "versions_seen": {},
+            "pending_sends": [],
+        }
+        type_str, payload_bytes = shim.serde.dumps_typed(envelope)
+        encoded = {
+            "type": type_str,
+            "payload_b64": _b64.b64encode(payload_bytes).decode("ascii"),
+            "checkpoint_id": new_checkpoint_id,
+        }
+        # Carry the source checkpoint's LangGraph metadata so resume works.
+        # LangGraph reads ``metadata["step"]`` when resuming a thread
+        # (pregel/_loop.py: `self.step = self.checkpoint_metadata["step"] + 1`);
+        # without it the next message raises ``KeyError: 'step'``. We keep
+        # the original ``step`` (so numbering continues naturally) and drop
+        # ``writes``/``parents`` — those describe the OLD checkpoint's
+        # pending tool calls and would wrongly signal resumable tool state
+        # on the fresh branch.
+        source_metadata = cp.metadata if isinstance(cp.metadata, dict) else {}
+        new_metadata = {
+            "step": source_metadata.get("step", 0),
+            "source": "restore",
+            "restored_from": session_id,
+            "restored_from_sequence": sequence,
+        }
+        await store.save(
+            CPCheckpoint(
+                session_id=new_session_id,
+                sequence=1,
+                messages=messages,
+                tool_state={"langgraph_checkpoint": encoded},
+                agent_id=cs.agent_name or "",
+                metadata=new_metadata,
+            )
+        )
+        # Seed the per-message writes (scoped to the new checkpoint id so
+        # aget_tuple's pending-write load picks them up). task_id ordering
+        # (t1, t2, …) is the tiebreaker when created_at values collide.
+        restore_config = {
+            "configurable": {
+                "thread_id": new_session_id,
+                "checkpoint_id": new_checkpoint_id,
+            }
+        }
+        for idx, lc_msg in enumerate(lc_messages, start=1):
+            await shim.aput_writes(
+                restore_config,
+                [("messages", [lc_msg])],
+                task_id=f"r{idx}",
+            )
+
+    await db.commit()
+
+    return RestoreResponse(
+        session_id=new_session_id,
+        title=new_title,
+        restored_from_session_id=session_id,
+        restored_from_sequence=sequence,
+    )

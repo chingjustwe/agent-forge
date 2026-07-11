@@ -667,13 +667,19 @@ class TestDeleteSession:
 # ---------------------------------------------------------------------------
 class TestChatSessionIdPersistence:
     @pytest.mark.asyncio
-    async def test_chat_with_session_writes_messages(self, app, httpx_mock):
-        # Mock the LLM upstream so the SSE stream completes.
-        httpx_mock.add_response(
-            url="https://api.deepseek.com/v1/chat/completions",
-            content=b'data: {"choices":[{"delta":{"content":"Hi there"},"finish_reason":null}]}\n\ndata: [DONE]\n',
-            headers={"Content-Type": "text/event-stream"},
-        )
+    async def test_chat_with_session_writes_messages(self, app, monkeypatch):
+        # Stub the adapter to avoid real LLM calls.
+        from src.runtime.models import StreamEvent
+        from src.runtime.adapters.deepagents import DeepAgentsAdapter
+
+        async def _fake_run(self, messages, ctx):
+            yield StreamEvent(type="text", data={"content": "Hi there"})
+            yield StreamEvent(
+                type="status",
+                data={"usage": {"input_tokens": 1, "output_tokens": 1}},
+            )
+
+        monkeypatch.setattr(DeepAgentsAdapter, "run", _fake_run)
 
         suffix = _uuid.uuid4().hex[:8]
         ws_id = f"ws-chat-{suffix}"
@@ -726,12 +732,18 @@ class TestChatSessionIdPersistence:
             assert "Hi there" in asst_msg.content
 
     @pytest.mark.asyncio
-    async def test_chat_without_session_still_works(self, app, httpx_mock):
-        httpx_mock.add_response(
-            url="https://api.deepseek.com/v1/chat/completions",
-            content=b'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}\n\ndata: [DONE]\n',
-            headers={"Content-Type": "text/event-stream"},
-        )
+    async def test_chat_without_session_still_works(self, app, monkeypatch):
+        from src.runtime.models import StreamEvent
+        from src.runtime.adapters.deepagents import DeepAgentsAdapter
+
+        async def _fake_run(self, messages, ctx):
+            yield StreamEvent(type="text", data={"content": "Hi"})
+            yield StreamEvent(
+                type="status",
+                data={"usage": {"input_tokens": 1, "output_tokens": 1}},
+            )
+
+        monkeypatch.setattr(DeepAgentsAdapter, "run", _fake_run)
 
         suffix = _uuid.uuid4().hex[:8]
         ws_id = f"ws-chat2-{suffix}"
@@ -776,3 +788,275 @@ class TestChatSessionIdPersistence:
             assert len(session_rows) == 1
             assert session_rows[0].id == new_session_id
             assert session_rows[0].owner_id == owner_id
+
+
+# ---------------------------------------------------------------------------
+# GET /api/v1/workspaces/{ws_id}/sessions/{session_id}/checkpoints — Wave 2
+# ---------------------------------------------------------------------------
+class TestListCheckpoints:
+    @pytest.mark.asyncio
+    async def test_filters_to_turn_boundary_checkpoints(self, app):
+        """Wave 2 fix (Bug 2): LangGraph writes one checkpoint per graph
+        node, so a single user turn produces several internal rows. The
+        list endpoint must collapse them to one restore point per
+        distinct (monotonically increasing) message count."""
+        suffix = _uuid.uuid4().hex[:8]
+        ws_id = f"ws-cp-{suffix}"
+        tid = f"t-cp-{suffix}"
+        owner_id = f"owner-{suffix}"
+        token = await _seed_workspace_with_owner(ws_id, tid, owner_id)
+
+        async with async_session() as session:
+            cs = ChatSession(
+                workspace_id=ws_id, owner_id=owner_id, visibility="private"
+            )
+            session.add(cs)
+            await session.commit()
+            await session.refresh(cs)
+            cs_id = cs.id
+
+        # The ``checkpoints`` table is a raw-SQL migration table (M13), not
+        # part of Base.metadata, so create it explicitly for the test.
+        from sqlalchemy import text
+
+        from src.infra.db.engine import engine
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS checkpoints ("
+                    "session_id VARCHAR(32) NOT NULL,"
+                    "sequence INTEGER NOT NULL,"
+                    "messages TEXT NOT NULL,"
+                    "tool_state TEXT NOT NULL,"
+                    "agent_id VARCHAR(32) NOT NULL,"
+                    "metadata TEXT NOT NULL DEFAULT '{}',"
+                    "created_at DATETIME NOT NULL,"
+                    "PRIMARY KEY (session_id, sequence)"
+                    ")"
+                )
+            )
+
+        # Seed 5 LangGraph-internal checkpoints for a single user turn.
+        # All carry the same one user message, so they must collapse into
+        # ONE restore point (the last, most complete one) — not 5.
+        from src.runtime.harness.checkpoint import Checkpoint, SQLiteCheckpointStore
+
+        store = SQLiteCheckpointStore()
+        seeded = [
+            [],
+            [{"role": "user", "content": "hi"}],
+            [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}],
+            [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}],
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+                {"role": "assistant", "content": "done"},
+            ],
+        ]
+        for i, msgs in enumerate(seeded, start=1):
+            await store.save(
+                Checkpoint(session_id=cs_id, sequence=i, messages=msgs)
+            )
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                f"/api/v1/workspaces/{ws_id}/sessions/{cs_id}/checkpoints",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            # One restore point for the empty pre-turn state (seq 1) and one
+            # for the completed single-user-message turn (last = seq 5).
+            assert [c["message_count"] for c in body] == [0, 3]
+            assert [c["sequence"] for c in body] == [1, 5]
+
+    @pytest.mark.asyncio
+    async def test_one_restore_point_per_user_turn(self, app):
+        """Bug 2 regression: two prompts (each producing ~5 LangGraph
+        internal checkpoints) must collapse to one restore point per
+        turn, not ~10 rows. Mirrors the reported '2 messages -> 10
+        checkpoints' symptom."""
+        suffix = _uuid.uuid4().hex[:8]
+        ws_id = f"ws-cp3-{suffix}"
+        tid = f"t-cp3-{suffix}"
+        owner_id = f"owner-{suffix}"
+        token = await _seed_workspace_with_owner(ws_id, tid, owner_id)
+
+        async with async_session() as session:
+            cs = ChatSession(
+                workspace_id=ws_id, owner_id=owner_id, visibility="private"
+            )
+            session.add(cs)
+            await session.commit()
+            await session.refresh(cs)
+            cs_id = cs.id
+
+        from sqlalchemy import text
+
+        from src.infra.db.engine import engine
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS checkpoints ("
+                    "session_id VARCHAR(32) NOT NULL,"
+                    "sequence INTEGER NOT NULL,"
+                    "messages TEXT NOT NULL,"
+                    "tool_state TEXT NOT NULL,"
+                    "agent_id VARCHAR(32) NOT NULL,"
+                    "metadata TEXT NOT NULL DEFAULT '{}',"
+                    "created_at DATETIME NOT NULL,"
+                    "PRIMARY KEY (session_id, sequence)"
+                    ")"
+                )
+            )
+
+        # Two turns. Turn 1 = user msg #1 (+ assistant). Turn 2 = user msg
+        # #2 (+ assistant). 5 raw checkpoints per turn -> 10 total.
+        from src.runtime.harness.checkpoint import Checkpoint, SQLiteCheckpointStore
+
+        store = SQLiteCheckpointStore()
+        m1 = [{"role": "user", "content": "q1"}]
+        m1b = [{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"}]
+        m2 = [{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"},
+              {"role": "user", "content": "q2"}]
+        m2b = [{"role": "user", "content": "q1"}, {"role": "assistant", "content": "a1"},
+               {"role": "user", "content": "q2"}, {"role": "assistant", "content": "a2"}]
+        # 5 rows per turn (am, a, end, bm, b) with shared user-count.
+        turn1 = [m1, m1, m1b, m1b, m1b]
+        turn2 = [m2, m2, m2b, m2b, m2b]
+        seq = 0
+        for msgs in turn1 + turn2:
+            seq += 1
+            await store.save(Checkpoint(session_id=cs_id, sequence=seq, messages=msgs))
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                f"/api/v1/workspaces/{ws_id}/sessions/{cs_id}/checkpoints",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            # turn1 (1 user msg, 2 msgs total) + turn2 (2 user msgs, 4 msgs
+            # total). Each turn collapses to its most-complete checkpoint, so
+            # 10 raw rows -> 2 restore points. (Real LangGraph flow has no
+            # 0-message checkpoint, so no empty restore point appears here.)
+            assert [c["message_count"] for c in body] == [2, 4]
+            assert [c["sequence"] for c in body] == [5, 10]
+
+    @pytest.mark.asyncio
+    async def test_requires_membership(self, app):
+        suffix = _uuid.uuid4().hex[:8]
+        ws_id = f"ws-cp2-{suffix}"
+        tid = f"t-cp2-{suffix}"
+        await _seed_workspace_with_owner(ws_id, tid, f"owner-{suffix}")
+        outsider = _token(f"out-{suffix}", tid)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get(
+                f"/api/v1/workspaces/{ws_id}/sessions/nope/checkpoints",
+                headers={"Authorization": f"Bearer {outsider}"},
+            )
+            assert resp.status_code == 403
+
+
+class TestRestoreCheckpoint:
+    @pytest.mark.asyncio
+    async def test_restore_branches_with_real_messages_and_checkpoint(self, app):
+        """Bug regression: restoring from a checkpoint must seed the new
+        branch session with the REAL conversation (not empty) and also
+        write a resumable checkpoint so the agent can continue it."""
+        suffix = _uuid.uuid4().hex[:8]
+        ws_id = f"ws-rcp-{suffix}"
+        tid = f"t-rcp-{suffix}"
+        owner_id = f"owner-{suffix}"
+        token = await _seed_workspace_with_owner(ws_id, tid, owner_id)
+
+        async with async_session() as session:
+            cs = ChatSession(workspace_id=ws_id, owner_id=owner_id, visibility="private")
+            session.add(cs)
+            await session.commit()
+            await session.refresh(cs)
+            cs_id = cs.id
+
+        from sqlalchemy import text
+
+        from src.infra.db.engine import engine
+        from src.runtime.harness.checkpoint import Checkpoint, SQLiteCheckpointStore
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS checkpoints ("
+                    "session_id VARCHAR(32) NOT NULL,"
+                    "sequence INTEGER NOT NULL,"
+                    "messages TEXT NOT NULL,"
+                    "tool_state TEXT NOT NULL,"
+                    "agent_id VARCHAR(32) NOT NULL,"
+                    "metadata TEXT NOT NULL DEFAULT '{}',"
+                    "created_at DATETIME NOT NULL,"
+                    "PRIMARY KEY (session_id, sequence))"
+                )
+            )
+            # restore_checkpoint now writes per-message rows to
+            # checkpoint_writes so the resumed session keeps full history.
+            # Drop first to guarantee the M20 schema (checkpoint_id column)
+            # regardless of migration drift in the shared test DB.
+            await conn.execute(text("DROP TABLE IF EXISTS checkpoint_writes"))
+            await conn.execute(
+                text(
+                    "CREATE TABLE checkpoint_writes ("
+                    "session_id VARCHAR(64) NOT NULL,"
+                    "checkpoint_id VARCHAR(64) NOT NULL DEFAULT '',"
+                    "task_id VARCHAR(64) NOT NULL,"
+                    "task_path VARCHAR(256) NOT NULL DEFAULT '',"
+                    "channel VARCHAR(256) NOT NULL,"
+                    "value TEXT NOT NULL,"
+                    "created_at DATETIME NOT NULL,"
+                    "PRIMARY KEY (session_id, checkpoint_id, task_id, task_path, channel))"
+                )
+            )
+
+        msgs = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+        ]
+        store = SQLiteCheckpointStore()
+        await store.save(
+            Checkpoint(session_id=cs_id, sequence=1, messages=msgs, agent_id="a-1")
+        )
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/api/v1/workspaces/{ws_id}/sessions/{cs_id}/checkpoints/1/restore",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            new_sid = body["session_id"]
+            assert new_sid != cs_id
+
+        # New branch session seeded with the conversation messages.
+        async with async_session() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        "SELECT role, content FROM chat_messages "
+                        "WHERE session_id = :sid ORDER BY id"
+                    ),
+                    {"sid": new_sid},
+                )
+            ).fetchall()
+        contents = [(r.role, r.content) for r in rows]
+        assert ("user", "Hi") in contents
+        assert ("assistant", "Hello") in contents
+
+        # And it carries a resumable checkpoint row with the same messages.
+        new_cps = await store.list(new_sid)
+        assert len(new_cps) == 1
+        assert new_cps[0].messages == msgs

@@ -2,8 +2,10 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   AgentConfig,
+  AgentStep,
   ChatMessageInfo,
   ChatSessionInfo,
+  CheckpointInfo,
   SessionShare,
   User,
   WorkspaceMember,
@@ -14,8 +16,10 @@ import {
   getCurrentUser,
   getSession,
   listAgents,
+  listCheckpoints,
   listSessionShares,
   listSessions,
+  restoreCheckpoint,
   streamChat,
   updateSession,
 } from "../api";
@@ -25,6 +29,7 @@ import { Select } from "../components/Select";
 import { useToast } from "../components/Toast";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
+import { AgentSteps } from "../components/AgentSteps";
 import { Dropdown } from "../components/Dropdown";
 import { SkeletonTable } from "../components/Skeleton";
 
@@ -222,11 +227,15 @@ function SessionList() {
 // ---------------------------------------------------------------------------
 // Detail view -- load history + continue the conversation
 // ---------------------------------------------------------------------------
+
+/** Local extension of ChatMessageInfo that carries live intermediate steps. */
+type LiveMessage = ChatMessageInfo & { steps?: AgentStep[] };
+
 function SessionDetail({ sessionId }: { sessionId: string }) {
   const { currentWorkspaceId, currentRole } = useWorkspace();
   const isNew = sessionId === "new";
   const [session, setSession] = useState<ChatSessionInfo | null>(null);
-  const [messages, setMessages] = useState<ChatMessageInfo[]>([]);
+  const [messages, setMessages] = useState<LiveMessage[]>([]);
   const [user, setUser] = useState<User | null>(null);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -257,6 +266,13 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
   const [selectedUserId, setSelectedUserId] = useState("");
   const [sharing, setSharing] = useState(false);
   const [removingUserId, setRemovingUserId] = useState<string | null>(null);
+
+  // Wave 2: Checkpoint history panel.
+  const [showCheckpointModal, setShowCheckpointModal] = useState(false);
+  const [checkpoints, setCheckpoints] = useState<CheckpointInfo[]>([]);
+  const [checkpointLoading, setCheckpointLoading] = useState(false);
+  const [checkpointError, setCheckpointError] = useState<string | null>(null);
+  const [restoringSeq, setRestoringSeq] = useState<number | null>(null);
 
   async function loadSession() {
     if (!currentWorkspaceId || isNew) return;
@@ -404,6 +420,49 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
           setMessages(prev =>
             prev.map(m => (m.id === asstTempId ? { ...m, content: assistantContent } : m))
           );
+        } else if (event.type === "reasoning") {
+          const chunk = (event.data.content as string) ?? "";
+          setMessages(prev =>
+            prev.map(m => {
+              if (m.id !== asstTempId) return m;
+              const steps = [...(m.steps ?? [])];
+              const last = steps[steps.length - 1];
+              if (last && last.kind === "reasoning") {
+                last.content += chunk;
+              } else {
+                steps.push({ kind: "reasoning", content: chunk });
+              }
+              return { ...m, steps };
+            })
+          );
+        } else if (event.type === "tool_call") {
+          const { call_id, name, args } = event.data as { call_id: string; name: string; args: unknown };
+          setMessages(prev =>
+            prev.map(m =>
+              m.id === asstTempId
+                ? { ...m, steps: [...(m.steps ?? []), { kind: "tool" as const, id: call_id, name, args, status: "running" as const }] }
+                : m
+            )
+          );
+        } else if (event.type === "tool_result") {
+          const { call_id, name, output, error } = event.data as { call_id?: string; name: string; output?: string; error?: string };
+          setMessages(prev =>
+            prev.map(m => {
+              if (m.id !== asstTempId) return m;
+              const steps = (m.steps ?? []).map(s => {
+                if (s.kind === "tool" && s.status === "running") {
+                  // Match by call_id first (v3 tools channel), then by name (legacy).
+                  const matchById = call_id && s.id === call_id;
+                  const matchByName = !call_id && s.name === name;
+                  if (matchById || matchByName) {
+                    return { ...s, result: output, error, status: "done" as const };
+                  }
+                }
+                return s;
+              });
+              return { ...m, steps };
+            })
+          );
         } else if (event.type === "error") {
           const errMsg = (event.data as { message?: string })?.message || "Unknown error";
           setMessages(prev =>
@@ -453,6 +512,38 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
     const ta = e.target;
     ta.style.height = "auto";
     ta.style.height = `${ta.scrollHeight}px`;
+  }
+
+  // Wave 2: open checkpoint history modal.
+  async function openCheckpointModal() {
+    if (!session || !currentWorkspaceId) return;
+    setShowCheckpointModal(true);
+    setCheckpointError(null);
+    setCheckpointLoading(true);
+    try {
+      const cps = await listCheckpoints(currentWorkspaceId, session.id);
+      setCheckpoints(cps);
+    } catch (e: unknown) {
+      setCheckpointError(e instanceof Error ? e.message : "Failed to load checkpoints");
+    } finally {
+      setCheckpointLoading(false);
+    }
+  }
+
+  async function handleRestore(sequence: number) {
+    if (!session || !currentWorkspaceId) return;
+    setRestoringSeq(sequence);
+    setCheckpointError(null);
+    try {
+      const result = await restoreCheckpoint(currentWorkspaceId, session.id, sequence);
+      toast.success("Restored", `Branch created at #${sequence}`);
+      setShowCheckpointModal(false);
+      navigate(`/sessions/${result.session_id}`);
+    } catch (e: unknown) {
+      setCheckpointError(e instanceof Error ? e.message : "Failed to restore checkpoint");
+    } finally {
+      setRestoringSeq(null);
+    }
   }
 
   // P3-5: open the share modal -- load current shares + workspace members.
@@ -607,8 +698,34 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           {canMutate && session && (
-            <button className="btn btn-secondary" onClick={openShareModal} title="Share this session with workspace members">
-              Share
+            <>
+              <button
+                className="btn btn-secondary"
+                onClick={openCheckpointModal}
+                title="View checkpoint history"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 4, verticalAlign: -2 }}>
+                  <circle cx="8" cy="8" r="6.5" />
+                  <path d="M8 4.5V8l2.5 1.5" />
+                </svg>
+                History
+              </button>
+              <button className="btn btn-secondary" onClick={openShareModal} title="Share this session with workspace members">
+                Share
+              </button>
+            </>
+          )}
+          {!canMutate && session && (
+            <button
+              className="btn btn-secondary"
+              onClick={openCheckpointModal}
+              title="View checkpoint history"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: 4, verticalAlign: -2 }}>
+                <circle cx="8" cy="8" r="6.5" />
+                <path d="M8 4.5V8l2.5 1.5" />
+              </svg>
+              History
             </button>
           )}
           <button className="btn btn-secondary" onClick={() => navigate("/sessions")}>Back</button>
@@ -650,6 +767,9 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
                 <div className={`chat-bubble chat-bubble-${m.role}`}>
                   {m.content || (m.role === "assistant" && streaming ? "..." : "")}
                 </div>
+                {m.role === "assistant" && m.steps && m.steps.length > 0 && (
+                  <AgentSteps steps={m.steps} streaming={streaming} />
+                )}
               </div>
             ))}
             <div ref={messagesEndRef} />
@@ -797,6 +917,80 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
               );
             })()}
           </>
+        )}
+      </Modal>
+
+      {/* Wave 2: Checkpoint History Modal */}
+      <Modal
+        open={showCheckpointModal}
+        onClose={() => !restoringSeq && setShowCheckpointModal(false)}
+        title="Checkpoint History"
+        width="md"
+      >
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", marginBottom: 16 }}>
+          View and restore from previous conversation checkpoints. Restoring creates a new branch session.
+        </p>
+
+        {checkpointError && <div className="alert alert-error" style={{ margin: "0 0 12px" }}>{checkpointError}</div>}
+
+        {checkpointLoading ? (
+          <div className="loading" style={{ padding: 16 }}>Loading...</div>
+        ) : checkpoints.length === 0 ? (
+          <EmptyState
+            title="No Checkpoints"
+            description="No checkpoints have been saved for this session yet."
+          />
+        ) : (
+          <div style={{ borderTop: "1px solid var(--border-color)" }}>
+            {checkpoints.map(cp => (
+              <div key={cp.sequence} style={{
+                display: "flex", alignItems: "center", gap: 12,
+                padding: "12px 0", borderBottom: "1px solid var(--border-color)",
+              }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                    <span style={{
+                      background: "var(--accent)",
+                      color: "#fff",
+                      borderRadius: 10,
+                      padding: "1px 7px",
+                      fontSize: "0.72rem",
+                      fontWeight: 600,
+                      flexShrink: 0,
+                    }}>
+                      #{cp.sequence}
+                    </span>
+                    <span style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                      {cp.created_at ? formatTimestamp(cp.created_at) : "-"}
+                    </span>
+                    <span style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                      {cp.message_count} messages
+                    </span>
+                  </div>
+                  {cp.preview && (
+                    <div style={{
+                      fontSize: "0.82rem",
+                      color: "var(--text-secondary)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      maxWidth: "100%",
+                    }}>
+                      {cp.preview}
+                    </div>
+                  )}
+                </div>
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={() => handleRestore(cp.sequence)}
+                  disabled={restoringSeq !== null}
+                  title="Restore from this checkpoint"
+                >
+                  {restoringSeq === cp.sequence ? "Restoring..." : "Continue from here"}
+                </button>
+              </div>
+            ))}
+          </div>
         )}
       </Modal>
     </div>

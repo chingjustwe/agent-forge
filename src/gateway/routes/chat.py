@@ -100,6 +100,7 @@ async def _event_stream(
     session_id: str | None = None,
     workspace_settings: dict | None = None,
     workspace_root: str = "",
+    tenant_id: str = "",
 ) -> AsyncIterator[str]:
     """SSE stream backed by HarnessRuntime.run().
 
@@ -178,6 +179,21 @@ async def _event_stream(
         yield f"data: {StreamEvent(type='error', data={'code': 'LLM_ERROR', 'message': error}).model_dump_json()}\n\n"
 
     duration_ms = int((time.monotonic() - start) * 1000)
+    input_tokens = total_tokens.get("input", 0)
+    output_tokens = total_tokens.get("output", 0)
+
+    # Compute cost from model_pricing (synced from models.dev); unknown
+    # models default to 0.0. Computed once and shared with record_request
+    # and record_usage.
+    try:
+        from src.infra.telemetry.pricing import ModelPricingSync
+        cost = await ModelPricingSync().get_cost(
+            config.model, input_tokens, output_tokens
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("Failed to compute cost for %s: %s", config.model, exc)
+        cost = 0.0
+
     try:
         from src.infra.telemetry.collector import TelemetryCollector
         collector = TelemetryCollector()
@@ -191,9 +207,20 @@ async def _event_stream(
             duration_ms=duration_ms,
             tokens=total_tokens,
             error=error,
+            tenant_id=tenant_id,
+            cost=cost,
         )
     except Exception:
         pass
+
+    # Record token usage + cost into quota_usage so the Quota page
+    # reflects real consumption.
+    try:
+        await _quota_guardrail.record_usage(
+            ws_id, input_tokens + output_tokens, cost
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("Failed to record quota usage for %s: %s", ws_id, exc)
 
     # P1-1: persist the assistant reply AFTER the stream completes.
     if session_id:
@@ -349,6 +376,7 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
         _event_stream(
             messages, config, trace_id, user_id, session_id,
             workspace_settings, workspace_root,
+            tenant_id=user.get("tenant_id", "") or "",
         ),
         media_type="text/event-stream",
     )

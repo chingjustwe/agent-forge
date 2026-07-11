@@ -1,11 +1,11 @@
-"""Tests for Checkpoint model, SQLiteCheckpointStore, and CheckpointScope.
+"""Tests for Checkpoint model and SQLiteCheckpointStore.
 
 Covers:
 - Checkpoint: default field values, full-field construction
 - SQLiteCheckpointStore: save/load, load_latest, load by sequence, list,
   delete, next_sequence, missing session returns None
-- CheckpointScope: save+commit persistence, idempotent commit,
-  load_latest, save without commit does not persist
+
+Wave 2.5: CheckpointScope tests removed (class deleted with DirectLLM).
 """
 from __future__ import annotations
 
@@ -18,7 +18,6 @@ from src.infra.db.engine import async_session, engine
 from src.infra.db.models import Base
 from src.runtime.harness.checkpoint import (
     Checkpoint,
-    CheckpointScope,
     SQLiteCheckpointStore,
 )
 
@@ -220,75 +219,3 @@ class TestSQLiteCheckpointStore:
     async def test_load_missing_returns_none(self):
         store = SQLiteCheckpointStore()
         assert await store.load("nonexistent-session") is None
-
-
-# ── TestCheckpointScope ─────────────────────────────────────────────────
-
-
-class TestCheckpointScope:
-    @pytest.mark.asyncio
-    async def test_save_and_commit(self):
-        store = SQLiteCheckpointStore()
-        scope = CheckpointScope(
-            store=store, session_id="sc-1", agent_id="agent-1"
-        )
-        await scope.initialize()
-        await scope.save(
-            messages=[{"role": "user", "content": "hi"}],
-            tool_state={"t": 1},
-            metadata={"k": "v"},
-        )
-        await scope.commit()
-        loaded = await store.load("sc-1")
-        assert loaded is not None
-        assert loaded.session_id == "sc-1"
-        assert loaded.agent_id == "agent-1"
-        assert loaded.messages == [{"role": "user", "content": "hi"}]
-        assert loaded.tool_state == {"t": 1}
-        assert loaded.metadata == {"k": "v"}
-
-    @pytest.mark.asyncio
-    async def test_commit_is_idempotent(self):
-        store = SQLiteCheckpointStore()
-        scope = CheckpointScope(
-            store=store, session_id="sc-2", agent_id="agent-2"
-        )
-        await scope.initialize()
-        await scope.save(
-            messages=[{"role": "user", "content": "hi"}],
-            tool_state={},
-        )
-        await scope.commit()
-        await scope.commit()
-        all_cps = await store.list("sc-2")
-        assert len(all_cps) == 1
-
-    @pytest.mark.asyncio
-    async def test_load_latest(self):
-        store = SQLiteCheckpointStore()
-        scope = CheckpointScope(
-            store=store, session_id="sc-3", agent_id="agent-3"
-        )
-        await scope.initialize()
-        await scope.save(
-            messages=[{"role": "user", "content": "hello"}],
-            tool_state={},
-        )
-        await scope.commit()
-        latest = await scope.load_latest()
-        assert latest is not None
-        assert latest.session_id == "sc-3"
-        assert latest.messages == [{"role": "user", "content": "hello"}]
-
-    @pytest.mark.asyncio
-    async def test_save_without_commit_does_not_persist(self):
-        store = SQLiteCheckpointStore()
-        scope = CheckpointScope(
-            store=store, session_id="sc-4", agent_id="agent-4"
-        )
-        await scope.initialize()
-        await scope.save(
-            messages=[{"role": "user", "content": "hi"}],
-            tool_state={},
-        )
-        assert await store.load("sc-4") is None
