@@ -84,6 +84,39 @@ async def test_summary_returns_data(app):
 
 
 @pytest.mark.asyncio
+async def test_member_forced_to_own_data_only(app):
+    """权限规则：member 只能看自己的数据，即使不传 user_id 也强制过滤。"""
+    # 两个 member 在同一 workspace
+    token_alice = await _seed_membership("ws-obs-filter", "alice-filter", "member")
+    await _seed_membership("ws-obs-filter", "bob-filter", "member")
+    collector = TelemetryCollector()
+    # Alice 的请求
+    await collector.record_request(
+        user_id="alice-filter", ws_id="ws-obs-filter", model="m1", duration_ms=10,
+        tokens={"input": 100, "output": 200},
+    )
+    # Bob 的请求
+    await collector.record_request(
+        user_id="bob-filter", ws_id="ws-obs-filter", model="m1", duration_ms=20,
+        tokens={"input": 50, "output": 50},
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Alice 不传 user_id — 后端应强制过滤为只看 alice 自己
+        resp = await client.get(
+            "/api/v1/workspaces/ws-obs-filter/observability/summary",
+            headers={"Authorization": f"Bearer {token_alice}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Alice 只看到自己的 1 条请求，不是整个 workspace 的 2 条
+        assert data["total_requests"] == 1
+        assert data["input_tokens"] == 100
+        assert data["output_tokens"] == 200
+
+
+@pytest.mark.asyncio
 async def test_requests_list(app):
     token = await _seed_membership("ws-obs-2", "obs-user-2", "member")
 

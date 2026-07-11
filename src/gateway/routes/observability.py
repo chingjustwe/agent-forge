@@ -6,17 +6,40 @@ from src.infra.telemetry.collector import TelemetryCollector
 router = APIRouter()
 
 
+def _resolve_user_id(request: Request, ctx: dict) -> str | None:
+    """统一权限规则：member/viewer 只能看自己的数据，admin 看整个 workspace。
+
+    前端传 user_id=me 时解析为当前用户 ID；
+    member/viewer 无论传什么都强制改为自己的 user_id（防止越权）。
+    """
+    workspace_role = ctx.get("workspace_role", "")
+    user = ctx.get("user") or request.state.user
+    current_uid = user.get("sub") or user.get("id")
+
+    # member/viewer 强制只看自己
+    if workspace_role in ("member", "viewer"):
+        return current_uid
+
+    # admin 传 user_id=me 时解析为当前用户
+    requested = request.query_params.get("user_id")
+    if requested == "me":
+        return current_uid
+    # admin 不传 user_id → 看整个 workspace
+    return None
+
+
 @router.get("/api/v1/workspaces/{ws_id}/observability/summary")
 async def get_summary(
     request: Request,
     ws_id: str,
-    _ctx=Depends(
+    ctx: dict = Depends(
         require_workspace_role("ws_id", "member", "workspace_admin")
     ),
 ):
     since = request.query_params.get("since")
+    user_id = _resolve_user_id(request, ctx)
     collector = TelemetryCollector()
-    summary = await collector.get_summary(ws_id, since)
+    summary = await collector.get_summary(ws_id, since, user_id=user_id)
     return summary
 
 
@@ -67,15 +90,15 @@ async def get_request_detail(
 async def get_token_daily(
     request: Request,
     ws_id: str,
-    _ctx=Depends(
+    ctx: dict = Depends(
         require_workspace_role("ws_id", "member", "workspace_admin")
     ),
 ):
     since = request.query_params.get("since")
     until = request.query_params.get("until")
-
+    user_id = _resolve_user_id(request, ctx)
     collector = TelemetryCollector()
-    data = await collector.get_daily_tokens(ws_id, since, until)
+    data = await collector.get_daily_tokens(ws_id, since, until, user_id=user_id)
     return data
 
 
@@ -83,15 +106,15 @@ async def get_token_daily(
 async def get_latency(
     request: Request,
     ws_id: str,
-    _ctx=Depends(
+    ctx: dict = Depends(
         require_workspace_role("ws_id", "member", "workspace_admin")
     ),
 ):
     since = request.query_params.get("since")
     until = request.query_params.get("until")
-
+    user_id = _resolve_user_id(request, ctx)
     collector = TelemetryCollector()
-    data = await collector.get_latency(ws_id, since, until)
+    data = await collector.get_latency(ws_id, since, until, user_id=user_id)
     return data
 
 
@@ -99,12 +122,12 @@ async def get_latency(
 async def get_errors(
     request: Request,
     ws_id: str,
-    _ctx=Depends(
+    ctx: dict = Depends(
         require_workspace_role("ws_id", "member", "workspace_admin")
     ),
 ):
     since = request.query_params.get("since")
-
+    user_id = _resolve_user_id(request, ctx)
     collector = TelemetryCollector()
-    data = await collector.get_errors(ws_id, since)
+    data = await collector.get_errors(ws_id, since, user_id=user_id)
     return data

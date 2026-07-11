@@ -26,6 +26,7 @@ from src.gateway.routes.memory import router as memory_router
 from src.gateway.routes.guardrails import router as guardrails_router
 from src.gateway.routes.hooks import router as hooks_router
 from src.gateway.routes.scheduler import router as scheduler_router
+from src.gateway.routes.models import router as models_router
 from src.gateway.middleware.auth import AuthMiddleware
 from src.gateway.middleware.audit import AuditMiddleware
 from src.infra.db.engine import engine
@@ -392,6 +393,7 @@ def _migrate_schema(sync_conn):
             "key TEXT,"
             "content TEXT NOT NULL,"
             "metadata TEXT NOT NULL DEFAULT '{}',"
+            "memory_type TEXT NOT NULL DEFAULT 'episodic',"
             "created_at DATETIME NOT NULL,"
             "expires_at DATETIME"
             ")"
@@ -416,7 +418,7 @@ def _migrate_schema(sync_conn):
         cols = {c["name"] for c in insp.get_columns("agent_configs")}
         new_columns = [
             ("system_prompt", "TEXT DEFAULT ''"),
-            ("model", "VARCHAR(100) DEFAULT 'deepseek-chat'"),
+            ("model", "VARCHAR(100) DEFAULT 'deepseek-v4-flash'"),
             ("temperature", "FLOAT DEFAULT 0.7"),
             ("max_tokens", "INTEGER DEFAULT 4096"),
             ("tools", "JSON"),
@@ -581,8 +583,8 @@ def _migrate_schema(sync_conn):
                     "(id, workspace_id, name, framework, config, "
                     " system_prompt, model, temperature, max_tokens, "
                     " created_by, created_at, updated_at) "
-                    "VALUES (:id, :ws, :name, 'direct_llm', '{}', "
-                    "        :sys, 'deepseek-chat', 0.7, 4096, "
+                    "VALUES (:id, :ws, :name, 'deepagents', '{}', "
+                    "        :sys, 'deepseek-v4-flash', 0.7, 4096, "
                     "        :owner, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
                 ),
                 {
@@ -595,6 +597,68 @@ def _migrate_schema(sync_conn):
             )
         if empty:
             print(f"[migration] M19 backfilled {len(empty)} workspace(s) with default agent")
+
+    # Migration M22 (Wave 3 — long-term memory recall enhancement):
+    # Add ``memory_type`` column to memory_records.  Distinguishes
+    # "profile" records (always injected into system prompt) from
+    # "episodic" records (recalled by topic query).  Old records
+    # default to 'episodic' for backward compatibility.
+    if "workspaces" in tables and "memory_records" in tables:
+        cols = {
+            row[1]
+            for row in sync_conn.exec_driver_sql(
+                "PRAGMA table_info(memory_records)"
+            )
+        }
+        if "memory_type" not in cols:
+            sync_conn.exec_driver_sql(
+                "ALTER TABLE memory_records ADD COLUMN memory_type "
+                "TEXT NOT NULL DEFAULT 'episodic'"
+            )
+            sync_conn.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS idx_memory_type "
+                "ON memory_records (scope, scope_id, memory_type)"
+            )
+
+    # Migration M23 (Wave 2.5 — remove DirectLLM): rewrite any legacy
+    # ``framework='direct_llm'`` rows to ``'deepagents'``. DirectLLM was
+    # deleted; _resolve_adapter also falls back to deepagents as a
+    # double safety net (decision D1). This one-shot UPDATE keeps the
+    # DB consistent so listings/filters show the real framework.
+    if "agent_configs" in tables:
+        cur = sync_conn.exec_driver_sql(
+            "SELECT COUNT(*) FROM agent_configs WHERE framework = 'direct_llm'"
+        )
+        stale = cur.fetchone()[0]
+        if stale:
+            sync_conn.exec_driver_sql(
+                "UPDATE agent_configs SET framework = 'deepagents' "
+                "WHERE framework = 'direct_llm'"
+            )
+            print(
+                f"[migration] M23 rewrote {stale} agent_configs row(s) "
+                f"from 'direct_llm' to 'deepagents'"
+            )
+
+    # Migration M24 (Quota cost calculation — model pricing table):
+    # Create ``model_pricing`` table to cache per-model token costs synced
+    # from models.dev. Used by QuotaGuardrail.record_usage to compute cost.
+    # ``Base.metadata.create_all`` already creates it for fresh DBs; this
+    # block handles existing DBs that were created before this table existed.
+    if "model_pricing" not in tables:
+        sync_conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS model_pricing (
+                model_name VARCHAR(255) PRIMARY KEY,
+                full_id VARCHAR(255) NOT NULL,
+                provider VARCHAR(100) NOT NULL,
+                display_name VARCHAR(255) DEFAULT '',
+                input_cost_per_mtok FLOAT DEFAULT 0.0,
+                output_cost_per_mtok FLOAT DEFAULT 0.0,
+                synced_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
 
 
 
@@ -632,6 +696,36 @@ async def lifespan(app: FastAPI):
     # P3a: load persisted MCP server registrations so they survive restarts.
     await registry.mcp.load_from_db()
 
+    # Model pricing sync: fetch from models.dev once at startup, then
+    # schedule an hourly refresh. Failures are logged inside sync() and
+    # never propagate — the platform can run with stale/empty pricing.
+    from src.infra.telemetry.pricing import ModelPricingSync
+    pricing_sync = ModelPricingSync()
+    await pricing_sync.sync()
+    registry.scheduler._scheduler.add_job(
+        pricing_sync.sync,
+        "interval",
+        hours=1,
+        id="model_pricing_sync",
+        name="Sync model pricing from models.dev",
+        replace_existing=True,
+    )
+
+    # P-model-catalog: fetch the live model list from the LLM provider's
+    # /v1/models once at startup, then refresh hourly so the Agents UI
+    # always reflects the real catalog (e.g. deepseek-v4-flash / -v4-pro).
+    from src.infra.llm.models import fetch_available_models
+
+    await fetch_available_models()
+    registry.scheduler._scheduler.add_job(
+        fetch_available_models,
+        "interval",
+        hours=1,
+        id="model_catalog_sync",
+        name="Sync model catalog from provider /v1/models",
+        replace_existing=True,
+    )
+
     yield
 
     # Graceful shutdown: release any held resources (MCP connections,
@@ -663,6 +757,7 @@ def create_app() -> FastAPI:
     app.include_router(guardrails_router)
     app.include_router(hooks_router)
     app.include_router(scheduler_router)
+    app.include_router(models_router)
 
     app.add_middleware(AuthMiddleware)
     app.add_middleware(AuditMiddleware)

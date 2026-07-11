@@ -32,6 +32,8 @@ class TelemetryCollector:
         duration_ms: int = 0,
         tokens: dict | None = None,
         error: str = "",
+        tenant_id: str = "",
+        cost: float = 0.0,
     ) -> str:
         tid = self._trace_id(trace_id)
         tokens_data = tokens or {}
@@ -56,14 +58,14 @@ class TelemetryCollector:
                     "trace_id": tid,
                     "user_id": user_id,
                     "ws_id": ws_id,
-                    "tenant_id": user_id or "",
+                    "tenant_id": tenant_id,
                     "agent": agent,
                     "model": model,
                     "status": status,
                     "duration_ms": duration_ms,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
-                    "cost": 0.0,
+                    "cost": cost,
                     "error": error,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 },
@@ -135,6 +137,7 @@ class TelemetryCollector:
         self,
         ws_id: str,
         since: str | None = None,
+        user_id: str | None = None,
     ) -> dict:
         async with async_session() as session:
             conditions = "WHERE workspace_id = :ws_id"
@@ -142,13 +145,19 @@ class TelemetryCollector:
             if since:
                 conditions += " AND created_at >= :since"
                 params["since"] = since
+            if user_id:
+                conditions += " AND user_id = :user_id"
+                params["user_id"] = user_id
 
             row = (await session.execute(
                 text(f"""
                     SELECT
                         COUNT(*) as total_requests,
                         COALESCE(AVG(duration_ms), 0) as avg_latency_ms,
+                        COALESCE(SUM(input_tokens), 0) as input_tokens,
+                        COALESCE(SUM(output_tokens), 0) as output_tokens,
                         COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens,
+                        COALESCE(SUM(cost), 0) as total_cost,
                         COALESCE(SUM(CASE WHEN error != '' THEN 1 ELSE 0 END) * 1.0 / NULLIF(COUNT(*), 0), 0) as error_rate
                     FROM request_logs {conditions}
                 """),
@@ -158,7 +167,10 @@ class TelemetryCollector:
             return {
                 "total_requests": row.total_requests,
                 "avg_latency_ms": round(float(row.avg_latency_ms), 2),
+                "input_tokens": row.input_tokens or 0,
+                "output_tokens": row.output_tokens or 0,
                 "total_tokens": row.total_tokens or 0,
+                "total_cost": round(float(row.total_cost or 0), 4),
                 "error_rate": round(float(row.error_rate), 4),
                 "active_sessions": 0,
             }
@@ -243,6 +255,7 @@ class TelemetryCollector:
         ws_id: str,
         since: str | None = None,
         until: str | None = None,
+        user_id: str | None = None,
     ) -> list[dict]:
         async with async_session() as session:
             conditions = ["WHERE workspace_id = :ws_id"]
@@ -253,6 +266,9 @@ class TelemetryCollector:
             if until:
                 conditions.append("AND date(created_at) <= :until")
                 params["until"] = until
+            if user_id:
+                conditions.append("AND user_id = :user_id")
+                params["user_id"] = user_id
 
             rows = (await session.execute(
                 text(f"""
@@ -271,6 +287,7 @@ class TelemetryCollector:
         ws_id: str,
         since: str | None = None,
         until: str | None = None,
+        user_id: str | None = None,
     ) -> dict:
         async with async_session() as session:
             conditions = ["WHERE workspace_id = :ws_id"]
@@ -281,6 +298,9 @@ class TelemetryCollector:
             if until:
                 conditions.append("AND created_at <= :until")
                 params["until"] = until
+            if user_id:
+                conditions.append("AND user_id = :user_id")
+                params["user_id"] = user_id
 
             durations_row = (await session.execute(
                 text(f"""
@@ -326,13 +346,16 @@ class TelemetryCollector:
                 ],
             }
 
-    async def get_errors(self, ws_id: str, since: str | None = None) -> list[dict]:
+    async def get_errors(self, ws_id: str, since: str | None = None, user_id: str | None = None) -> list[dict]:
         async with async_session() as session:
             conditions = ["WHERE workspace_id = :ws_id AND error != ''"]
             params: dict[str, Any] = {"ws_id": ws_id}
             if since:
                 conditions.append("AND created_at >= :since")
                 params["since"] = since
+            if user_id:
+                conditions.append("AND user_id = :user_id")
+                params["user_id"] = user_id
 
             rows = (await session.execute(
                 text(f"""
@@ -362,9 +385,9 @@ class TelemetryCollector:
             ).where(RequestLog.tenant_id == tenant_id)
 
             if since:
-                query = query.where(RequestLog.created_at >= since)
+                query = query.where(RequestLog.created_at >= since.isoformat())
             if until:
-                query = query.where(RequestLog.created_at <= until)
+                query = query.where(RequestLog.created_at <= until.isoformat())
 
             query = query.group_by(RequestLog.workspace_id)
             rows = await session.execute(query)
@@ -384,12 +407,16 @@ class TelemetryCollector:
                 by_workspace.append({
                     "workspace_id": ws_id,
                     "total_requests": ws_req,
+                    "input_tokens": ws_in,
+                    "output_tokens": ws_out,
                     "total_tokens": ws_in + ws_out,
                     "total_cost": float(ws_cost),
                 })
 
             return {
                 "total_requests": total_requests,
+                "input_tokens": total_input,
+                "output_tokens": total_output,
                 "total_tokens": total_input + total_output,
                 "total_cost": total_cost,
                 "by_workspace": by_workspace,

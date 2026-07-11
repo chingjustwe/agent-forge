@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     )
 
     llm_api_key: str = ""
+    # Base URL of the OpenAI-compatible LLM provider. Used both by the
+    # runtime adapters and to fetch the live model catalog from
+    # ``{llm_base_url}/v1/models`` at startup.
+    llm_base_url: str = "https://api.deepseek.com"
     jwt_secret: str = ""
 
     # SMTP (optional — falls back to console sender when unset)

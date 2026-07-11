@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 class RuntimeConfig(BaseModel):
     agent: str = ""
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-flash"
     max_tokens: int = 4096
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     workspace_id: str = ""
@@ -25,7 +25,7 @@ class Usage(BaseModel):
 
 
 class StreamEvent(BaseModel):
-    type: Literal["text", "tool_call", "tool_result", "error", "status", "subagent", "session.created"]
+    type: Literal["text", "tool_call", "tool_result", "reasoning", "error", "status", "subagent", "session.created"]
     data: dict
     metadata: dict = {}
     # Phase 4: when True, the runtime must NOT re-execute the tool —

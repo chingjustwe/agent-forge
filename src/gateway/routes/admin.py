@@ -952,19 +952,52 @@ async def set_default_workspace(
 async def get_usage(
     request: Request,
     tenant_id: Optional[str] = Query(None),
+    workspace_id: Optional[str] = Query(None),
     since: Optional[str] = Query(None),
     until: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_permission("admin:usage:read")),
+    _user=Depends(require_permission("usage:read")),
 ):
     user = request.state.user
     admin_ws_ids = await get_admin_workspace_ids(user, db)
     tid = tenant_id or request.state.user.get("tenant_id")
     since_dt = datetime.fromisoformat(since) if since else None
     until_dt = datetime.fromisoformat(until) if until else None
+    # If until is a bare date (e.g. "2026-07-11"), fromisoformat parses it
+    # as 00:00:00, which excludes all records later that day. Extend to
+    # end-of-day so the entire "until" date is included.
+    if until_dt and until_dt.hour == 0 and until_dt.minute == 0 and until_dt.second == 0:
+        until_dt = until_dt + timedelta(days=1) - timedelta(microseconds=1)
+    # Attach UTC tzinfo so SQLAlchemy serializes consistently with
+    # created_at (stored as UTC ISO strings). Without this, naive
+    # datetimes serialize with a space separator ("2026-07-11 23:59:59")
+    # which breaks string comparison against "2026-07-11T11:08...+00:00".
+    if since_dt and since_dt.tzinfo is None:
+        since_dt = since_dt.replace(tzinfo=timezone.utc)
+    if until_dt and until_dt.tzinfo is None:
+        until_dt = until_dt.replace(tzinfo=timezone.utc)
     collector = TelemetryCollector()
     result = await collector.get_tenant_usage(tid, since_dt, until_dt)
-    if admin_ws_ids is not None:
+
+    # Permission scoping:
+    # - workspace_id param provided (member/viewer single-workspace view):
+    #       filter to just that workspace
+    # - tenant_admin (admin_ws_ids is None): sees all
+    # - workspace_admin (admin_ws_ids is a list): filter to managed workspaces
+    # - member/viewer without workspace_id param: admin_ws_ids is [] (empty),
+    #       which would return nothing — frontend should always pass workspace_id
+    if workspace_id:
+        filtered = [
+            ws for ws in result.get("by_workspace", [])
+            if ws["workspace_id"] == workspace_id
+        ]
+        result["by_workspace"] = filtered
+        result["total_requests"] = sum(ws["total_requests"] for ws in filtered)
+        result["input_tokens"] = sum(ws["input_tokens"] for ws in filtered)
+        result["output_tokens"] = sum(ws["output_tokens"] for ws in filtered)
+        result["total_tokens"] = sum(ws["total_tokens"] for ws in filtered)
+        result["total_cost"] = sum(ws["total_cost"] for ws in filtered)
+    elif admin_ws_ids is not None:
         # workspace_admin: only return usage for their workspaces
         filtered = [
             ws for ws in result.get("by_workspace", [])
@@ -972,8 +1005,47 @@ async def get_usage(
         ]
         result["by_workspace"] = filtered
         result["total_requests"] = sum(ws["total_requests"] for ws in filtered)
+        result["input_tokens"] = sum(ws["input_tokens"] for ws in filtered)
+        result["output_tokens"] = sum(ws["output_tokens"] for ws in filtered)
         result["total_tokens"] = sum(ws["total_tokens"] for ws in filtered)
         result["total_cost"] = sum(ws["total_cost"] for ws in filtered)
+
+    # Enrich by_workspace with workspace name + quota info so the frontend
+    # can render quota columns alongside usage without N+1 API calls.
+    ws_ids = [ws["workspace_id"] for ws in result.get("by_workspace", [])]
+    if ws_ids:
+        ws_rows = (await db.execute(
+            select(Workspace.id, Workspace.name, Workspace.max_tokens_per_day, Workspace.max_cost_per_month)
+            .where(Workspace.id.in_(ws_ids))
+        )).all()
+        ws_meta = {
+            r.id: {
+                "name": r.name,
+                "max_tokens_per_day": r.max_tokens_per_day,
+                "max_cost_per_month": r.max_cost_per_month,
+            }
+            for r in ws_rows
+        }
+        # Fetch today's quota usage for all workspaces in one query
+        today_str = datetime.now(timezone.utc).date().isoformat()
+        quota_rows = (await db.execute(
+            select(QuotaUsage.workspace_id, QuotaUsage.tokens_used, QuotaUsage.cost)
+            .where(QuotaUsage.workspace_id.in_(ws_ids), QuotaUsage.date == today_str)
+        )).all()
+        quota_meta = {
+            r.workspace_id: {"tokens_used_today": r.tokens_used, "cost_today": float(r.cost)}
+            for r in quota_rows
+        }
+        for ws in result["by_workspace"]:
+            wid = ws["workspace_id"]
+            meta = ws_meta.get(wid, {})
+            qm = quota_meta.get(wid, {"tokens_used_today": 0, "cost_today": 0.0})
+            ws["name"] = meta.get("name", wid)
+            ws["max_tokens_per_day"] = meta.get("max_tokens_per_day", 0)
+            ws["max_cost_per_month"] = meta.get("max_cost_per_month", 0.0)
+            ws["tokens_used_today"] = qm["tokens_used_today"]
+            ws["cost_today"] = qm["cost_today"]
+
     return result
 
 
@@ -1032,9 +1104,18 @@ async def list_audit_logs(
     if user_id:
         query = query.where(AuditLogModel.user_id == user_id)
     if since:
-        query = query.where(AuditLogModel.created_at >= datetime.fromisoformat(since))
+        _since = datetime.fromisoformat(since)
+        if _since.tzinfo is None:
+            _since = _since.replace(tzinfo=timezone.utc)
+        query = query.where(AuditLogModel.created_at >= _since.isoformat())
     if until:
-        query = query.where(AuditLogModel.created_at <= datetime.fromisoformat(until))
+        _until = datetime.fromisoformat(until)
+        # Extend bare date to end-of-day so the entire "until" date is included
+        if _until.hour == 0 and _until.minute == 0 and _until.second == 0:
+            _until = _until + timedelta(days=1) - timedelta(microseconds=1)
+        if _until.tzinfo is None:
+            _until = _until.replace(tzinfo=timezone.utc)
+        query = query.where(AuditLogModel.created_at <= _until.isoformat())
     count_query = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_query)).scalar()
     query = query.order_by(AuditLogModel.created_at.desc()).offset(offset).limit(limit)

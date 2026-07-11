@@ -256,10 +256,10 @@ class AgentConfig(Base):
     """P2-2 + P3a: workspace-scoped agent configurations.
 
     Each agent config is bound to a workspace and references an adapter
-    (``direct_llm`` / ``adk`` / ``langgraph``). The ``framework`` column
-    is the legacy name for ``adapter`` — kept for backward compat with
-    existing API clients and tests; new code reads ``adapter`` via the
-    Pydantic ``AgentDefinition`` wrapper.
+    (``deepagents``). The ``framework`` column is the legacy name for
+    ``adapter`` — kept for backward compat with existing API clients and
+    tests; new code reads ``adapter`` via the Pydantic ``AgentDefinition``
+    wrapper. Wave 2.5 removed ``direct_llm`` / ``adk`` / ``langgraph``.
 
     P3a adds structured fields (``system_prompt``, ``model``,
     ``temperature``, ``max_tokens``, ``tools``, ``guardrails``,
@@ -291,7 +291,7 @@ class AgentConfig(Base):
     # ── P3a structured fields (added via M12 migration) ──
     system_prompt: Mapped[str] = mapped_column(Text, default="", server_default="")
     model: Mapped[str] = mapped_column(
-        String(100), default="deepseek-chat", server_default="deepseek-chat"
+        String(100), default="deepseek-v4-flash", server_default="deepseek-v4-flash"
     )
     temperature: Mapped[float] = mapped_column(
         Float, default=0.7, server_default="0.7"
@@ -436,4 +436,26 @@ class Skill(Base):
 
     __table_args__ = (
         UniqueConstraint("workspace_id", "name", name="uq_skill_ws_name"),
+    )
+
+
+class ModelPricing(Base):
+    """Per-model token pricing synced from models.dev.
+
+    Stores input/output cost in USD per million tokens. The ``model_name``
+    column holds the bare model name (e.g. ``deepseek-v4-flash``) used by the
+    platform's RuntimeConfig, while ``full_id`` keeps the provider-prefixed
+    ID from models.dev (e.g. ``deepseek/deepseek-v4-flash``) for traceability.
+    """
+
+    __tablename__ = "model_pricing"
+
+    model_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    full_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), default="")
+    input_cost_per_mtok: Mapped[float] = mapped_column(Float, default=0.0)
+    output_cost_per_mtok: Mapped[float] = mapped_column(Float, default=0.0)
+    synced_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, server_default=text("CURRENT_TIMESTAMP")
     )

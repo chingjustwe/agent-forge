@@ -24,6 +24,51 @@ async def test_record_and_retrieve_request():
     assert summary["total_requests"] >= 1
     assert summary["total_tokens"] >= 30
     assert summary["avg_latency_ms"] > 0
+    # Input/output tokens are tracked separately
+    assert summary["input_tokens"] >= 10
+    assert summary["output_tokens"] >= 20
+    assert summary["input_tokens"] + summary["output_tokens"] == summary["total_tokens"]
+    # Cost is aggregated
+    assert "total_cost" in summary
+    assert summary["total_cost"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_get_summary_filters_by_user_id():
+    """get_summary(user_id=...) should only count that user's requests."""
+    collector = TelemetryCollector()
+    await collector.record_request(
+        user_id="u-alice",
+        ws_id="ws-filter-test",
+        agent="a1",
+        model="m1",
+        status=200,
+        duration_ms=10,
+        tokens={"input": 100, "output": 200},
+    )
+    await collector.record_request(
+        user_id="u-bob",
+        ws_id="ws-filter-test",
+        agent="a1",
+        model="m1",
+        status=200,
+        duration_ms=20,
+        tokens={"input": 50, "output": 50},
+    )
+
+    # Workspace view: sees both users
+    all_summary = await collector.get_summary("ws-filter-test")
+    assert all_summary["total_requests"] >= 2
+    assert all_summary["input_tokens"] >= 150
+    assert all_summary["output_tokens"] >= 250
+
+    # User-scoped view: only Alice's data
+    alice_summary = await collector.get_summary("ws-filter-test", user_id="u-alice")
+    assert alice_summary["total_requests"] >= 1
+    assert alice_summary["input_tokens"] >= 100
+    assert alice_summary["output_tokens"] >= 200
+    # Alice's input should be less than the workspace total (which includes Bob)
+    assert alice_summary["input_tokens"] < all_summary["input_tokens"]
 
 
 @pytest.mark.asyncio
@@ -128,6 +173,70 @@ async def test_quota_unlimited():
     guardrail = QuotaGuardrail()
     result = await guardrail.check("quota-unlimited")
     assert result.passed is True
+
+
+@pytest.mark.asyncio
+async def test_record_request_writes_tenant_id_and_cost():
+    """record_request should persist the real tenant_id (not user_id) and cost."""
+    from src.infra.db.engine import async_session
+    from sqlalchemy import text
+
+    collector = TelemetryCollector()
+    await collector.record_request(
+        user_id="u-tenant-test",
+        ws_id="ws-tenant-test",
+        agent="a1",
+        model="deepseek-v4-flash",
+        status=200,
+        duration_ms=50,
+        tokens={"input": 100, "output": 200},
+        tenant_id="real-tenant-id",
+        cost=0.05,
+    )
+
+    async with async_session() as session:
+        row = (
+            await session.execute(
+                text("SELECT tenant_id, cost FROM request_logs WHERE workspace_id = 'ws-tenant-test' ORDER BY created_at DESC LIMIT 1")
+            )
+        ).one_or_none()
+
+    assert row is not None
+    assert row.tenant_id == "real-tenant-id"
+    assert row.cost == 0.05
+
+
+@pytest.mark.asyncio
+async def test_get_tenant_usage_returns_data():
+    """get_tenant_usage should aggregate by the real tenant_id."""
+    collector = TelemetryCollector()
+    await collector.record_request(
+        user_id="u-usage-test",
+        ws_id="ws-usage-test",
+        agent="a1",
+        model="deepseek-v4-flash",
+        status=200,
+        duration_ms=50,
+        tokens={"input": 500, "output": 500},
+        tenant_id="tenant-usage-test",
+        cost=1.5,
+    )
+
+    result = await collector.get_tenant_usage("tenant-usage-test")
+    assert result["total_requests"] >= 1
+    assert result["total_tokens"] >= 1000
+    assert result["total_cost"] >= 1.5
+    # Input/output tokens are tracked separately
+    assert result["input_tokens"] >= 500
+    assert result["output_tokens"] >= 500
+    assert result["input_tokens"] + result["output_tokens"] == result["total_tokens"]
+    ws_ids = [ws["workspace_id"] for ws in result["by_workspace"]]
+    assert "ws-usage-test" in ws_ids
+    # Per-workspace items also carry input/output breakdown
+    ws_item = next(ws for ws in result["by_workspace"] if ws["workspace_id"] == "ws-usage-test")
+    assert ws_item["input_tokens"] >= 500
+    assert ws_item["output_tokens"] >= 500
+    assert ws_item["input_tokens"] + ws_item["output_tokens"] == ws_item["total_tokens"]
 
 
 @pytest.mark.asyncio

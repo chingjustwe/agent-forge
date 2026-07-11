@@ -21,6 +21,11 @@ class TestStreamEvent:
         assert event.type == "text"
         assert event.data["content"] == "hello"
 
+    def test_reasoning_event(self):
+        event = StreamEvent(type="reasoning", data={"content": "thinking..."})
+        assert event.type == "reasoning"
+        assert event.data["content"] == "thinking..."
+
     def test_invalid_type(self):
         with pytest.raises(ValidationError):
             StreamEvent(type="unknown", data={})

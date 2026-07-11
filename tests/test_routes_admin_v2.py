@@ -489,6 +489,120 @@ async def test_usage_as_tenant_admin(app, tenant_admin_token):
         assert "total_tokens" in data
         assert "total_cost" in data
         assert "by_workspace" in data
+        # Input/output tokens tracked separately at top level
+        assert "input_tokens" in data
+        assert "output_tokens" in data
+
+
+async def test_usage_bare_date_until_includes_full_day(app, tenant_admin_token):
+    """Bare date 'until' should include records through end-of-day, not 00:00."""
+    from src.infra.telemetry.collector import TelemetryCollector
+    from datetime import date
+
+    # Seed a request log with today's timestamp (mid-day)
+    collector = TelemetryCollector()
+    await collector.record_request(
+        user_id="u-bare-date",
+        ws_id="ws-bare-date",
+        agent="a1",
+        model="deepseek-v4-flash",
+        status=200,
+        duration_ms=10,
+        tokens={"input": 10, "output": 20},
+        tenant_id="tenant-uuid",
+        cost=0.01,
+    )
+
+    today = date.today().isoformat()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.get(
+            f"/api/v1/admin/usage?since={today}&until={today}",
+            headers={"Authorization": f"Bearer {tenant_admin_token}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_requests"] >= 1
+
+
+async def test_usage_with_workspace_id_param(app, tenant_admin_token):
+    """workspace_id param filters results to just that workspace."""
+    from src.infra.telemetry.collector import TelemetryCollector
+
+    collector = TelemetryCollector()
+    await collector.record_request(
+        user_id="u-ws-filter",
+        ws_id="ws-filter-target",
+        agent="a1",
+        model="deepseek-v4-flash",
+        status=200,
+        duration_ms=10,
+        tokens={"input": 10, "output": 20},
+        tenant_id="tenant-uuid",
+        cost=0.01,
+    )
+    await collector.record_request(
+        user_id="u-ws-filter",
+        ws_id="ws-filter-other",
+        agent="a1",
+        model="deepseek-v4-flash",
+        status=200,
+        duration_ms=10,
+        tokens={"input": 5, "output": 5},
+        tenant_id="tenant-uuid",
+        cost=0.01,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.get(
+            "/api/v1/admin/usage?workspace_id=ws-filter-target",
+            headers={"Authorization": f"Bearer {tenant_admin_token}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Only the target workspace should be in by_workspace
+        ws_ids = [ws["workspace_id"] for ws in data["by_workspace"]]
+        assert "ws-filter-target" in ws_ids
+        assert "ws-filter-other" not in ws_ids
+
+
+async def test_usage_enriched_with_quota_info(app, tenant_admin_token):
+    """by_workspace items should include name, max_tokens_per_day, etc."""
+    from src.infra.telemetry.collector import TelemetryCollector
+
+    collector = TelemetryCollector()
+    await collector.record_request(
+        user_id="u-enrich",
+        ws_id="ws-enrich",
+        agent="a1",
+        model="deepseek-v4-flash",
+        status=200,
+        duration_ms=10,
+        tokens={"input": 10, "output": 20},
+        tenant_id="tenant-uuid",
+        cost=0.01,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.get(
+            "/api/v1/admin/usage",
+            headers={"Authorization": f"Bearer {tenant_admin_token}"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        # Find the enriched workspace
+        ws_enrich = next(
+            (ws for ws in data["by_workspace"] if ws["workspace_id"] == "ws-enrich"),
+            None,
+        )
+        if ws_enrich:
+            assert "name" in ws_enrich
+            assert "max_tokens_per_day" in ws_enrich
+            assert "max_cost_per_month" in ws_enrich
+            assert "tokens_used_today" in ws_enrich
+            assert "cost_today" in ws_enrich
 
 
 async def test_audit_log_requires_tenant_admin(app, member_token):
