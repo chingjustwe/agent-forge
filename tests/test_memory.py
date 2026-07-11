@@ -50,6 +50,7 @@ async def setup_db():
                 "key TEXT,"
                 "content TEXT NOT NULL,"
                 "metadata TEXT NOT NULL DEFAULT '{}',"
+                "memory_type TEXT NOT NULL DEFAULT 'episodic',"
                 "created_at DATETIME NOT NULL,"
                 "expires_at DATETIME"
                 ")"
@@ -87,6 +88,7 @@ class TestMemoryRecord:
         assert rec.scope_id == "s1"
         assert rec.content == "hello"
         assert rec.key == ""
+        assert rec.memory_type == "episodic"
         assert rec.metadata == {}
         assert rec.embedding is None
         assert rec.created_at is None
@@ -378,3 +380,340 @@ class TestMemoryScope:
         assert session_records[0].content == "session-c"
         assert user_records[0].content == "user-c"
         assert workspace_records[0].content == "workspace-c"
+
+
+# ── Wave 3: memory_type field ──────────────────────────────────────────
+
+
+class TestMemoryRecordType:
+    """MemoryRecord.memory_type field."""
+
+    def test_default_is_episodic(self):
+        rec = MemoryRecord(
+            id="t1", scope="session", scope_id="s1", content="fact"
+        )
+        assert rec.memory_type == "episodic"
+
+    def test_profile_type(self):
+        rec = MemoryRecord(
+            id="t2",
+            scope="user",
+            scope_id="u1",
+            content="prefers Python",
+            memory_type="profile",
+        )
+        assert rec.memory_type == "profile"
+
+
+class TestMemoryTypePersistence:
+    """SQLiteMemoryStore: save/get preserves memory_type."""
+
+    @pytest.mark.asyncio
+    async def test_save_and_get_profile(self):
+        store = SQLiteMemoryStore()
+        rec = MemoryRecord(
+            id="mt1",
+            scope="user",
+            scope_id="u1",
+            content="uses uv",
+            memory_type="profile",
+        )
+        await store.save(rec)
+        got = await store.get("mt1")
+        assert got is not None
+        assert got.memory_type == "profile"
+
+    @pytest.mark.asyncio
+    async def test_save_and_get_episodic(self):
+        store = SQLiteMemoryStore()
+        rec = MemoryRecord(
+            id="mt2",
+            scope="user",
+            scope_id="u1",
+            content="project in /data",
+            memory_type="episodic",
+        )
+        await store.save(rec)
+        got = await store.get("mt2")
+        assert got is not None
+        assert got.memory_type == "episodic"
+
+    @pytest.mark.asyncio
+    async def test_default_episodic_when_not_specified(self):
+        store = SQLiteMemoryStore()
+        rec = MemoryRecord(
+            id="mt3",
+            scope="user",
+            scope_id="u1",
+            content="generic fact",
+        )
+        await store.save(rec)
+        got = await store.get("mt3")
+        assert got is not None
+        assert got.memory_type == "episodic"
+
+
+class TestRecallProfiles:
+    """SQLiteMemoryStore.recall_profiles: fetch all profile records."""
+
+    @pytest.mark.asyncio
+    async def test_recall_profiles_returns_only_profiles(self):
+        store = SQLiteMemoryStore()
+        await store.save(
+            MemoryRecord(
+                id="p1",
+                scope="user",
+                scope_id="u1",
+                content="prefers Python",
+                memory_type="profile",
+            )
+        )
+        await store.save(
+            MemoryRecord(
+                id="p2",
+                scope="user",
+                scope_id="u1",
+                content="uses uv",
+                memory_type="profile",
+            )
+        )
+        await store.save(
+            MemoryRecord(
+                id="e1",
+                scope="user",
+                scope_id="u1",
+                content="project in /data",
+                memory_type="episodic",
+            )
+        )
+        profiles = await store.recall_profiles("user", "u1")
+        assert len(profiles) == 2
+        assert {r.id for r in profiles} == {"p1", "p2"}
+
+    @pytest.mark.asyncio
+    async def test_recall_profiles_empty_when_none(self):
+        store = SQLiteMemoryStore()
+        await store.save(
+            MemoryRecord(
+                id="e1",
+                scope="user",
+                scope_id="u1",
+                content="episodic only",
+                memory_type="episodic",
+            )
+        )
+        profiles = await store.recall_profiles("user", "u1")
+        assert profiles == []
+
+    @pytest.mark.asyncio
+    async def test_recall_profiles_respects_scope(self):
+        store = SQLiteMemoryStore()
+        await store.save(
+            MemoryRecord(
+                id="pa",
+                scope="user",
+                scope_id="u-a",
+                content="user A pref",
+                memory_type="profile",
+            )
+        )
+        await store.save(
+            MemoryRecord(
+                id="pb",
+                scope="user",
+                scope_id="u-b",
+                content="user B pref",
+                memory_type="profile",
+            )
+        )
+        a_profiles = await store.recall_profiles("user", "u-a")
+        b_profiles = await store.recall_profiles("user", "u-b")
+        assert len(a_profiles) == 1
+        assert a_profiles[0].id == "pa"
+        assert len(b_profiles) == 1
+        assert b_profiles[0].id == "pb"
+
+    @pytest.mark.asyncio
+    async def test_recall_profiles_respects_limit(self):
+        store = SQLiteMemoryStore()
+        for i in range(5):
+            await store.save(
+                MemoryRecord(
+                    id=f"pl{i}",
+                    scope="user",
+                    scope_id="u1",
+                    content=f"pref {i}",
+                    memory_type="profile",
+                )
+            )
+        profiles = await store.recall_profiles("user", "u1", limit=3)
+        assert len(profiles) == 3
+
+
+class TestListByMemoryType:
+    """SQLiteMemoryStore.list with memory_type filter."""
+
+    @pytest.mark.asyncio
+    async def test_list_profiles_only(self):
+        store = SQLiteMemoryStore()
+        await store.save(
+            MemoryRecord(
+                id="lp1",
+                scope="user",
+                scope_id="u1",
+                content="pref 1",
+                memory_type="profile",
+            )
+        )
+        await store.save(
+            MemoryRecord(
+                id="le1",
+                scope="user",
+                scope_id="u1",
+                content="fact 1",
+                memory_type="episodic",
+            )
+        )
+        profiles = await store.list("user", "u1", memory_type="profile")
+        assert len(profiles) == 1
+        assert profiles[0].id == "lp1"
+
+    @pytest.mark.asyncio
+    async def test_list_episodic_only(self):
+        store = SQLiteMemoryStore()
+        await store.save(
+            MemoryRecord(
+                id="lp2",
+                scope="user",
+                scope_id="u1",
+                content="pref 2",
+                memory_type="profile",
+            )
+        )
+        await store.save(
+            MemoryRecord(
+                id="le2",
+                scope="user",
+                scope_id="u1",
+                content="fact 2",
+                memory_type="episodic",
+            )
+        )
+        episodic = await store.list("user", "u1", memory_type="episodic")
+        assert len(episodic) == 1
+        assert episodic[0].id == "le2"
+
+    @pytest.mark.asyncio
+    async def test_list_all_types_when_no_filter(self):
+        store = SQLiteMemoryStore()
+        await store.save(
+            MemoryRecord(
+                id="la1",
+                scope="user",
+                scope_id="u1",
+                content="pref",
+                memory_type="profile",
+            )
+        )
+        await store.save(
+            MemoryRecord(
+                id="la2",
+                scope="user",
+                scope_id="u1",
+                content="fact",
+                memory_type="episodic",
+            )
+        )
+        all_records = await store.list("user", "u1")
+        assert len(all_records) == 2
+
+
+class TestMemoryScopeMemoryType:
+    """MemoryScope: remember/recall/list with memory_type."""
+
+    @pytest.mark.asyncio
+    async def test_remember_with_memory_type(self):
+        store = SQLiteMemoryStore()
+        scope = MemoryScope(
+            store=store,
+            session_id="sess-mt",
+            user_id="user-mt",
+            workspace_id="ws-mt",
+            agent_id="agent-mt",
+        )
+        rid = await scope.remember(
+            key="pref",
+            content="likes dark mode",
+            scope="user",
+            memory_type="profile",
+        )
+        got = await scope.get(rid)
+        assert got is not None
+        assert got.memory_type == "profile"
+
+    @pytest.mark.asyncio
+    async def test_remember_default_episodic(self):
+        store = SQLiteMemoryStore()
+        scope = MemoryScope(
+            store=store,
+            session_id="sess-mt2",
+            user_id="user-mt2",
+            workspace_id="ws-mt2",
+            agent_id="agent-mt2",
+        )
+        rid = await scope.remember(
+            key="note",
+            content="temporary fact",
+            scope="session",
+        )
+        got = await scope.get(rid)
+        assert got is not None
+        assert got.memory_type == "episodic"
+
+    @pytest.mark.asyncio
+    async def test_recall_profiles(self):
+        store = SQLiteMemoryStore()
+        scope = MemoryScope(
+            store=store,
+            session_id="sess-mt3",
+            user_id="user-mt3",
+            workspace_id="ws-mt3",
+            agent_id="agent-mt3",
+        )
+        await scope.remember(
+            key="pref",
+            content="user pref",
+            scope="user",
+            memory_type="profile",
+        )
+        await scope.remember(
+            key="fact",
+            content="episodic fact",
+            scope="user",
+            memory_type="episodic",
+        )
+        profiles = await scope.recall_profiles(scope="user")
+        assert len(profiles) == 1
+        assert profiles[0].content == "user pref"
+
+    @pytest.mark.asyncio
+    async def test_list_with_memory_type_filter(self):
+        store = SQLiteMemoryStore()
+        scope = MemoryScope(
+            store=store,
+            session_id="sess-mt4",
+            user_id="user-mt4",
+            workspace_id="ws-mt4",
+            agent_id="agent-mt4",
+        )
+        await scope.remember(
+            key="p", content="pref", scope="user", memory_type="profile"
+        )
+        await scope.remember(
+            key="e", content="fact", scope="user", memory_type="episodic"
+        )
+        profiles = await scope.list(scope="user", memory_type="profile")
+        assert len(profiles) == 1
+        assert profiles[0].memory_type == "profile"
+        all_records = await scope.list(scope="user")
+        assert len(all_records) == 2

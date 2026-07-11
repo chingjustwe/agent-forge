@@ -88,7 +88,20 @@ BUILTIN_TOOL_DEFINITIONS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="save_memory",
-        description="Persist a memory record for long-term recall. Scope: session | user | workspace | agent.",
+        description=(
+            "Persist a memory record for long-term recall. "
+            "CALL THIS PROACTIVELY whenever the user shares durable personal "
+            "details they would likely want you to remember in future "
+            "conversations — e.g. their name, role, title, preferences, "
+            "constraints, goals, or any stable fact about them. "
+            "Use scope='user' with memory_type='profile' for stable user "
+            "traits/preferences (these are always injected into your system "
+            "prompt on every turn); use scope='user' with memory_type="
+            "'episodic' for specific conversational facts recalled by topic. "
+            "Scope: session | user | workspace | agent. memory_type: 'profile' "
+            "for user prefs/config (always injected into prompt) or 'episodic' "
+            "for conversational facts (recalled by topic query)."
+        ),
         input_schema={
             "type": "object",
             "properties": {
@@ -99,6 +112,11 @@ BUILTIN_TOOL_DEFINITIONS: list[ToolDefinition] = [
                     "enum": ["session", "user", "workspace", "agent"],
                     "default": "session",
                 },
+                "memory_type": {
+                    "type": "string",
+                    "enum": ["profile", "episodic"],
+                    "default": "episodic",
+                },
             },
             "required": ["content"],
         },
@@ -106,7 +124,7 @@ BUILTIN_TOOL_DEFINITIONS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="recall_memory",
-        description="Retrieve memories by query. Defaults to session scope.",
+        description="Retrieve memories by query. Defaults to session scope. Use memory_type='profile' to fetch only always-inject profile records, 'episodic' for topic-relevant facts only, or omit to search all types.",
         input_schema={
             "type": "object",
             "properties": {
@@ -117,6 +135,10 @@ BUILTIN_TOOL_DEFINITIONS: list[ToolDefinition] = [
                     "default": "session",
                 },
                 "limit": {"type": "integer", "default": 5},
+                "memory_type": {
+                    "type": "string",
+                    "enum": ["profile", "episodic"],
+                },
             },
             "required": ["query"],
         },

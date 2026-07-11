@@ -27,16 +27,24 @@ from src.infra.db.engine import async_session
 logger = logging.getLogger(__name__)
 
 MemoryScopeType = Literal["session", "user", "workspace", "agent"]
+MemoryType = Literal["profile", "episodic"]
 
 
 class MemoryRecord(BaseModel):
-    """A single memory record."""
+    """A single memory record.
+
+    ``memory_type`` distinguishes *profile* records (user preferences,
+    engineering config — always injected into the system prompt) from
+    *episodic* records (conversational facts — recalled by topic query).
+    Old records without this field default to ``"episodic"``.
+    """
 
     id: str
     scope: MemoryScopeType
     scope_id: str
     key: str = ""
     content: str
+    memory_type: MemoryType = "episodic"
     embedding: list[float] | None = None
     metadata: dict = Field(default_factory=dict)
     created_at: datetime | None = None
@@ -58,8 +66,27 @@ class MemoryStore(ABC):
         scope: str,
         scope_id: str,
         limit: int = 5,
+        memory_type: str | None = None,
     ) -> list[MemoryRecord]:
-        """Full-text search for records matching ``query``."""
+        """Full-text search for records matching ``query``.
+
+        If ``memory_type`` is given, only records of that type are
+        returned (``"profile"`` or ``"episodic"``).
+        """
+        ...
+
+    @abstractmethod
+    async def recall_profiles(
+        self,
+        scope: str,
+        scope_id: str,
+        limit: int = 50,
+    ) -> list[MemoryRecord]:
+        """Fetch all *profile*-type records (always-inject memories).
+
+        Unlike ``recall``, this does not require a search query —
+        profile records are unconditionally loaded into the prompt.
+        """
         ...
 
     @abstractmethod
@@ -74,9 +101,17 @@ class MemoryStore(ABC):
 
     @abstractmethod
     async def list(
-        self, scope: str, scope_id: str, limit: int = 100
+        self,
+        scope: str,
+        scope_id: str,
+        limit: int = 100,
+        memory_type: str | None = None,
     ) -> list[MemoryRecord]:
-        """List records by scope (no search)."""
+        """List records by scope (no search).
+
+        If ``memory_type`` is given, only records of that type are
+        returned.
+        """
         ...
 
 
@@ -95,8 +130,10 @@ class SQLiteMemoryStore(MemoryStore):
             await db.execute(
                 text(
                     "INSERT OR REPLACE INTO memory_records "
-                    "(id, scope, scope_id, key, content, metadata, created_at, expires_at) "
-                    "VALUES (:id, :scope, :sid, :key, :content, :meta, :cat, :exp)"
+                    "(id, scope, scope_id, key, content, metadata, memory_type, "
+                    "created_at, expires_at) "
+                    "VALUES (:id, :scope, :sid, :key, :content, :meta, :mtype, "
+                    ":cat, :exp)"
                 ),
                 {
                     "id": record.id,
@@ -105,6 +142,7 @@ class SQLiteMemoryStore(MemoryStore):
                     "key": record.key,
                     "content": record.content,
                     "meta": json.dumps(record.metadata),
+                    "mtype": record.memory_type,
                     "cat": record.created_at.isoformat(),
                     "exp": record.expires_at.isoformat() if record.expires_at else None,
                 },
@@ -126,6 +164,7 @@ class SQLiteMemoryStore(MemoryStore):
         scope: str,
         scope_id: str,
         limit: int = 5,
+        memory_type: str | None = None,
     ) -> list[MemoryRecord]:
         if not query.strip():
             return []
@@ -135,17 +174,57 @@ class SQLiteMemoryStore(MemoryStore):
         if not fts_query:
             return []
         async with async_session() as db:
+            if memory_type:
+                result = await db.execute(
+                    text(
+                        "SELECT mr.id, mr.scope, mr.scope_id, mr.key, mr.content, "
+                        "mr.metadata, mr.memory_type, mr.created_at, mr.expires_at "
+                        "FROM memory_records mr "
+                        "JOIN memory_records_fts fts ON mr.rowid = fts.rowid "
+                        "WHERE mr.scope = :scope AND mr.scope_id = :sid "
+                        "AND mr.memory_type = :mtype "
+                        "AND memory_records_fts MATCH :q "
+                        "ORDER BY rank LIMIT :lim"
+                    ),
+                    {
+                        "scope": scope,
+                        "sid": scope_id,
+                        "mtype": memory_type,
+                        "q": fts_query,
+                        "lim": limit,
+                    },
+                )
+            else:
+                result = await db.execute(
+                    text(
+                        "SELECT mr.id, mr.scope, mr.scope_id, mr.key, mr.content, "
+                        "mr.metadata, mr.memory_type, mr.created_at, mr.expires_at "
+                        "FROM memory_records mr "
+                        "JOIN memory_records_fts fts ON mr.rowid = fts.rowid "
+                        "WHERE mr.scope = :scope AND mr.scope_id = :sid "
+                        "AND memory_records_fts MATCH :q "
+                        "ORDER BY rank LIMIT :lim"
+                    ),
+                    {"scope": scope, "sid": scope_id, "q": fts_query, "lim": limit},
+                )
+            return [self._row_to_record(r) for r in result.fetchall()]
+
+    async def recall_profiles(
+        self,
+        scope: str,
+        scope_id: str,
+        limit: int = 50,
+    ) -> list[MemoryRecord]:
+        """Fetch all profile-type records — no query needed."""
+        async with async_session() as db:
             result = await db.execute(
                 text(
-                    "SELECT mr.id, mr.scope, mr.scope_id, mr.key, mr.content, "
-                    "mr.metadata, mr.created_at, mr.expires_at "
-                    "FROM memory_records mr "
-                    "JOIN memory_records_fts fts ON mr.rowid = fts.rowid "
-                    "WHERE mr.scope = :scope AND mr.scope_id = :sid "
-                    "AND memory_records_fts MATCH :q "
-                    "ORDER BY rank LIMIT :lim"
+                    "SELECT * FROM memory_records "
+                    "WHERE scope = :scope AND scope_id = :sid "
+                    "AND memory_type = 'profile' "
+                    "ORDER BY created_at DESC LIMIT :lim"
                 ),
-                {"scope": scope, "sid": scope_id, "q": fts_query, "lim": limit},
+                {"scope": scope, "sid": scope_id, "lim": limit},
             )
             return [self._row_to_record(r) for r in result.fetchall()]
 
@@ -167,17 +246,37 @@ class SQLiteMemoryStore(MemoryStore):
             await db.commit()
 
     async def list(
-        self, scope: str, scope_id: str, limit: int = 100
+        self,
+        scope: str,
+        scope_id: str,
+        limit: int = 100,
+        memory_type: str | None = None,
     ) -> list[MemoryRecord]:
         async with async_session() as db:
-            result = await db.execute(
-                text(
-                    "SELECT * FROM memory_records "
-                    "WHERE scope = :scope AND scope_id = :sid "
-                    "ORDER BY created_at DESC LIMIT :lim"
-                ),
-                {"scope": scope, "sid": scope_id, "lim": limit},
-            )
+            if memory_type:
+                result = await db.execute(
+                    text(
+                        "SELECT * FROM memory_records "
+                        "WHERE scope = :scope AND scope_id = :sid "
+                        "AND memory_type = :mtype "
+                        "ORDER BY created_at DESC LIMIT :lim"
+                    ),
+                    {
+                        "scope": scope,
+                        "sid": scope_id,
+                        "mtype": memory_type,
+                        "lim": limit,
+                    },
+                )
+            else:
+                result = await db.execute(
+                    text(
+                        "SELECT * FROM memory_records "
+                        "WHERE scope = :scope AND scope_id = :sid "
+                        "ORDER BY created_at DESC LIMIT :lim"
+                    ),
+                    {"scope": scope, "sid": scope_id, "lim": limit},
+                )
             return [self._row_to_record(r) for r in result.fetchall()]
 
     def _row_to_record(self, row) -> MemoryRecord:
@@ -194,12 +293,19 @@ class SQLiteMemoryStore(MemoryStore):
                 expires_at = datetime.fromisoformat(row.expires_at)
             except (ValueError, TypeError):
                 pass
+        # Backward compat: rows from pre-M22 databases may lack the
+        # memory_type column — default to "episodic".
+        try:
+            memory_type = row.memory_type or "episodic"
+        except AttributeError:
+            memory_type = "episodic"
         return MemoryRecord(
             id=row.id,
             scope=row.scope,
             scope_id=row.scope_id,
             key=row.key or "",
             content=row.content,
+            memory_type=memory_type,
             metadata=metadata,
             created_at=created_at,
             expires_at=expires_at,
@@ -236,6 +342,7 @@ class MemoryScope:
         content: str,
         scope: MemoryScopeType = "session",
         metadata: dict | None = None,
+        memory_type: MemoryType = "episodic",
     ) -> str:
         """Save a memory record. Returns the record id."""
         record = MemoryRecord(
@@ -244,6 +351,7 @@ class MemoryScope:
             scope_id=self._ids.get(scope, ""),
             key=key,
             content=content,
+            memory_type=memory_type,
             metadata=metadata or {},
             created_at=datetime.now(timezone.utc),
         )
@@ -254,10 +362,27 @@ class MemoryScope:
         query: str,
         scope: MemoryScopeType = "session",
         limit: int = 5,
+        memory_type: str | None = None,
     ) -> list[MemoryRecord]:
-        """Full-text search within the given scope."""
+        """Full-text search within the given scope.
+
+        If ``memory_type`` is given, only records of that type are returned.
+        """
         return await self._store.recall(
             query=query,
+            scope=scope,
+            scope_id=self._ids.get(scope, ""),
+            limit=limit,
+            memory_type=memory_type,
+        )
+
+    async def recall_profiles(
+        self,
+        scope: MemoryScopeType = "user",
+        limit: int = 50,
+    ) -> list[MemoryRecord]:
+        """Fetch all profile-type records (always-inject memories)."""
+        return await self._store.recall_profiles(
             scope=scope,
             scope_id=self._ids.get(scope, ""),
             limit=limit,
@@ -267,12 +392,17 @@ class MemoryScope:
         self,
         scope: MemoryScopeType = "session",
         limit: int = 100,
+        memory_type: str | None = None,
     ) -> list[MemoryRecord]:
-        """List records in the given scope (no search)."""
+        """List records in the given scope (no search).
+
+        If ``memory_type`` is given, only records of that type are returned.
+        """
         return await self._store.list(
             scope=scope,
             scope_id=self._ids.get(scope, ""),
             limit=limit,
+            memory_type=memory_type,
         )
 
     async def get(self, record_id: str) -> MemoryRecord | None:

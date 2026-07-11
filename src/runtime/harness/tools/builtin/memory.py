@@ -33,6 +33,12 @@ async def save(args: dict, ctx: "HarnessContext") -> dict:
         return {"output": "", "error": f"scope must be one of {sorted(_VALID_SCOPES)}"}
 
     key = args.get("key") or ""
+    memory_type = args.get("memory_type", "episodic")
+    if memory_type not in ("profile", "episodic"):
+        return {
+            "output": "",
+            "error": "memory_type must be 'profile' or 'episodic'",
+        }
 
     # P2: route through MemoryScope if available
     if ctx.memory is not None:
@@ -42,10 +48,18 @@ async def save(args: dict, ctx: "HarnessContext") -> dict:
                 content=content,
                 scope=scope,  # type: ignore
                 metadata={},
+                memory_type=memory_type,  # type: ignore
             )
             return {
-                "output": f"Saved memory record {record_id} (scope={scope}).",
-                "metadata": {"id": record_id, "scope": scope},
+                "output": (
+                    f"Saved memory record {record_id} "
+                    f"(scope={scope}, type={memory_type})."
+                ),
+                "metadata": {
+                    "id": record_id,
+                    "scope": scope,
+                    "memory_type": memory_type,
+                },
             }
         except Exception as exc:
             return {"output": "", "error": f"Memory store error: {exc}"}
@@ -57,6 +71,7 @@ async def save(args: dict, ctx: "HarnessContext") -> dict:
         "scope_id": _scope_id(ctx, scope),
         "key": str(key),
         "content": content,
+        "memory_type": memory_type,
         "metadata": {},
         "created_at": time.time(),
     }
@@ -64,8 +79,15 @@ async def save(args: dict, ctx: "HarnessContext") -> dict:
     bucket = _bucket(ctx)
     bucket.setdefault(scope, []).append(record)
     return {
-        "output": f"Saved memory record {record['id']} (scope={scope}).",
-        "metadata": {"id": record["id"], "scope": scope},
+        "output": (
+            f"Saved memory record {record['id']} "
+            f"(scope={scope}, type={memory_type})."
+        ),
+        "metadata": {
+            "id": record["id"],
+            "scope": scope,
+            "memory_type": memory_type,
+        },
     }
 
 
@@ -85,6 +107,13 @@ async def recall(args: dict, ctx: "HarnessContext") -> dict:
         limit = 5
     limit = max(1, min(limit, 50))
 
+    memory_type = args.get("memory_type")
+    if memory_type is not None and memory_type not in ("profile", "episodic"):
+        return {
+            "output": "",
+            "error": "memory_type must be 'profile' or 'episodic'",
+        }
+
     # P2: route through MemoryScope if available
     if ctx.memory is not None:
         try:
@@ -92,6 +121,7 @@ async def recall(args: dict, ctx: "HarnessContext") -> dict:
                 query=query,
                 scope=scope,  # type: ignore
                 limit=limit,
+                memory_type=memory_type,
             )
             result = [
                 {
@@ -100,6 +130,7 @@ async def recall(args: dict, ctx: "HarnessContext") -> dict:
                     "scope_id": r.scope_id,
                     "key": r.key,
                     "content": r.content,
+                    "memory_type": r.memory_type,
                     "metadata": r.metadata,
                     "created_at": r.created_at.isoformat() if r.created_at else None,
                 }
@@ -118,6 +149,8 @@ async def recall(args: dict, ctx: "HarnessContext") -> dict:
 
     q_lower = query.lower()
     matched = [r for r in records if q_lower in r["content"].lower()]
+    if memory_type:
+        matched = [r for r in matched if r.get("memory_type", "episodic") == memory_type]
     matched.sort(key=lambda r: r.get("created_at", 0), reverse=True)
     matched = matched[:limit]
 
