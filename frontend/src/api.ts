@@ -1,8 +1,20 @@
 export interface StreamEvent {
-  type: "text" | "tool_call" | "tool_result" | "error" | "status" | "subagent" | "session.created";
+  type: "text" | "tool_call" | "tool_result" | "reasoning" | "error" | "status" | "subagent" | "session.created";
   data: Record<string, unknown>;
   metadata?: Record<string, unknown>;
 }
+
+export type AgentStep =
+  | { kind: "reasoning"; content: string }
+  | {
+      kind: "tool";
+      id: string;
+      name: string;
+      args: unknown;
+      result?: string;
+      error?: string;
+      status: "running" | "done";
+    };
 
 export interface User {
   id: string;
@@ -184,7 +196,10 @@ export async function createWorkspace(
 export interface ObservabilitySummary {
   total_requests: number;
   avg_latency_ms: number;
+  input_tokens: number;
+  output_tokens: number;
   total_tokens: number;
+  total_cost: number;
   error_rate: number;
   active_sessions: number;
 }
@@ -233,8 +248,11 @@ export interface OTelConfig {
   headers: Record<string, string>;
 }
 
-export async function getObservabilitySummary(wsId: string): Promise<ObservabilitySummary> {
-  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/summary`);
+export async function getObservabilitySummary(wsId: string, userId?: string, since?: string): Promise<ObservabilitySummary> {
+  const qs = new URLSearchParams();
+  if (userId) qs.set("user_id", userId);
+  if (since) qs.set("since", since);
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/summary?${qs}`);
   if (!resp.ok) throw new Error("Failed to fetch summary");
   return resp.json();
 }
@@ -251,10 +269,11 @@ export async function getObservabilityRequests(wsId: string, params?: { limit?: 
   return resp.json();
 }
 
-export async function getTokenDaily(wsId: string, since?: string, until?: string): Promise<DailyToken[]> {
+export async function getTokenDaily(wsId: string, since?: string, until?: string, userId?: string): Promise<DailyToken[]> {
   const qs = new URLSearchParams();
   if (since) qs.set("since", since);
   if (until) qs.set("until", until);
+  if (userId) qs.set("user_id", userId);
   const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/tokens/daily?${qs}`);
   if (!resp.ok) throw new Error("Failed to fetch token data");
   return resp.json();
@@ -266,18 +285,20 @@ export async function getRequestDetail(wsId: string, traceId: string): Promise<R
   return resp.json();
 }
 
-export async function getLatency(wsId: string, since?: string, until?: string): Promise<LatencyData> {
+export async function getLatency(wsId: string, since?: string, until?: string, userId?: string): Promise<LatencyData> {
   const qs = new URLSearchParams();
   if (since) qs.set("since", since);
   if (until) qs.set("until", until);
+  if (userId) qs.set("user_id", userId);
   const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/latency?${qs}`);
   if (!resp.ok) throw new Error("Failed to fetch latency data");
   return resp.json();
 }
 
-export async function getErrors(wsId: string, since?: string): Promise<ErrorGroup[]> {
+export async function getErrors(wsId: string, since?: string, userId?: string): Promise<ErrorGroup[]> {
   const qs = new URLSearchParams();
   if (since) qs.set("since", since);
+  if (userId) qs.set("user_id", userId);
   const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/errors?${qs}`);
   if (!resp.ok) throw new Error("Failed to fetch errors");
   return resp.json();
@@ -630,16 +651,33 @@ export async function fetchWorkspaceAudit(workspaceId: string, params?: { action
 
 // ─── Admin: Usage ─────────────────────────────────────────────────────────
 
-export interface UsageData {
+export interface WorkspaceUsage {
+  workspace_id: string;
+  name: string;
   total_requests: number;
+  input_tokens: number;
+  output_tokens: number;
   total_tokens: number;
   total_cost: number;
-  by_workspace: { workspace_id: string; total_requests: number; total_tokens: number; total_cost: number }[];
+  max_tokens_per_day: number;
+  max_cost_per_month: number;
+  tokens_used_today: number;
+  cost_today: number;
 }
 
-export async function fetchUsage(params?: { tenant_id?: string; since?: string; until?: string }): Promise<UsageData> {
+export interface UsageData {
+  total_requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  total_cost: number;
+  by_workspace: WorkspaceUsage[];
+}
+
+export async function fetchUsage(params?: { tenant_id?: string; workspace_id?: string; since?: string; until?: string }): Promise<UsageData> {
   const q = new URLSearchParams();
   if (params?.tenant_id) q.set("tenant_id", params.tenant_id);
+  if (params?.workspace_id) q.set("workspace_id", params.workspace_id);
   if (params?.since) q.set("since", params.since);
   if (params?.until) q.set("until", params.until);
   const resp = await apiFetch(`/api/v1/admin/usage?${q}`);
@@ -916,7 +954,8 @@ export async function acceptWorkspaceInvitation(token: string): Promise<{ worksp
 
 // ─── Agents (P2-2) ─────────────────────────────────────────────────────────
 
-export type AgentFramework = "direct_llm" | "deepagents";
+// Wave 2.5: DirectLLM removed; deepagents is the sole framework.
+export type AgentFramework = "deepagents";
 
 export interface MemoryConfig {
   enable_short_term: boolean;
@@ -1040,6 +1079,22 @@ export async function listAgents(wsId: string): Promise<AgentConfig[]> {
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
     throw new Error(err.error?.message || "Failed to list agents");
+  }
+  return resp.json();
+}
+
+export interface ModelCatalog {
+  /** Available model ids fetched live from the LLM provider's /v1/models. */
+  models: string[];
+  /** Default model id (first available), or "" when the catalog is empty. */
+  default: string;
+}
+
+export async function fetchModels(): Promise<ModelCatalog> {
+  const resp = await apiFetch(`/api/v1/models`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to fetch models");
   }
   return resp.json();
 }
@@ -1344,6 +1399,52 @@ export async function copyAgentToWorkspace(
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));
     throw new Error(err.error?.message || "Failed to copy agent");
+  }
+  return resp.json();
+}
+
+// ─── Checkpoint Restore (Wave 2) ────────────────────────────────────────────
+
+export interface CheckpointInfo {
+  sequence: number;
+  created_at: string | null;
+  message_count: number;
+  preview: string;
+}
+
+export interface RestoreResponse {
+  session_id: string;
+  title: string;
+  restored_from_session_id: string;
+  restored_from_sequence: number;
+}
+
+export async function listCheckpoints(
+  wsId: string,
+  sessionId: string,
+): Promise<CheckpointInfo[]> {
+  const resp = await apiFetch(
+    `/api/v1/workspaces/${wsId}/sessions/${sessionId}/checkpoints`,
+  );
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to list checkpoints");
+  }
+  return resp.json();
+}
+
+export async function restoreCheckpoint(
+  wsId: string,
+  sessionId: string,
+  sequence: number,
+): Promise<RestoreResponse> {
+  const resp = await apiFetch(
+    `/api/v1/workspaces/${wsId}/sessions/${sessionId}/checkpoints/${sequence}/restore`,
+    { method: "POST" },
+  );
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to restore checkpoint");
   }
   return resp.json();
 }

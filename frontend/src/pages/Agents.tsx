@@ -11,12 +11,14 @@ import {
   fetchAvailableHooks,
   fetchAvailableSkills,
   fetchAvailableTools,
+  fetchModels,
   getCurrentUser,
   GuardrailInfo,
   HookInfo,
   listAgents,
   listMCPServers,
   MCPServerInfo,
+  ModelCatalog,
   SkillInfo,
   ToolInfo,
   updateAgent,
@@ -25,20 +27,28 @@ import {
 import { useWorkspace } from "../context/WorkspaceContext";
 import { Modal } from "../components/Modal";
 import { Select } from "../components/Select";
+import { Stepper, type Step as StepDef } from "../components/Stepper";
 import { useToast } from "../components/Toast";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
 import { Dropdown } from "../components/Dropdown";
 import { SkeletonTable } from "../components/Skeleton";
 
+// Wave 2.5: DirectLLM removed; deepagents is the sole framework.
+// Dropdown kept (decision D3) so future adapters only need to extend
+// ALLOWED_FRAMEWORKS + this array — no form restructuring required.
 const FRAMEWORK_OPTIONS: { value: AgentFramework; label: string }[] = [
-  { value: "direct_llm", label: "Direct LLM" },
   { value: "deepagents", label: "DeepAgents" },
 ];
 
+// 模型列表由后端在启动时从 LLM 厂商的 /v1/models 动态拉取（见
+// src/infra/llm/models.py），前端不再硬编码，避免厂商实际模型
+// （如 deepseek-v4-flash / deepseek-v4-pro）与页面显示不一致。
+// MODEL_OPTIONS 改为从后端获取的 state（见 modelOptions）。
+
 const EMPTY_FORM: AgentFormState = {
   name: "",
-  framework: "direct_llm",
+  framework: "deepagents",
   model: "",
   systemPrompt: "",
   temperature: "0.7",
@@ -71,6 +81,15 @@ interface AgentFormState {
   /** MCP server names (workspace-scoped) this agent is bound to. */
   mcp_servers: string[];
 }
+
+// 向导分步定义：身份 → 角色 → 能力 → 治理（plan §2）
+const WIZARD_STEPS: StepDef[] = [
+  { id: 0, label: "Identity" },
+  { id: 1, label: "Persona" },
+  { id: 2, label: "Capabilities" },
+  { id: 3, label: "Governance" },
+];
+const LAST_STEP = WIZARD_STEPS.length - 1;
 
 /** 表单 → 请求体载荷：所有结构化字段作为顶层字段发送，而非塞进 config dict。 */
 interface AgentPayload {
@@ -134,6 +153,8 @@ export default function Agents() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<AgentFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+  // 向导当前步（plan §3.2）
+  const [step, setStep] = useState(0);
 
   // Delete confirmation state
   const [deleteTarget, setDeleteTarget] = useState<AgentConfig | null>(null);
@@ -153,6 +174,10 @@ export default function Agents() {
   const [availableHooks, setAvailableHooks] = useState<HookInfo[]>([]);
   // Phase 5: MCP servers available to bind to this agent.
   const [availableMCPServers, setAvailableMCPServers] = useState<MCPServerInfo[]>([]);
+
+  // 动态模型列表：后端启动时从厂商 /v1/models 拉取，前端不再硬编码。
+  const [modelOptions, setModelOptions] = useState<{ value: string; label: string }[]>([]);
+  const [defaultModel, setDefaultModel] = useState<string>("");
 
   const isTenantAdmin = user?.role === "tenant_admin";
 
@@ -185,6 +210,16 @@ export default function Agents() {
 
   useEffect(() => {
     getCurrentUser().then(setUser).catch(() => {});
+  }, []);
+
+  // 拉取厂商动态模型列表（后端已在启动时从 /v1/models 缓存）。
+  useEffect(() => {
+    fetchModels()
+      .then((cat: ModelCatalog) => {
+        setModelOptions(cat.models.map(m => ({ value: m, label: m })));
+        setDefaultModel(cat.default || "");
+      })
+      .catch(() => setModelOptions([]));
   }, []);
 
   // Phase B/C: when the create/edit modal opens, fetch the available tool /
@@ -235,8 +270,9 @@ export default function Agents() {
   }
 
   function openCreateModal() {
-    setForm(EMPTY_FORM);
+    setForm({ ...EMPTY_FORM, model: defaultModel || "deepseek-v4-flash" });
     setEditingId(null);
+    setStep(0);
     setFormModalOpen(true);
   }
 
@@ -260,7 +296,46 @@ export default function Agents() {
       mcp_servers: agent.mcp_servers || [],
     });
     setEditingId(agent.id);
+    setStep(0);
     setFormModalOpen(true);
+  }
+
+  // 每步校验（plan §3.4）：Step 0 Name 必填；Step 1 temperature 范围 + maxTokens 正整数（非阻断式警告）
+  function validateStep(s: number): boolean {
+    if (s === 0) {
+      if (!form.name.trim()) {
+        toast.error("Validation error", "Name is required");
+        return false;
+      }
+    }
+    if (s === 1) {
+      const t = parseFloat(form.temperature);
+      if (!isNaN(t) && (t < 0 || t > 2)) {
+        toast.error("Validation error", "Temperature must be between 0 and 2");
+        return false;
+      }
+      const mt = parseInt(form.maxTokens, 10);
+      if (form.maxTokens.trim() && (isNaN(mt) || mt <= 0)) {
+        toast.error("Validation error", "Max Tokens must be a positive integer");
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function handleNext() {
+    if (!validateStep(step)) return;
+    if (step < LAST_STEP) setStep(step + 1);
+  }
+
+  function handleBack() {
+    if (step > 0) setStep(step - 1);
+  }
+
+  async function handleWizardSubmit() {
+    // 最后一步提交前再校验一次当前步
+    if (!validateStep(step)) return;
+    await handleFormSubmit();
   }
 
   function openDeleteConfirm(agent: AgentConfig) {
@@ -348,288 +423,329 @@ export default function Agents() {
       )}
 
       {!error && !loading && agents.length > 0 && (
-        <div className="table-container">
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Framework</th>
-                <th>Model</th>
-                <th>Created</th>
-                {canManage && <th style={{ width: 1 }}>Actions</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {agents.map(agent => {
-                const model = agent.model || "";
-                return (
-                  <tr key={agent.id}>
-                    <td>{agent.name}</td>
-                    <td><span className="badge badge-primary">{agent.framework}</span></td>
-                    <td>{model || <em style={{ color: "var(--text-muted)" }}>&mdash;</em>}</td>
-                    <td style={{ fontSize: "0.82rem", color: "var(--text-secondary)" }}>
-                      {formatDate(agent.created_at)}
-                    </td>
+        <div className="agent-grid">
+          {agents.map(agent => {
+            const model = agent.model || "";
+            const toolCount = agent.tools?.length || 0;
+            const skillCount = agent.skills?.length || 0;
+            const guardrailCount = agent.guardrails?.length || 0;
+            const hasMemory = !!(agent.memory_config?.enable_long_term);
+            return (
+              <div key={agent.id} className="agent-card">
+                <div className="agent-card-header">
+                  <div className="agent-card-title-row">
+                    <h3 className="agent-card-name">{agent.name}</h3>
                     {canManage && (
-                      <td>
-                        <Dropdown items={[
-                          { label: "Edit", onClick: () => startEdit(agent) },
-                          ...(isTenantAdmin ? [{ label: "Copy to...", onClick: () => openCopyModal(agent) }] : []),
-                          { label: "Delete", onClick: () => openDeleteConfirm(agent), variant: "danger" },
-                        ]} />
-                      </td>
+                      <Dropdown items={[
+                        { label: "Edit", onClick: () => startEdit(agent) },
+                        ...(isTenantAdmin ? [{ label: "Copy to...", onClick: () => openCopyModal(agent) }] : []),
+                        { label: "Delete", onClick: () => openDeleteConfirm(agent), variant: "danger" },
+                      ]} />
                     )}
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                  </div>
+                  <div className="agent-card-meta">
+                    <span className="badge badge-primary">{agent.framework}</span>
+                    <span className="agent-card-model">
+                      {model || <em style={{ color: "var(--text-muted)" }}>no model</em>}
+                    </span>
+                  </div>
+                </div>
+                <div className="agent-card-chips">
+                  {toolCount > 0 && <span className="agent-chip">🔧 {toolCount} tools</span>}
+                  {skillCount > 0 && <span className="agent-chip">🧩 {skillCount} skills</span>}
+                  {guardrailCount > 0 && <span className="agent-chip">🛡 {guardrailCount} guardrails</span>}
+                  {hasMemory && <span className="agent-chip">💾 memory</span>}
+                  {toolCount === 0 && skillCount === 0 && guardrailCount === 0 && !hasMemory && (
+                    <span className="agent-chip agent-chip-muted">bare agent</span>
+                  )}
+                </div>
+                <div className="agent-card-footer">
+                  <span style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                    {formatDate(agent.created_at)}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
 
-      {/* Create / Edit Modal */}
+      {/* Create / Edit Modal — 分步向导（plan §3.2） */}
       <Modal
         open={formModalOpen}
         onClose={() => setFormModalOpen(false)}
         title={editingId ? "Edit Agent" : "Create Agent"}
-        width="md"
+        width="lg"
         footer={
           <>
             <button className="btn btn-secondary" onClick={() => setFormModalOpen(false)} disabled={saving}>
               Cancel
             </button>
-            <button className="btn btn-primary" onClick={handleFormSubmit} disabled={saving}>
-              {saving ? "Saving..." : editingId ? "Update Agent" : "Create Agent"}
-            </button>
+            {step > 0 && (
+              <button className="btn btn-secondary" onClick={handleBack} disabled={saving}>
+                ← Back
+              </button>
+            )}
+            {step < LAST_STEP ? (
+              <button className="btn btn-primary" onClick={handleNext} disabled={saving}>
+                Next →
+              </button>
+            ) : (
+              <button className="btn btn-primary" onClick={handleWizardSubmit} disabled={saving}>
+                {saving ? "Saving..." : editingId ? "Update Agent" : "Create Agent"}
+              </button>
+            )}
           </>
         }
       >
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <div className="form-group">
-            <label className="form-label">Name</label>
-            <input
-              type="text"
-              value={form.name}
-              onChange={e => setForm({ ...form, name: e.target.value })}
-              maxLength={100}
-              placeholder="e.g. Support Bot"
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Framework</label>
-            <Select
-              value={form.framework}
-              onChange={(v) => setForm({ ...form, framework: v as AgentFramework })}
-              options={FRAMEWORK_OPTIONS.map(o => ({ value: o.value, label: o.label }))}
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Model</label>
-            <input
-              type="text"
-              value={form.model}
-              onChange={e => setForm({ ...form, model: e.target.value })}
-              placeholder="e.g. deepseek-chat, gpt-4"
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">System Prompt</label>
-            <textarea
-              value={form.systemPrompt}
-              onChange={e => setForm({ ...form, systemPrompt: e.target.value })}
-              rows={4}
-              placeholder="You are a helpful assistant."
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Tools</label>
-            {availableTools.length === 0 ? (
-              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
-                No tools available for this workspace.
-              </p>
-            ) : (
-              <ToolPicker
-                tools={availableTools}
-                selected={form.tools}
-                onToggle={(name) => {
-                  const next = form.tools.includes(name)
-                    ? form.tools.filter(t => t !== name)
-                    : [...form.tools, name];
-                  setForm({ ...form, tools: next });
-                }}
-              />
-            )}
-          </div>
-          <div className="form-group">
-            <label className="form-label">MCP Servers</label>
-            <p style={{ color: "var(--text-secondary)", fontSize: "0.82rem", margin: "0 0 8px" }}>
-              Bind this agent to workspace MCP servers. The agent gets access to <strong>every tool</strong> exposed by each selected server (in addition to the tools chosen above).
-            </p>
-            {availableMCPServers.length === 0 ? (
-              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
-                No MCP servers registered in this workspace. Add one under Admin → MCP Servers.
-              </p>
-            ) : (
-              <CheckList
-                items={availableMCPServers.map(s => ({ name: s.name, description: s.endpoint }))}
-                selected={form.mcp_servers}
-                onToggle={(name) => {
-                  const next = form.mcp_servers.includes(name)
-                    ? form.mcp_servers.filter(t => t !== name)
-                    : [...form.mcp_servers, name];
-                  setForm({ ...form, mcp_servers: next });
-                }}
-              />
-            )}
-          </div>
-          <div className="form-group">
-            <label className="form-label">Temperature</label>
-            <input
-              type="number"
-              step="0.1"
-              min="0"
-              max="2"
-              value={form.temperature}
-              onChange={e => setForm({ ...form, temperature: e.target.value })}
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Max Tokens</label>
-            <input
-              type="number"
-              min="1"
-              max="32768"
-              value={form.maxTokens}
-              onChange={e => setForm({ ...form, maxTokens: e.target.value })}
-              placeholder="4096"
-            />
-          </div>
-          <div className="form-group">
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={form.memoryEnabled}
-                onChange={e => setForm({ ...form, memoryEnabled: e.target.checked })}
-              />
-              Enable Long-Term Memory
-            </label>
-            {form.memoryEnabled && (
-              <div style={{ marginTop: 8 }}>
-                <label className="form-label">Recall Top-K</label>
+        <Stepper steps={WIZARD_STEPS} current={step} onJump={setStep} />
+        <div className="wizard-body">
+          {step === 0 && (
+            <>
+              <div className="form-group">
+                <label className="form-label">Name <span style={{ color: "var(--text-muted)" }}>*</span></label>
+                <input
+                  type="text"
+                  value={form.name}
+                  onChange={e => setForm({ ...form, name: e.target.value })}
+                  maxLength={100}
+                  placeholder="e.g. Support Bot"
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Framework</label>
+                <Select
+                  value={form.framework}
+                  onChange={(v) => setForm({ ...form, framework: v as AgentFramework })}
+                  options={FRAMEWORK_OPTIONS.map(o => ({ value: o.value, label: o.label }))}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Model</label>
+                <Select
+                  value={form.model}
+                  onChange={(v) => setForm({ ...form, model: v })}
+                  options={
+                    modelOptions.some(o => o.value === form.model)
+                      ? modelOptions
+                      : form.model
+                        ? [...modelOptions, { value: form.model, label: `${form.model} (custom)` }]
+                        : modelOptions
+                  }
+                />
+              </div>
+            </>
+          )}
+          {step === 1 && (
+            <>
+              <div className="form-group">
+                <label className="form-label">System Prompt</label>
+                <textarea
+                  value={form.systemPrompt}
+                  onChange={e => setForm({ ...form, systemPrompt: e.target.value })}
+                  rows={4}
+                  placeholder="You are a helpful assistant."
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Temperature</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max="2"
+                  value={form.temperature}
+                  onChange={e => setForm({ ...form, temperature: e.target.value })}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Max Tokens</label>
                 <input
                   type="number"
                   min="1"
-                  max="20"
-                  value={form.memoryRecallTopK}
-                  onChange={e => setForm({ ...form, memoryRecallTopK: e.target.value })}
-                  placeholder="5"
+                  max="32768"
+                  value={form.maxTokens}
+                  onChange={e => setForm({ ...form, maxTokens: e.target.value })}
+                  placeholder="4096"
                 />
               </div>
-            )}
-          </div>
-          <div className="form-group">
-            <label className="form-label">Skills</label>
-            {availableSkills.length === 0 ? (
-              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
-                No skills available for this workspace.
-              </p>
-            ) : (
-              <CheckList
-                items={availableSkills.map(s => ({
-                  name: s.name,
-                  description: `${s.layer}${s.description ? " · " + s.description : ""}`,
-                }))}
-                selected={form.skills}
-                onToggle={(name) => {
-                  const next = form.skills.includes(name)
-                    ? form.skills.filter(t => t !== name)
-                    : [...form.skills, name];
-                  setForm({ ...form, skills: next });
-                }}
-              />
-            )}
-          </div>
-          {form.framework === "deepagents" && (
-            <div className="form-group">
-              <label className="form-label">Subagents</label>
-              <p style={{ color: "var(--text-secondary)", fontSize: "0.82rem", margin: "0 0 8px" }}>
-                Select existing agents in this workspace to use as subagents.
-              </p>
-              {candidateSubagents.length === 0 ? (
-                <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
-                  No other agents available in this workspace.
+            </>
+          )}
+          {step === 2 && (
+            <>
+              <div className="form-group">
+                <label className="form-label">Tools</label>
+                {availableTools.length === 0 ? (
+                  <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
+                    No tools available for this workspace.
+                  </p>
+                ) : (
+                  <ToolPicker
+                    tools={availableTools}
+                    selected={form.tools}
+                    onToggle={(name) => {
+                      const next = form.tools.includes(name)
+                        ? form.tools.filter(t => t !== name)
+                        : [...form.tools, name];
+                      setForm({ ...form, tools: next });
+                    }}
+                  />
+                )}
+              </div>
+              <div className="form-group">
+                <label className="form-label">MCP Servers</label>
+                <p style={{ color: "var(--text-secondary)", fontSize: "0.82rem", margin: "0 0 8px" }}>
+                  Bind this agent to workspace MCP servers. The agent gets access to <strong>every tool</strong> exposed by each selected server (in addition to the tools chosen above).
                 </p>
-              ) : (
-                <div className="check-list">
-                  {candidateSubagents.map(a => {
-                    const checked = form.subagents.includes(a.id);
-                    return (
-                      <label
-                        key={a.id}
-                        className={`check-row${checked ? " selected" : ""}`}
-                        title={a.name}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => {
-                            const next = checked
-                              ? form.subagents.filter(id => id !== a.id)
-                              : [...form.subagents, a.id];
-                            setForm({ ...form, subagents: next });
-                          }}
-                        />
-                        <span className="check-meta">
-                          <span className="check-name">{a.name}</span>
-                          <span className="check-desc">
-                            {a.framework}{a.model ? ` · ${a.model}` : ""}
-                          </span>
-                        </span>
-                      </label>
-                    );
-                  })}
+                {availableMCPServers.length === 0 ? (
+                  <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
+                    No MCP servers registered in this workspace. Add one under Admin → MCP Servers.
+                  </p>
+                ) : (
+                  <CheckList
+                    items={availableMCPServers.map(s => ({ name: s.name, description: s.endpoint }))}
+                    selected={form.mcp_servers}
+                    onToggle={(name) => {
+                      const next = form.mcp_servers.includes(name)
+                        ? form.mcp_servers.filter(t => t !== name)
+                        : [...form.mcp_servers, name];
+                      setForm({ ...form, mcp_servers: next });
+                    }}
+                  />
+                )}
+              </div>
+              <div className="form-group">
+                <label className="form-label">Skills</label>
+                {availableSkills.length === 0 ? (
+                  <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
+                    No skills available for this workspace.
+                  </p>
+                ) : (
+                  <CheckList
+                    items={availableSkills.map(s => ({
+                      name: s.name,
+                      description: `${s.layer}${s.description ? " · " + s.description : ""}`,
+                    }))}
+                    selected={form.skills}
+                    onToggle={(name) => {
+                      const next = form.skills.includes(name)
+                        ? form.skills.filter(t => t !== name)
+                        : [...form.skills, name];
+                      setForm({ ...form, skills: next });
+                    }}
+                  />
+                )}
+              </div>
+            </>
+          )}
+          {step === 3 && (
+            <>
+              <div className="form-group">
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={form.memoryEnabled}
+                    onChange={e => setForm({ ...form, memoryEnabled: e.target.checked })}
+                  />
+                  Enable Long-Term Memory
+                </label>
+                {form.memoryEnabled && (
+                  <div style={{ marginTop: 8 }}>
+                    <label className="form-label">Recall Top-K</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="20"
+                      value={form.memoryRecallTopK}
+                      onChange={e => setForm({ ...form, memoryRecallTopK: e.target.value })}
+                      placeholder="5"
+                    />
+                  </div>
+                )}
+              </div>
+              {form.framework === "deepagents" && (
+                <div className="form-group">
+                  <label className="form-label">Subagents</label>
+                  <p style={{ color: "var(--text-secondary)", fontSize: "0.82rem", margin: "0 0 8px" }}>
+                    Select existing agents in this workspace to use as subagents.
+                  </p>
+                  {candidateSubagents.length === 0 ? (
+                    <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
+                      No other agents available in this workspace.
+                    </p>
+                  ) : (
+                    <div className="check-list">
+                      {candidateSubagents.map(a => {
+                        const checked = form.subagents.includes(a.id);
+                        return (
+                          <label
+                            key={a.id}
+                            className={`check-row${checked ? " selected" : ""}`}
+                            title={a.name}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => {
+                                const next = checked
+                                  ? form.subagents.filter(id => id !== a.id)
+                                  : [...form.subagents, a.id];
+                                setForm({ ...form, subagents: next });
+                              }}
+                            />
+                            <span className="check-meta">
+                              <span className="check-name">{a.name}</span>
+                              <span className="check-desc">
+                                {a.framework}{a.model ? ` · ${a.model}` : ""}
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
-            </div>
+              <div className="form-group">
+                <label className="form-label">Guardrails</label>
+                {availableGuardrails.length === 0 ? (
+                  <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
+                    No guardrails available for this workspace.
+                  </p>
+                ) : (
+                  <CheckList
+                    items={availableGuardrails.map(g => ({ name: g.name, description: g.description }))}
+                    selected={form.guardrails}
+                    onToggle={(name) => {
+                      const next = form.guardrails.includes(name)
+                        ? form.guardrails.filter(t => t !== name)
+                        : [...form.guardrails, name];
+                      setForm({ ...form, guardrails: next });
+                    }}
+                  />
+                )}
+              </div>
+              <div className="form-group">
+                <label className="form-label">Hooks</label>
+                {availableHooks.length === 0 ? (
+                  <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
+                    No hooks available for this workspace.
+                  </p>
+                ) : (
+                  <CheckList
+                    items={availableHooks.map(h => ({ name: h.name, description: h.description }))}
+                    selected={form.hooks}
+                    onToggle={(name) => {
+                      const next = form.hooks.includes(name)
+                        ? form.hooks.filter(t => t !== name)
+                        : [...form.hooks, name];
+                      setForm({ ...form, hooks: next });
+                    }}
+                  />
+                )}
+              </div>
+            </>
           )}
-          <div className="form-group">
-            <label className="form-label">Guardrails</label>
-            {availableGuardrails.length === 0 ? (
-              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
-                No guardrails available for this workspace.
-              </p>
-            ) : (
-              <CheckList
-                items={availableGuardrails.map(g => ({ name: g.name, description: g.description }))}
-                selected={form.guardrails}
-                onToggle={(name) => {
-                  const next = form.guardrails.includes(name)
-                    ? form.guardrails.filter(t => t !== name)
-                    : [...form.guardrails, name];
-                  setForm({ ...form, guardrails: next });
-                }}
-              />
-            )}
-          </div>
-          <div className="form-group">
-            <label className="form-label">Hooks</label>
-            {availableHooks.length === 0 ? (
-              <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: "4px 0 0" }}>
-                No hooks available for this workspace.
-              </p>
-            ) : (
-              <CheckList
-                items={availableHooks.map(h => ({ name: h.name, description: h.description }))}
-                selected={form.hooks}
-                onToggle={(name) => {
-                  const next = form.hooks.includes(name)
-                    ? form.hooks.filter(t => t !== name)
-                    : [...form.hooks, name];
-                  setForm({ ...form, hooks: next });
-                }}
-              />
-            )}
-          </div>
         </div>
       </Modal>
 
@@ -688,7 +804,12 @@ export default function Agents() {
 }
 
 // Phase B: grouped, multi-select tool whitelist.
-const SOURCE_ORDER: ToolInfo["source"][] = ["builtin", "mcp", "custom"];
+// MCP tools are excluded — they're controlled by the "MCP Servers" section
+// below. Memory tools (save_memory/recall_memory) are excluded — they're
+// controlled by the "Enable Long-Term Memory" toggle.
+const MANAGED_TOOLS = new Set(["save_memory", "recall_memory"]);
+
+const SOURCE_ORDER: ToolInfo["source"][] = ["builtin", "custom"];
 const SOURCE_LABELS: Record<ToolInfo["source"], string> = {
   builtin: "Builtin",
   mcp: "MCP",
@@ -704,8 +825,13 @@ function ToolPicker({
   selected: string[];
   onToggle: (name: string) => void;
 }) {
+  // Filter out MCP tools (managed by MCP Servers section) and managed tools
+  // (memory tools, controlled by the Long-Term Memory toggle).
+  const visible = tools.filter(
+    t => t.source !== "mcp" && !MANAGED_TOOLS.has(t.name),
+  );
   const grouped: Record<string, ToolInfo[]> = {};
-  for (const t of tools) {
+  for (const t of visible) {
     (grouped[t.source] ||= []).push(t);
   }
   return (
