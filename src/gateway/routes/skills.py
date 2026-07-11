@@ -10,15 +10,43 @@ Read access requires ``skills:read``; create / update / delete require
 ``skills:write`` (workspace_admin / tenant_admin). Directory-layer skills
 are read-only — write operations against them return 403.
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.gateway.auth.rbac import require_permission
+from src.infra.db.models import AuditLog
+from src.infra.db.session import get_db
 from src.runtime.harness.registry import get_registry
 from src.runtime.harness.skills import SKILL_NAME_RE, SkillPackage
 
 router = APIRouter()
+
+
+async def _write_audit(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    user_id: str,
+    action: str,
+    target_id: str,
+    details: dict | None = None,
+    ip_address: str = "",
+) -> None:
+    db.add(
+        AuditLog(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            action=action,
+            target_type="skill",
+            target_id=target_id,
+            details=details or {},
+            ip_address=ip_address or "",
+        )
+    )
 
 
 def _info(s: SkillPackage) -> dict:
@@ -93,7 +121,9 @@ async def get_skill(
 async def create_skill(
     workspace_id: str,
     body: SkillCreate,
-    _ctx=Depends(require_permission("skills:write", workspace_id_param="workspace_id")),
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    ctx=Depends(require_permission("skills:write", workspace_id_param="workspace_id")),
 ):
     """Create a new workspace-level skill (default: DB backend)."""
     store = get_registry().skills.store
@@ -121,6 +151,18 @@ async def create_skill(
         workspace_id=workspace_id,
     )
     saved = await store.save(workspace_id, pkg)
+    user = ctx["user"]
+    await _write_audit(
+        db,
+        tenant_id=user.get("tenant_id", ""),
+        workspace_id=workspace_id,
+        user_id=user.get("sub") or user.get("id", ""),
+        action="skill.create",
+        target_id=body.name,
+        details={"name": body.name, "version": body.version},
+        ip_address=request.client.host if request.client else "",
+    )
+    await db.commit()
     return JSONResponse(status_code=201, content=_detail(saved))
 
 
@@ -129,7 +171,9 @@ async def update_skill(
     workspace_id: str,
     name: str,
     body: SkillUpdate,
-    _ctx=Depends(require_permission("skills:write", workspace_id_param="workspace_id")),
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    ctx=Depends(require_permission("skills:write", workspace_id_param="workspace_id")),
 ):
     """Update an existing workspace-level skill. Directory layers → 403."""
     store = get_registry().skills.store
@@ -149,6 +193,18 @@ async def update_skill(
         }
     )
     saved = await store.save(workspace_id, updated)
+    user = ctx["user"]
+    await _write_audit(
+        db,
+        tenant_id=user.get("tenant_id", ""),
+        workspace_id=workspace_id,
+        user_id=user.get("sub") or user.get("id", ""),
+        action="skill.update",
+        target_id=name,
+        details=body.model_dump(exclude_none=True),
+        ip_address=request.client.host if request.client else "",
+    )
+    await db.commit()
     return _detail(saved)
 
 
@@ -156,7 +212,9 @@ async def update_skill(
 async def delete_skill(
     workspace_id: str,
     name: str,
-    _ctx=Depends(require_permission("skills:write", workspace_id_param="workspace_id")),
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    ctx=Depends(require_permission("skills:write", workspace_id_param="workspace_id")),
 ):
     """Delete a workspace-level skill. Directory layers → 403."""
     store = get_registry().skills.store
@@ -169,6 +227,17 @@ async def delete_skill(
             f"Skill {name!r} is not deletable (only workspace skills can be deleted)",
         )
     await store.delete(workspace_id, name)
+    user = ctx["user"]
+    await _write_audit(
+        db,
+        tenant_id=user.get("tenant_id", ""),
+        workspace_id=workspace_id,
+        user_id=user.get("sub") or user.get("id", ""),
+        action="skill.delete",
+        target_id=name,
+        ip_address=request.client.host if request.client else "",
+    )
+    await db.commit()
     return {"ok": True}
 
 
@@ -176,7 +245,9 @@ async def delete_skill(
 async def reload_skill(
     workspace_id: str,
     name: str,
-    _ctx=Depends(require_permission("skills:write", workspace_id_param="workspace_id")),
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    ctx=Depends(require_permission("skills:write", workspace_id_param="workspace_id")),
 ):
     """Hot-reload a directory-layer skill from disk (workspace_admin only).
 
@@ -195,6 +266,18 @@ async def reload_skill(
         skill = await registry.skills.reload(name)
     except KeyError:
         return _error(404, "NOT_FOUND", f"Skill {name!r} not found")
+    user = ctx["user"]
+    await _write_audit(
+        db,
+        tenant_id=user.get("tenant_id", ""),
+        workspace_id=workspace_id,
+        user_id=user.get("sub") or user.get("id", ""),
+        action="skill.reload",
+        target_id=name,
+        details={"layer": skill.layer},
+        ip_address=request.client.host if request.client else "",
+    )
+    await db.commit()
     return {
         "name": skill.name,
         "description": skill.description,

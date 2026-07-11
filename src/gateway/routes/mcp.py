@@ -9,11 +9,39 @@ Access:
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.gateway.auth.rbac import require_permission
+from src.infra.db.models import AuditLog
+from src.infra.db.session import get_db
 from src.runtime.harness.registry import get_registry
 
 router = APIRouter()
+
+
+async def _write_audit(
+    db: AsyncSession,
+    *,
+    tenant_id: str,
+    workspace_id: str,
+    user_id: str,
+    action: str,
+    target_id: str,
+    details: dict | None = None,
+    ip_address: str = "",
+) -> None:
+    db.add(
+        AuditLog(
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            action=action,
+            target_type="mcp_server",
+            target_id=target_id,
+            details=details or {},
+            ip_address=ip_address or "",
+        )
+    )
 
 
 class MCPServerOut(BaseModel):
@@ -78,7 +106,9 @@ async def list_mcp_servers(
 async def create_mcp_server(
     workspace_id: str,
     body: CreateMCPServerRequest,
-    _ctx=Depends(require_permission("mcp:write", workspace_id_param="workspace_id")),
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    ctx=Depends(require_permission("mcp:write", workspace_id_param="workspace_id")),
 ):
     """Register a new MCP server for this workspace."""
     from src.runtime.harness.mcp import MCPServerConfig
@@ -99,6 +129,18 @@ async def create_mcp_server(
         enabled=body.enabled,
     )
     await mcp.register_server(config)
+    user = ctx["user"]
+    await _write_audit(
+        db,
+        tenant_id=user.get("tenant_id", ""),
+        workspace_id=workspace_id,
+        user_id=user.get("sub") or user.get("id", ""),
+        action="mcp.create",
+        target_id=body.name,
+        details={"endpoint": body.endpoint, "transport": transport},
+        ip_address=request.client.host if request.client else "",
+    )
+    await db.commit()
     return JSONResponse(
         status_code=201,
         content=MCPServerOut(
@@ -115,7 +157,9 @@ async def update_mcp_server(
     workspace_id: str,
     name: str,
     body: UpdateMCPServerRequest,
-    _ctx=Depends(require_permission("mcp:write", workspace_id_param="workspace_id")),
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    ctx=Depends(require_permission("mcp:write", workspace_id_param="workspace_id")),
 ):
     """Update an MCP server's configuration."""
     from src.runtime.harness.mcp import MCPServerConfig
@@ -142,6 +186,18 @@ async def update_mcp_server(
         created_at=existing.created_at,
     )
     await mcp.register_server(updated)
+    user = ctx["user"]
+    await _write_audit(
+        db,
+        tenant_id=user.get("tenant_id", ""),
+        workspace_id=workspace_id,
+        user_id=user.get("sub") or user.get("id", ""),
+        action="mcp.update",
+        target_id=name,
+        details=body.model_dump(exclude_none=True),
+        ip_address=request.client.host if request.client else "",
+    )
+    await db.commit()
     return MCPServerOut(
         name=updated.name,
         endpoint=updated.endpoint,
@@ -154,7 +210,9 @@ async def update_mcp_server(
 async def delete_mcp_server(
     workspace_id: str,
     name: str,
-    _ctx=Depends(require_permission("mcp:write", workspace_id_param="workspace_id")),
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    ctx=Depends(require_permission("mcp:write", workspace_id_param="workspace_id")),
 ):
     """Unregister an MCP server."""
     mcp = get_registry().mcp
@@ -164,6 +222,17 @@ async def delete_mcp_server(
             status_code=404,
             content={"error": {"code": "NOT_FOUND", "message": f"MCP server {name!r} not found"}},
         )
+    user = ctx["user"]
+    await _write_audit(
+        db,
+        tenant_id=user.get("tenant_id", ""),
+        workspace_id=workspace_id,
+        user_id=user.get("sub") or user.get("id", ""),
+        action="mcp.delete",
+        target_id=name,
+        ip_address=request.client.host if request.client else "",
+    )
+    await db.commit()
     return Response(status_code=204)
 
 

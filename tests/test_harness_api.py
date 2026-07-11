@@ -18,10 +18,11 @@ import uuid as _uuid
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from src.gateway.auth.jwt import create_jwt
 from src.infra.db.engine import async_session
-from src.infra.db.models import Tenant, User, Workspace, WorkspaceMember
+from src.infra.db.models import AuditLog, Tenant, User, Workspace, WorkspaceMember
 
 
 # ── Constants ───────────────────────────────────────────────────────────
@@ -104,6 +105,7 @@ async def setup_db():
             "key TEXT,"
             "content TEXT NOT NULL,"
             "metadata TEXT NOT NULL DEFAULT '{}',"
+            "memory_type TEXT NOT NULL DEFAULT 'episodic',"
             "created_at DATETIME NOT NULL,"
             "expires_at DATETIME"
             ")"
@@ -401,16 +403,90 @@ class TestMCPAPI:
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_member_cannot_write(self, app):
+    async def test_member_can_write(self, app):
+        """member has mcp:write (Wave 1 sidebar reorganization)."""
         tok = await _seed(WS_ID, TENANT_ID, MEMBER_USER, ws_role="member")
+        server_name = _uniq("mcp-member")
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.post(
                 f"/api/v1/workspaces/{WS_ID}/mcp/servers",
                 headers={"Authorization": f"Bearer {tok}"},
-                json={"name": "should_fail", "endpoint": "http://x", "transport": "http"},
+                json={"name": server_name, "endpoint": "http://x", "transport": "http"},
             )
-        assert resp.status_code == 403
+        assert resp.status_code == 201
+
+
+# ── TestMCPAudit ────────────────────────────────────────────────────────
+class TestMCPAudit:
+    @pytest.mark.asyncio
+    async def test_create_writes_audit_log(self, app):
+        tok = await _seed(WS_ID, TENANT_ID, ADMIN_USER, ws_role="workspace_admin")
+        server_name = _uniq("mcp-audit-create")
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await ac.post(
+                f"/api/v1/workspaces/{WS_ID}/mcp/servers",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={"name": server_name, "endpoint": "http://x", "transport": "http"},
+            )
+            assert resp.status_code == 201
+        async with async_session() as db:
+            rows = (
+                await db.execute(
+                    select(AuditLog).where(AuditLog.action == "mcp.create")
+                )
+            ).scalars().all()
+            assert any(r.target_id == server_name for r in rows)
+
+    @pytest.mark.asyncio
+    async def test_update_writes_audit_log(self, app):
+        tok = await _seed(WS_ID, TENANT_ID, ADMIN_USER, ws_role="workspace_admin")
+        server_name = _uniq("mcp-audit-upd")
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.post(
+                f"/api/v1/workspaces/{WS_ID}/mcp/servers",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={"name": server_name, "endpoint": "http://old", "transport": "http"},
+            )
+            resp = await ac.put(
+                f"/api/v1/workspaces/{WS_ID}/mcp/servers/{server_name}",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={"endpoint": "http://new"},
+            )
+            assert resp.status_code == 200
+        async with async_session() as db:
+            rows = (
+                await db.execute(
+                    select(AuditLog).where(AuditLog.action == "mcp.update")
+                )
+            ).scalars().all()
+            assert any(r.target_id == server_name for r in rows)
+
+    @pytest.mark.asyncio
+    async def test_delete_writes_audit_log(self, app):
+        tok = await _seed(WS_ID, TENANT_ID, ADMIN_USER, ws_role="workspace_admin")
+        server_name = _uniq("mcp-audit-del")
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            await ac.post(
+                f"/api/v1/workspaces/{WS_ID}/mcp/servers",
+                headers={"Authorization": f"Bearer {tok}"},
+                json={"name": server_name, "endpoint": "http://x", "transport": "http"},
+            )
+            resp = await ac.delete(
+                f"/api/v1/workspaces/{WS_ID}/mcp/servers/{server_name}",
+                headers={"Authorization": f"Bearer {tok}"},
+            )
+            assert resp.status_code == 204
+        async with async_session() as db:
+            rows = (
+                await db.execute(
+                    select(AuditLog).where(AuditLog.action == "mcp.delete")
+                )
+            ).scalars().all()
+            assert any(r.target_id == server_name for r in rows)
 
 
 # ── TestSkillsAPI ───────────────────────────────────────────────────────

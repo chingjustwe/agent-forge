@@ -616,3 +616,54 @@ class TestAccessMatrix:
                 headers={"Authorization": f"Bearer {token}"},
             )
             assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# 8. permissions.yaml config (Wave 1 sidebar reorganization)
+# ---------------------------------------------------------------------------
+
+
+class TestPermissionsConfig:
+    """Verify the permissions.yaml changes for Wave 1 sidebar reorg.
+
+    - member gains skills:write / mcp:write / usage:read
+    - workspace_admin gains usage:read
+    - frontend_tabs paths renamed: /admin/skills→/skills, /admin/mcp→/mcp,
+      /admin/usage→/usage
+    """
+
+    def test_member_has_skills_write(self):
+        from src.gateway.auth.permissions import has_permission
+        assert has_permission("member", "skills:write") is True
+
+    def test_member_has_mcp_write(self):
+        from src.gateway.auth.permissions import has_permission
+        assert has_permission("member", "mcp:write") is True
+
+    def test_member_has_usage_read(self):
+        from src.gateway.auth.permissions import has_permission
+        assert has_permission("member", "usage:read") is True
+
+    def test_workspace_admin_has_usage_read(self):
+        from src.gateway.auth.permissions import has_permission
+        assert has_permission("workspace_admin", "usage:read") is True
+
+    def test_viewer_lacks_write_perms(self):
+        from src.gateway.auth.permissions import has_permission
+        assert has_permission("viewer", "skills:write") is False
+        assert has_permission("viewer", "mcp:write") is False
+        assert has_permission("viewer", "usage:read") is False
+
+    def test_frontend_tabs_has_renamed_paths(self):
+        from src.gateway.auth.permissions import get_frontend_tabs
+        tabs = get_frontend_tabs()
+        assert "/skills" in tabs
+        assert "/mcp" in tabs
+        assert "/analytics" in tabs
+
+    def test_frontend_tabs_no_old_admin_paths(self):
+        from src.gateway.auth.permissions import get_frontend_tabs
+        tabs = get_frontend_tabs()
+        assert "/admin/skills" not in tabs
+        assert "/admin/mcp" not in tabs
+        assert "/admin/usage" not in tabs

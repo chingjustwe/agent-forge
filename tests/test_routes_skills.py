@@ -4,17 +4,19 @@ Covers:
 - GET list includes ``layer`` / ``editable`` / ``workspace_id`` fields.
 - POST creates a workspace skill (201, layer=workspace, editable=true).
 - POST duplicate name → 409; invalid name → 400.
-- Unauthorized (member) POST/PUT/DELETE → 403 (skills:write).
+- member can write (skills:write granted via permissions.yaml).
 - PUT/DELETE on a non-workspace (directory-layer / missing) skill → 403.
 - PUT updates a workspace skill; DELETE removes it.
 - reload on a workspace skill → 400.
+- create / update / delete write AuditLog entries.
 """
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from src.gateway.auth.jwt import create_jwt
 from src.infra.db.engine import async_session
-from src.infra.db.models import Tenant, Workspace, WorkspaceMember
+from src.infra.db.models import AuditLog, Tenant, Workspace, WorkspaceMember
 
 
 def _token(user_id: str, tenant_id: str, role: str = "workspace_admin") -> str:
@@ -118,7 +120,8 @@ class TestSkillRoutes:
             assert resp.status_code == 400, resp.text
 
     @pytest.mark.asyncio
-    async def test_member_cannot_write(self, app):
+    async def test_member_can_write(self, app):
+        """member has skills:write (Wave 1 sidebar reorganization)."""
         ws, tenant, user = "ws-sk4", "t-sk4", "u-sk4"
         tok = await _seed(ws, tenant, user, role="member")
         h = {"Authorization": f"Bearer {tok}"}
@@ -126,9 +129,9 @@ class TestSkillRoutes:
             resp = await ac.post(
                 f"/api/v1/workspaces/{ws}/skills",
                 headers=h,
-                json={"name": "nope", "instructions": "x"},
+                json={"name": "member-skill", "instructions": "x"},
             )
-            assert resp.status_code == 403, resp.text
+            assert resp.status_code == 201, resp.text
 
     @pytest.mark.asyncio
     async def test_update_non_workspace_forbidden(self, app):
@@ -201,3 +204,76 @@ class TestSkillRoutes:
                 f"/api/v1/workspaces/{ws}/skills/wsreload/reload", headers=h
             )
             assert resp.status_code == 400, resp.text
+
+
+# ── Audit log tests ─────────────────────────────────────────────────────
+
+
+class TestSkillAudit:
+    @pytest.mark.asyncio
+    async def test_create_writes_audit_log(self, app):
+        ws, tenant, user = "ws-ska1", "t-ska1", "u-ska1"
+        tok = await _seed(ws, tenant, user)
+        h = {"Authorization": f"Bearer {tok}"}
+        async with _client(app) as ac:
+            resp = await ac.post(
+                f"/api/v1/workspaces/{ws}/skills",
+                headers=h,
+                json={"name": "audited-skill", "instructions": "x"},
+            )
+            assert resp.status_code == 201
+        async with async_session() as db:
+            rows = (
+                await db.execute(
+                    select(AuditLog).where(AuditLog.action == "skill.create")
+                )
+            ).scalars().all()
+            assert any(r.target_id == "audited-skill" for r in rows)
+
+    @pytest.mark.asyncio
+    async def test_update_writes_audit_log(self, app):
+        ws, tenant, user = "ws-ska2", "t-ska2", "u-ska2"
+        tok = await _seed(ws, tenant, user)
+        h = {"Authorization": f"Bearer {tok}"}
+        async with _client(app) as ac:
+            await ac.post(
+                f"/api/v1/workspaces/{ws}/skills",
+                headers=h,
+                json={"name": "upd-audit", "instructions": "v1"},
+            )
+            resp = await ac.put(
+                f"/api/v1/workspaces/{ws}/skills/upd-audit",
+                headers=h,
+                json={"instructions": "v2"},
+            )
+            assert resp.status_code == 200
+        async with async_session() as db:
+            rows = (
+                await db.execute(
+                    select(AuditLog).where(AuditLog.action == "skill.update")
+                )
+            ).scalars().all()
+            assert any(r.target_id == "upd-audit" for r in rows)
+
+    @pytest.mark.asyncio
+    async def test_delete_writes_audit_log(self, app):
+        ws, tenant, user = "ws-ska3", "t-ska3", "u-ska3"
+        tok = await _seed(ws, tenant, user)
+        h = {"Authorization": f"Bearer {tok}"}
+        async with _client(app) as ac:
+            await ac.post(
+                f"/api/v1/workspaces/{ws}/skills",
+                headers=h,
+                json={"name": "del-audit", "instructions": "x"},
+            )
+            resp = await ac.delete(
+                f"/api/v1/workspaces/{ws}/skills/del-audit", headers=h
+            )
+            assert resp.status_code == 200
+        async with async_session() as db:
+            rows = (
+                await db.execute(
+                    select(AuditLog).where(AuditLog.action == "skill.delete")
+                )
+            ).scalars().all()
+            assert any(r.target_id == "del-audit" for r in rows)

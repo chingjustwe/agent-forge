@@ -32,10 +32,13 @@ roles:
       - quota:read
       - tools:read
       - skills:read
+      - skills:write
       - memory:read
       - memory:write
       - guardrails:read
       - mcp:read
+      - mcp:write
+      - usage:read
       - hooks:read
       - scheduler:read
 
@@ -77,6 +80,7 @@ roles:
       - admin:users:read
       - admin:audit:read
       - admin:usage:read
+      - usage:read
 
   tenant_admin:
     label: "租户超级管理员"
@@ -86,16 +90,13 @@ roles:
 # path → 所需权限（null = 所有人可见）
 frontend_tabs:
   /sessions:         sessions:read
-  /dashboard:        null
-  /requests:         null
-  /quota:            quota:read
+  /analytics:        null
   /agents:           agents:read
   /tools:            tools:read
   /skills:           skills:read
   /memory:           memory:read
   /guardrails:       guardrails:read
-  /admin/mcp:        mcp:read
-  /admin/skills:      skills:read
+  /mcp:              mcp:read
   /scheduler:        scheduler:read
   /api-keys:         api_keys:read
   /admin:            admin:workspaces:read
@@ -103,7 +104,6 @@ frontend_tabs:
   /admin/workspaces: admin:workspaces:read
   /admin/observability: settings:read
   /admin/audit:      admin:audit:read
-  /admin/usage:      admin:usage:read
 
 # ── API Key 可用 Scope ──
 # 自动从所有非 admin 角色权限的并集生成。
