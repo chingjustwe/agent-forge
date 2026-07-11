@@ -7,12 +7,9 @@ import AdminPage from "./pages/AdminPage";
 import AdminDashboard from "./pages/AdminDashboard";
 import AdminUsers from "./pages/AdminUsers";
 import AdminWorkspaces from "./pages/AdminWorkspaces";
-import AdminAuditLog from "./pages/AdminAuditLog";
-import AdminUsage from "./pages/AdminUsage";
-import Dashboard from "./pages/Dashboard";
-import RequestList from "./pages/RequestList";
+import Audit from "./pages/Audit";
+import Analytics from "./pages/Analytics";
 import RequestDetail from "./pages/RequestDetail";
-import QuotaPage from "./pages/QuotaPage";
 import Settings from "./pages/Settings";
 import WorkspaceInvitations from "./pages/WorkspaceInvitations";
 import Agents from "./pages/Agents";
@@ -93,20 +90,21 @@ function App() {
           <Route path="/admin/dashboard" element={<ProtectedRoute><AdminDashboard /></ProtectedRoute>} />
           <Route path="/admin/users" element={<ProtectedRoute><AdminUsers /></ProtectedRoute>} />
           <Route path="/admin/workspaces" element={<ProtectedRoute><AdminWorkspaces /></ProtectedRoute>} />
-          <Route path="/admin/audit" element={<ProtectedRoute><AdminAuditLog /></ProtectedRoute>} />
-          <Route path="/admin/usage" element={<ProtectedRoute><AdminUsage /></ProtectedRoute>} />
-          <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-          <Route path="/requests" element={<ProtectedRoute><RequestList /></ProtectedRoute>} />
+          <Route path="/admin/audit" element={<ProtectedRoute><Audit /></ProtectedRoute>} />
+          <Route path="/analytics" element={<ProtectedRoute><Analytics /></ProtectedRoute>} />
+          <Route path="/usage" element={<Navigate to="/analytics" replace />} />
+          <Route path="/dashboard" element={<Navigate to="/analytics" replace />} />
+          <Route path="/quota" element={<Navigate to="/analytics" replace />} />
+          <Route path="/requests" element={<Navigate to="/admin/audit" replace />} />
           <Route path="/requests/:traceId" element={<ProtectedRoute><RequestDetail /></ProtectedRoute>} />
-          <Route path="/quota" element={<ProtectedRoute><QuotaPage /></ProtectedRoute>} />
           <Route path="/settings" element={<Navigate to="/admin/observability" replace />} />
           <Route path="/admin/observability" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
           <Route path="/invitations" element={<ProtectedRoute><WorkspaceInvitations /></ProtectedRoute>} />
           <Route path="/invitations/:token" element={<WorkspaceInvitations />} />
           <Route path="/agents" element={<ProtectedRoute><Agents /></ProtectedRoute>} />
           <Route path="/api-keys" element={<ProtectedRoute><ApiKeys /></ProtectedRoute>} />
-          <Route path="/admin/mcp" element={<ProtectedRoute><AdminMCP /></ProtectedRoute>} />
-          <Route path="/admin/skills" element={<ProtectedRoute><AdminSkills /></ProtectedRoute>} />
+          <Route path="/mcp" element={<ProtectedRoute><AdminMCP /></ProtectedRoute>} />
+          <Route path="/skills" element={<ProtectedRoute><AdminSkills /></ProtectedRoute>} />
         </Routes>
       </WorkspaceProvider>
     </ToastProvider>

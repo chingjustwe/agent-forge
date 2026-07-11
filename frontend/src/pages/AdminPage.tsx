@@ -82,7 +82,7 @@ const QUICK_LINKS: QuickLinkCard[] = [
     accentClass: "stat-card-accent-warning",
   },
   {
-    path: "/admin/usage",
+    path: "/usage",
     title: "Usage",
     description: "View platform usage statistics",
     icon: <UsageIcon />,

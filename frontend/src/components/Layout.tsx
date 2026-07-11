@@ -37,15 +37,6 @@ function RequestsIcon() {
   );
 }
 
-function QuotaIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z" />
-      <path d="M12 6v6l4 2" />
-    </svg>
-  );
-}
-
 function AgentsIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -225,27 +216,42 @@ interface NavItem {
   icon: JSX.Element;
 }
 
+interface NavSection {
+  id: string;
+  title: string;
+  items: NavItem[];
+}
+
 const SESSION_ITEMS: NavItem[] = [
   { path: "/sessions", label: "Sessions", icon: <SessionsIcon /> },
 ];
 
-const TOOL_ITEMS: NavItem[] = [
-  { path: "/dashboard", label: "Dashboard", icon: <DashboardIcon /> },
-  { path: "/requests", label: "Requests", icon: <RequestsIcon /> },
-  { path: "/agents", label: "Agents", icon: <AgentsIcon /> },
-  { path: "/api-keys", label: "API Keys", icon: <ApiKeysIcon /> },
-  { path: "/quota", label: "Quota", icon: <QuotaIcon /> },
-];
-
-const ADMIN_ITEMS: NavItem[] = [
-  { path: "/admin", label: "Overview", icon: <AdminOverviewIcon /> },
-  { path: "/admin/users", label: "Users", icon: <UsersIcon /> },
-  { path: "/admin/workspaces", label: "Workspaces", icon: <WorkspacesIcon /> },
-  { path: "/admin/observability", label: "Observability", icon: <ObservabilityIcon /> },
-  { path: "/admin/audit", label: "Audit Log", icon: <AuditLogIcon /> },
-  { path: "/admin/usage", label: "Usage", icon: <UsageIcon /> },
-  { path: "/admin/mcp", label: "MCP Servers", icon: <McpIcon /> },
-  { path: "/admin/skills", label: "Skills", icon: <SkillsIcon /> },
+// Three grouped sections: Agents (build), Analytics (insights), Admin (governance).
+// Visibility is decoupled from grouping — a single `visibleTabs` set filters
+// items regardless of which section they belong to.
+const SECTIONS: NavSection[] = [
+  {
+    id: "agents",
+    title: "Agents",
+    items: [
+      { path: "/agents", label: "Agents", icon: <AgentsIcon /> },
+      { path: "/skills", label: "Skills", icon: <SkillsIcon /> },
+      { path: "/mcp", label: "MCP Servers", icon: <McpIcon /> },
+      { path: "/analytics", label: "Analytics", icon: <UsageIcon /> },
+    ],
+  },
+  {
+    id: "admin",
+    title: "Admin",
+    items: [
+      { path: "/admin", label: "Overview", icon: <AdminOverviewIcon /> },
+      { path: "/api-keys", label: "API Keys", icon: <ApiKeysIcon /> },
+      { path: "/admin/workspaces", label: "Workspaces", icon: <WorkspacesIcon /> },
+      { path: "/admin/users", label: "Users", icon: <UsersIcon /> },
+      { path: "/admin/observability", label: "Observability", icon: <ObservabilityIcon /> },
+      { path: "/admin/audit", label: "Audit", icon: <AuditLogIcon /> },
+    ],
+  },
 ];
 
 // ── Layout Component ─────────────────────────────────────────────────────
@@ -256,8 +262,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const { currentWorkspaceId } = useWorkspace();
   const [user, setUser] = useState<User | null>(null);
   const [visibleTabs, setVisibleTabs] = useState<Set<string>>(new Set());
-  const [visibleAdminTabs, setVisibleAdminTabs] = useState<Set<string>>(new Set());
-  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set(["platform"]));
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set(["admin"]));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try {
       return localStorage.getItem("agent_platform_sidebar_collapsed") === "true";
@@ -281,24 +286,15 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   }, []);
 
   // Fetch permissions from backend to determine tab visibility.
+  // A single `visibleTabs` set drives all sections — grouping is decoupled
+  // from visibility so e.g. `/skills` (non-admin) can appear in the Agents
+  // group while `/usage` (formerly admin) appears in Analytics.
+  // The backend already filtered `frontend_tabs` to only paths the user can
+  // access, so every key present is visible.
   useEffect(() => {
     fetchPermissions()
       .then((resp) => {
-        const tabs = new Set<string>();
-        const adminTabs = new Set<string>();
-        for (const [path, required] of Object.entries(resp.frontend_tabs)) {
-          if (required !== null) {
-            if (path.startsWith("/admin")) {
-              adminTabs.add(path);
-            } else {
-              tabs.add(path);
-            }
-          } else {
-            tabs.add(path);
-          }
-        }
-        setVisibleTabs(tabs);
-        setVisibleAdminTabs(adminTabs);
+        setVisibleTabs(new Set(Object.keys(resp.frontend_tabs)));
       })
       .catch(() => {});
   }, []);
@@ -363,8 +359,11 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     : user?.email?.slice(0, 2).toUpperCase() || "??";
 
   const visibleSessionItems = SESSION_ITEMS.filter((item) => visibleTabs.has(item.path));
-  const visibleToolItems = TOOL_ITEMS.filter((item) => visibleTabs.has(item.path));
-  const visibleAdminItems = ADMIN_ITEMS.filter((item) => visibleAdminTabs.has(item.path));
+  // Each section's items are filtered by the single visibleTabs set.
+  const visibleSections = SECTIONS.map((section) => ({
+    ...section,
+    items: section.items.filter((item) => visibleTabs.has(item.path)),
+  })).filter((section) => section.items.length > 0);
 
   function isNavActive(item: NavItem) {
     if (item.path === "/admin") {
@@ -458,39 +457,28 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           {/* Divider */}
           <div className="sidebar-divider"></div>
 
-          {/* Tools */}
-          {visibleToolItems.length > 0 && (
-            <div className={`collapsible-section${collapsedSections.has("tools") ? " collapsed" : ""}`}>
-              <button className="sidebar-section-toggle" onClick={() => toggleSection("tools")}>
-                <span>Tools</span>
-                <span className={`collapsible-chevron${collapsedSections.has("tools") ? " collapsed" : ""}`}>
+          {/* Grouped sections: Agents / Analytics / Admin */}
+          {visibleSections.map((section) => (
+            <div
+              key={section.id}
+              className={`collapsible-section${collapsedSections.has(section.id) ? " collapsed" : ""}`}
+            >
+              <button
+                className="sidebar-section-toggle"
+                onClick={() => toggleSection(section.id)}
+              >
+                <span>{section.title}</span>
+                <span className={`collapsible-chevron${collapsedSections.has(section.id) ? " collapsed" : ""}`}>
                   <ChevronDownIcon />
                 </span>
               </button>
-              {!collapsedSections.has("tools") && (
+              {!collapsedSections.has(section.id) && (
                 <div>
-                  {visibleToolItems.map(item => renderNavLink(item))}
+                  {section.items.map(item => renderNavLink(item))}
                 </div>
               )}
             </div>
-          )}
-
-          {/* Platform (Admin) */}
-          {visibleAdminItems.length > 0 && (
-            <div className={`collapsible-section${collapsedSections.has("platform") ? " collapsed" : ""}`}>
-              <button className="sidebar-section-toggle" onClick={() => toggleSection("platform")}>
-                <span>Platform</span>
-                <span className={`collapsible-chevron${collapsedSections.has("platform") ? " collapsed" : ""}`}>
-                  <ChevronDownIcon />
-                </span>
-              </button>
-              {!collapsedSections.has("platform") && (
-                <div>
-                  {visibleAdminItems.map(item => renderNavLink(item))}
-                </div>
-              )}
-            </div>
-          )}
+          ))}
         </nav>
 
         {/* ── Footer ────────────────────────────────────────────────── */}
