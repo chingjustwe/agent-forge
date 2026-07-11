@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 
 class RunAdapter(ABC):
-    """Abstract base for agent run adapters (DirectLLM, ADK, LangGraph).
+    """Abstract base for agent run adapters (deepagents).
 
     Per spec D6: adapters receive ``HarnessContext`` (not ``dict``). The
     context carries identity, capability systems (tool_engine, guardrails,

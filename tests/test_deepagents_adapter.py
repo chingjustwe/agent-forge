@@ -29,7 +29,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.runtime.adapters.deepagents import DeepAgentsAdapter, _EXCLUDED_FILESYSTEM_TOOLS
+from src.runtime.adapters.deepagents import (
+    DeepAgentsAdapter,
+    _COLLIDING_FILESYSTEM_TOOLS,
+    _EXCLUDED_FILESYSTEM_TOOLS,
+    _EXCLUDED_TODO_TOOL,
+    _TASK_TOOL,
+)
 from src.runtime.models import StreamEvent
 
 
@@ -63,6 +69,88 @@ def _make_text_delta(text: str) -> dict:
             "delta": {"type": "text-delta", "text": text},
         }],
     )
+
+
+def _make_reasoning_delta(
+    content: str,
+    *,
+    delta_type: str = "reasoning-delta",
+    field: str = "reasoning_content",
+) -> dict:
+    """v3 ``method=messages`` event with a ``content-block-delta`` reasoning delta.
+
+    ``field`` controls which key holds the content inside the delta dict,
+    allowing tests to exercise all supported provider variants.
+    """
+    return _make_event(
+        "messages",
+        data=[{
+            "event": "content-block-delta",
+            "delta": {"type": delta_type, field: content},
+        }],
+    )
+
+
+def _make_content_block_finish_tool_call(
+    name: str, args: dict, call_id: str = "call_abc"
+) -> dict:
+    """v3 ``method=messages`` + ``content-block-finish`` with type=tool_call."""
+    return _make_event(
+        "messages",
+        data=[{
+            "event": "content-block-finish",
+            "index": 1,
+            "content": {"type": "tool_call", "id": call_id, "name": name, "args": args},
+        }, {"run_id": "r-1"}],
+    )
+
+
+def _make_message_finish(usage: dict | None = None) -> dict:
+    """v3 ``method=messages`` + ``message-finish`` with optional usage."""
+    payload: dict = {"event": "message-finish"}
+    if usage:
+        payload["usage"] = usage
+    return _make_event("messages", data=[payload, {"run_id": "r-1"}])
+
+
+def _make_tool_finished(
+    tool_call_id: str, output: str, tool_name: str = ""
+) -> dict:
+    """v3 ``method=tools`` + ``tool-finished`` event."""
+    return {
+        "type": "event",
+        "method": "tools",
+        "params": {
+            "namespace": [],
+            "timestamp": 0,
+            "data": {
+                "event": "tool-finished",
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "output": output,
+            },
+        },
+    }
+
+
+def _make_tool_error(
+    tool_call_id: str, message: str, tool_name: str = ""
+) -> dict:
+    """v3 ``method=tools`` + ``tool-error`` event."""
+    return {
+        "type": "event",
+        "method": "tools",
+        "params": {
+            "namespace": [],
+            "timestamp": 0,
+            "data": {
+                "event": "tool-error",
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "message": message,
+            },
+        },
+    }
 
 
 def _make_tool_call(name: str, args: dict, call_id: str = "c-1") -> dict:
@@ -223,7 +311,7 @@ class TestTranslateEvent:
         assert result == []
 
     def test_messages_content_block_delta_with_non_text_delta_returns_empty(self):
-        """A delta whose type is not 'text-delta' (e.g. tool-use-delta) is ignored."""
+        """A delta whose type is not 'text-delta' or reasoning → no event."""
         adapter = DeepAgentsAdapter(api_key="fake")
         event = _make_event(
             "messages",
@@ -232,6 +320,44 @@ class TestTranslateEvent:
                 "delta": {"type": "tool-use-delta"},
             }],
         )
+        result = adapter._translate_event(event)
+        assert result == []
+
+    def test_reasoning_delta_yields_reasoning_event(self):
+        """v3 content-block-delta with reasoning-delta → StreamEvent(type='reasoning')."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_reasoning_delta("Let me think about this...")
+        result = adapter._translate_event(event)
+        assert len(result) == 1
+        assert result[0].type == "reasoning"
+        assert result[0].data["content"] == "Let me think about this..."
+
+    def test_thinking_delta_yields_reasoning_event(self):
+        """v3 content-block-delta with thinking-delta type → reasoning event."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_reasoning_delta(
+            "analyzing...", delta_type="thinking-delta", field="thinking"
+        )
+        result = adapter._translate_event(event)
+        assert len(result) == 1
+        assert result[0].type == "reasoning"
+        assert result[0].data["content"] == "analyzing..."
+
+    def test_reasoning_delta_with_reasoning_field(self):
+        """Provider using 'reasoning' key (not 'reasoning_content') → works."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_reasoning_delta(
+            "step by step...", field="reasoning"
+        )
+        result = adapter._translate_event(event)
+        assert len(result) == 1
+        assert result[0].type == "reasoning"
+        assert result[0].data["content"] == "step by step..."
+
+    def test_reasoning_delta_with_empty_content_returns_empty(self):
+        """Empty reasoning content → no event emitted."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_reasoning_delta("")
         result = adapter._translate_event(event)
         assert result == []
 
@@ -388,6 +514,109 @@ class TestTranslateEvent:
         result = adapter._translate_event(event)
         assert result == []
 
+    # ── Real LangGraph v3 format tests ──────────────────────────────────
+
+    def test_content_block_finish_tool_call_yields_tool_call_event(self):
+        """v3 content-block-finish with type=tool_call → StreamEvent(type='tool_call')."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_content_block_finish_tool_call(
+            "read_file", {"path": "/tmp/foo.py"}, call_id="call_xyz"
+        )
+        result = adapter._translate_event(event)
+        assert len(result) == 1
+        assert result[0].type == "tool_call"
+        assert result[0].data["name"] == "read_file"
+        assert result[0].data["args"] == {"path": "/tmp/foo.py"}
+        assert result[0].data["call_id"] == "call_xyz"
+        assert result[0].already_executed is True
+
+    def test_content_block_start_returns_empty(self):
+        """content-block-start is skipped (tool_call emitted on finish)."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_event(
+            "messages",
+            data=[{
+                "event": "content-block-start",
+                "index": 1,
+                "content": {"type": "tool_call", "id": "c-1", "name": "foo"},
+            }, {"run_id": "r-1"}],
+        )
+        result = adapter._translate_event(event)
+        assert result == []
+
+    def test_message_finish_with_usage_yields_status(self):
+        """v3 message-finish with usage data → status event."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_message_finish(
+            usage={"input_tokens": 200, "output_tokens": 100, "total_tokens": 300}
+        )
+        result = adapter._translate_event(event)
+        assert len(result) == 1
+        assert result[0].type == "status"
+        assert result[0].data["usage"]["input_tokens"] == 200
+        assert result[0].data["usage"]["output_tokens"] == 100
+
+    def test_message_finish_without_usage_returns_empty(self):
+        """message-finish without usage data → no event."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_message_finish()
+        result = adapter._translate_event(event)
+        assert result == []
+
+    def test_tools_channel_tool_finished_yields_tool_result(self):
+        """v3 method=tools + tool-finished → StreamEvent(type='tool_result')."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_tool_finished("call_xyz", "file contents", tool_name="read_file")
+        result = adapter._translate_event(event)
+        assert len(result) == 1
+        assert result[0].type == "tool_result"
+        assert result[0].data["output"] == "file contents"
+        assert result[0].data["error"] is None
+        assert result[0].data["call_id"] == "call_xyz"
+        assert result[0].already_executed is True
+
+    def test_tools_channel_tool_error_yields_tool_result_with_error(self):
+        """v3 method=tools + tool-error → tool_result with error."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_tool_error("call_xyz", "Permission denied", tool_name="shell_exec")
+        result = adapter._translate_event(event)
+        assert len(result) == 1
+        assert result[0].type == "tool_result"
+        assert result[0].data["output"] == ""
+        assert result[0].data["error"] == "Permission denied"
+        assert result[0].data["call_id"] == "call_xyz"
+
+    def test_tools_channel_tool_started_returns_empty(self):
+        """tool-started on tools channel → skipped (tool_call from messages)."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = {
+            "type": "event",
+            "method": "tools",
+            "params": {
+                "namespace": [],
+                "timestamp": 0,
+                "data": {
+                    "event": "tool-started",
+                    "tool_call_id": "c-1",
+                    "tool_name": "foo",
+                    "input": {},
+                },
+            },
+        }
+        result = adapter._translate_event(event)
+        assert result == []
+
+    def test_reasoning_delta_with_v3_reasoning_field(self):
+        """v3 reasoning-delta uses 'reasoning' field (not 'reasoning_content')."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        event = _make_reasoning_delta(
+            "let me think...", delta_type="reasoning-delta", field="reasoning"
+        )
+        result = adapter._translate_event(event)
+        assert len(result) == 1
+        assert result[0].type == "reasoning"
+        assert result[0].data["content"] == "let me think..."
+
 
 # ── _EXCLUDED_FILESYSTEM_TOOLS ──────────────────────────────────────────
 
@@ -402,6 +631,172 @@ class TestExcludedTools:
     def test_excluded_tools_is_frozen(self):
         # frozenset is immutable
         assert isinstance(_EXCLUDED_FILESYSTEM_TOOLS, frozenset)
+
+    def test_colliding_subset_is_within_excluded_fs_set(self):
+        """Colliding tools (ls/glob/grep) are a subset of the fs built-ins."""
+        assert _COLLIDING_FILESYSTEM_TOOLS <= _EXCLUDED_FILESYSTEM_TOOLS
+        assert _COLLIDING_FILESYSTEM_TOOLS == {"ls", "glob", "grep"}
+
+    def test_todo_and_task_constants(self):
+        assert _EXCLUDED_TODO_TOOL == "write_todos"
+        assert _TASK_TOOL == "task"
+
+
+# ── Tool-exclusion middleware (whitelist enforcement) ──────────────────
+
+
+class TestToolExclusionMiddleware:
+    """Verify ``_ToolExclusionMiddleware`` is passed via ``middleware=`` so
+    the agent's tool whitelist actually constrains deepagents' auto-injected
+    built-ins (bug: "无论选啥，测试都是全量注入")."""
+
+    def _make_ctx_with_tool_engine(self, allowed_tools: list[str]):
+        """Build a ctx with a real ToolEngine scoped to ``allowed_tools``."""
+        from src.runtime.harness.context import HarnessContext
+        from src.runtime.harness.tool_engine import ToolEngine, ToolRegistry
+
+        agent = _make_agent()
+        ctx = HarnessContext(
+            workspace_id="ws-1",
+            user_id="u-1",
+            session_id="s-1",
+            trace_id="t-1",
+            agent=agent,
+        )
+        ctx.working_memory["system_prompt"] = "You are a test agent."
+        ctx.tool_engine = ToolEngine(
+            registry=ToolRegistry(),
+            allowed_tools=allowed_tools,
+        )
+        return ctx
+
+    async def _capture_middleware(self, ctx) -> dict:
+        """Run the adapter with a mocked create_deep_agent and return the
+        kwargs it was called with."""
+        adapter = DeepAgentsAdapter(api_key="fake")
+        mock_deep_agent = MagicMock()
+        mock_deep_agent.astream_events = _awaitable_stream([])
+
+        with patch("deepagents.create_deep_agent", return_value=mock_deep_agent) as mock_create, \
+             patch("langchain.chat_models.init_chat_model", return_value=MagicMock()):
+            await _collect(adapter.run(
+                [{"role": "user", "content": "x"}], ctx
+            ))
+
+        return mock_create.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_middleware_passed_when_excluded_nonempty(self):
+        """When there are built-ins to exclude, ``middleware=`` receives a
+        non-empty list containing ``_ToolExclusionMiddleware`` followed by
+        ``_SystemPromptStripperMiddleware``."""
+        ctx = self._make_ctx_with_tool_engine(allowed_tools=[])
+        kwargs = await self._capture_middleware(ctx)
+        mw = kwargs.get("middleware")
+        assert mw is not None
+        assert len(mw) == 2  # _ToolExclusionMiddleware + _SystemPromptStripperMiddleware
+        # The first middleware exposes the excluded set as ``_excluded``.
+        excluded = mw[0]._excluded
+        # All deepagents built-ins excluded (no whitelist, no subagents).
+        assert "read_file" in excluded
+        assert "write_todos" in excluded
+        assert "task" in excluded
+        assert "ls" in excluded  # colliding + not whitelisted → excluded
+        # The second middleware is the system-prompt stripper.
+        from src.runtime.adapters.deepagents import _SystemPromptStripperMiddleware
+        assert isinstance(mw[1], _SystemPromptStripperMiddleware)
+        assert mw[1]._strip_fs is True
+        assert mw[1]._strip_todos is True
+        assert mw[1]._strip_execute is True
+
+    @pytest.mark.asyncio
+    async def test_whitelisted_colliding_tool_is_not_excluded(self):
+        """When ``ls`` is whitelisted, it should NOT be in the excluded set
+        (deepagents' version is kept as the sole provider)."""
+        ctx = self._make_ctx_with_tool_engine(allowed_tools=["ls", "read"])
+        kwargs = await self._capture_middleware(ctx)
+        mw = kwargs.get("middleware")
+        assert mw is not None
+        excluded = mw[0]._excluded
+        assert "ls" not in excluded  # whitelisted → kept
+        assert "glob" in excluded    # not whitelisted → excluded
+        assert "grep" in excluded    # not whitelisted → excluded
+        # Non-colliding built-ins always excluded:
+        assert "read_file" in excluded
+        assert "write_todos" in excluded
+
+    @pytest.mark.asyncio
+    async def test_empty_whitelist_excludes_all_builtins(self):
+        """Empty whitelist → all 9 deepagents built-ins excluded."""
+        ctx = self._make_ctx_with_tool_engine(allowed_tools=[])
+        kwargs = await self._capture_middleware(ctx)
+        mw = kwargs.get("middleware")
+        excluded = mw[0]._excluded
+        for t in ("ls", "read_file", "write_file", "edit_file", "glob",
+                   "grep", "execute", "write_todos", "task"):
+            assert t in excluded, f"{t!r} should be excluded"
+
+    @pytest.mark.asyncio
+    async def test_task_kept_when_subagents_configured(self):
+        """When subagents are configured, ``task`` must NOT be excluded
+        (it's the subagent-delegation mechanism)."""
+        from src.runtime.harness.agents import AgentDefinition, SubagentSpec
+
+        agent = AgentDefinition(
+            id="a-sub",
+            name="parent",
+            workspace_id="ws-1",
+            adapter="deepagents",
+            system_prompt="x",
+            subagents=[
+                SubagentSpec(name="child", description="d", system_prompt="s"),
+            ],
+        )
+        from src.runtime.harness.context import HarnessContext
+        from src.runtime.harness.tool_engine import ToolEngine, ToolRegistry
+
+        ctx = HarnessContext(
+            workspace_id="ws-1", user_id="u-1", session_id="s-1",
+            trace_id="t-1", agent=agent,
+        )
+        ctx.working_memory["system_prompt"] = "x"
+        ctx.tool_engine = ToolEngine(
+            registry=ToolRegistry(), allowed_tools=[]
+        )
+
+        kwargs = await self._capture_middleware(ctx)
+        mw = kwargs.get("middleware")
+        excluded = mw[0]._excluded
+        assert "task" not in excluded  # subagents configured → kept
+        # Other built-ins still excluded:
+        assert "write_todos" in excluded
+        assert "read_file" in excluded
+
+    @pytest.mark.asyncio
+    async def test_colliding_tools_skipped_from_shims(self):
+        """Platform shims for colliding tools (ls/glob/grep) must NOT be
+        passed via ``tools=`` (deepagents' versions handle them)."""
+        from src.runtime.harness.tool_engine import ToolDefinition, ToolRegistry, ToolEngine
+
+        # Register ls + read + glob in the registry, whitelist all three.
+        registry = ToolRegistry()
+        for name in ("ls", "read", "glob"):
+            registry.register(ToolDefinition(
+                name=name, description="d", input_schema={},
+            ))
+        ctx = _make_ctx()
+        ctx.tool_engine = ToolEngine(
+            registry=registry, allowed_tools=["ls", "read", "glob"],
+        )
+
+        kwargs = await self._capture_middleware(ctx)
+        tools_passed = kwargs.get("tools")
+        tool_names = [t.name for t in tools_passed]
+        # read → platform shim (non-colliding)
+        assert "read" in tool_names
+        # ls/glob → colliding, skipped (deepagents' versions handle them)
+        assert "ls" not in tool_names
+        assert "glob" not in tool_names
 
 
 # ── run() orchestration ─────────────────────────────────────────────────
@@ -622,13 +1017,13 @@ class TestRunOrchestration:
         """When a checkpointer is present (second+ round), only the last
         user message should be passed to deepagents — the checkpoint
         already holds the full conversation history."""
-        from src.runtime.harness.checkpoint import SQLiteCheckpointStore, CheckpointScope
+        from src.runtime.harness.checkpoint import SQLiteCheckpointStore
 
         adapter = DeepAgentsAdapter(api_key="fake")
         ctx = _make_ctx()
-        # Wire a real checkpoint manager so the checkpointer branch is taken.
-        store = SQLiteCheckpointStore()
-        ctx.checkpoint = CheckpointScope(store, session_id=ctx.session_id, agent_id="a-1")
+        # Wire a real checkpoint store so the checkpointer branch is taken.
+        # Wave 2.5: ctx.checkpoint is the store directly (no CheckpointScope).
+        ctx.checkpoint = SQLiteCheckpointStore()
 
         captured_input: dict = {}
 
@@ -660,7 +1055,7 @@ class TestRunOrchestration:
 
     @pytest.mark.asyncio
     async def test_run_without_checkpointer_passes_full_history(self):
-        """Without a checkpointer (first round or direct_llm fallback),
+        """Without a checkpointer (first round),
         the full message history should be passed to deepagents."""
         adapter = DeepAgentsAdapter(api_key="fake")
         ctx = _make_ctx()
@@ -719,7 +1114,7 @@ class TestSubagentWiring:
                     description="A child subagent.",
                     system_prompt="You are a child.",
                     tools=[],
-                    model="deepseek-chat",
+                    model="deepseek-v4-flash",
                 ),
             ],
         )
@@ -740,7 +1135,7 @@ class TestSubagentWiring:
         assert subagents is not None
         assert len(subagents) == 1
         assert subagents[0]["name"] == "child"
-        assert subagents[0]["model"] == "deepseek-chat"
+        assert subagents[0]["model"] == "deepseek-v4-flash"
 
     @pytest.mark.asyncio
     async def test_run_subagent_mapping_failure_falls_back_to_empty(self):

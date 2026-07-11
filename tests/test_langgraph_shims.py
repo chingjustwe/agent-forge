@@ -28,7 +28,7 @@ from sqlalchemy import text
 from src.infra.db.engine import engine
 from src.infra.db.models import Base
 from src.runtime.harness.checkpoint import Checkpoint, SQLiteCheckpointStore
-from src.runtime.harness.langgraph_shims import (
+from src.runtime.adapters.langgraph_bridge import (
     LangChainToolShim,
     LangGraphCheckpointShim,
 )
@@ -350,6 +350,140 @@ class TestLangGraphCheckpointShim:
         assert len(rows) == 1
         assert rows[0].messages == []
 
+    @pytest.mark.asyncio
+    async def test_aput_reconstructs_full_messages_from_deltas(self):
+        """Wave 2 regression: the messages column must hold the FULL
+        conversation, not just the per-step delta.
+
+        LangGraph writes one checkpoint per graph step; the ``messages``
+        channel is a DeltaChannel, so each step's ``channel_values`` only
+        carries the newly appended message(s). The shim must walk the
+        blobs table and concatenate the deltas to recover the complete
+        message history (this is what previously produced "0 messages")."""
+        store = SQLiteCheckpointStore()
+        shim = LangGraphCheckpointShim(store, "s-delta", "a-1")
+        config = {"configurable": {"thread_id": "s-delta"}}
+
+        # Step 1: user message (version 1)
+        await shim.aput(
+            config,
+            _make_checkpoint_dict(
+                messages=[{"role": "user", "content": "hi"}],
+                seq_id="1",
+                channel_versions={"messages": "1"},
+            ),
+            {},
+            {"messages": "1"},
+        )
+        # Step 2: assistant reply (version 2) — only the new message in channel_values
+        await shim.aput(
+            config,
+            _make_checkpoint_dict(
+                messages=[{"role": "assistant", "content": "hello"}],
+                seq_id="2",
+                channel_versions={"messages": "2"},
+            ),
+            {},
+            {"messages": "2"},
+        )
+
+        rows = await store.list("s-delta")
+        assert len(rows) == 2
+        # The latest checkpoint must contain BOTH messages.
+        latest = rows[-1]
+        assert latest.messages == [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+        # reconstruct_checkpoint_messages must agree (covers legacy rows
+        # whose messages column may be empty).
+        rebuilt = await shim.reconstruct_checkpoint_messages(latest)
+        assert rebuilt == [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_aput_reconstructs_messages_from_writes(self):
+        """Wave 2 regression: the authoritative full conversation lives in
+        the per-step ``messages`` writes (``checkpoint_writes``), NOT in the
+        checkpoint's ``channel_values['messages']`` (which LangGraph 1.2+
+        leaves empty for a DeltaChannel). aput must reconstruct the FULL
+        list from those writes and store it in the ``messages`` column.
+
+        Mirrors the real langgraph flow: ``aput_writes`` (messages wrapped
+        as a single-element list) is called before each ``aput``.
+        """
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        store = SQLiteCheckpointStore()
+        shim = LangGraphCheckpointShim(store, "s-w", "a-1")
+        config = {"configurable": {"thread_id": "s-w"}}
+
+        # Step 1: input user message written, then checkpoint.
+        await shim.aput_writes(
+            config, [("messages", [HumanMessage(content="Hi there")])], task_id="t1"
+        )
+        await shim.aput(
+            config,
+            _make_checkpoint_dict(
+                messages=[{"role": "user", "content": "Hi there"}],
+                seq_id="1",
+                channel_versions={"__start__": "1"},
+            ),
+            {},
+            {"__start__": "1"},
+        )
+        # Step 2: assistant reply written, then checkpoint. channel_values
+        # carries no messages (mirrors real DeltaChannel behaviour).
+        await shim.aput_writes(
+            config,
+            [("messages", [AIMessage(content="Hello! I am a test agent.")])],
+            task_id="t2",
+        )
+        await shim.aput(
+            config,
+            _make_checkpoint_dict(messages=[], seq_id="2", channel_versions={"messages": "2"}),
+            {},
+            {"messages": "2"},
+        )
+
+        rows = await store.list("s-w")
+        assert len(rows) == 2
+        latest = rows[-1]
+        assert latest.messages == [
+            {"role": "user", "content": "Hi there"},
+            {"role": "assistant", "content": "Hello! I am a test agent."},
+        ]
+        rebuilt = await shim.reconstruct_checkpoint_messages(latest)
+        assert rebuilt == latest.messages
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_checkpoint_messages_falls_back_to_writes(self):
+        """When a stored checkpoint row has an empty ``messages`` column
+        (the old bug), reconstruct_checkpoint_messages must recover the
+        full conversation from the ``checkpoint_writes`` table instead of
+        returning [] — this is what list_checkpoints / restore rely on.
+        """
+        from langchain_core.messages import HumanMessage
+
+        store = SQLiteCheckpointStore()
+        shim = LangGraphCheckpointShim(store, "s-fb", "a-1")
+        config = {"configurable": {"thread_id": "s-fb"}}
+
+        # A checkpoint row with EMPTY messages (as the old bug produced).
+        empty_cp = Checkpoint(
+            session_id="s-fb", sequence=1, messages=[], tool_state={}, agent_id="a-1"
+        )
+        await store.save(empty_cp)
+        # But the per-step message writes exist.
+        await shim.aput_writes(
+            config, [("messages", [HumanMessage(content="recovered")])], task_id="t1"
+        )
+
+        rebuilt = await shim.reconstruct_checkpoint_messages(empty_cp)
+        assert rebuilt == [{"role": "user", "content": "recovered"}]
+
     # ── Phase 4c: pending writes durability ──
 
     @pytest.mark.asyncio
@@ -553,6 +687,248 @@ class TestLangGraphCheckpointShim:
         channels = {w[1] for w in writes}
         assert task_ids == {"task-A", "task-B"}
         assert channels == {"messages", "state"}
+
+    @pytest.mark.asyncio
+    async def test_reconstruct_checkpoint_messages_returns_per_checkpoint_snapshot(self):
+        """REGRESSION (2026-07-11): each checkpoint must return its OWN
+        message snapshot, not the full session's concatenated writes.
+
+        The restore UI (list_checkpoints) groups checkpoints by user-message
+        count. If ``reconstruct_checkpoint_messages`` returned the same
+        full-session list for every checkpoint (e.g. by always reading
+        ``checkpoint_writes``), then every checkpoint would report the max
+        user count and the grouping would collapse them into a single
+        restore point — the bug where "only the latest checkpoint history
+        remains".
+
+        Here the ``checkpoint_writes`` table holds the FULL session
+        (3 messages), but each checkpoint row stores a distinct snapshot.
+        The method must return the per-row snapshot, not the writes.
+        """
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        store = SQLiteCheckpointStore()
+        shim = LangGraphCheckpointShim(store, "s-percp", "a-1")
+        config = {"configurable": {"thread_id": "s-percp"}}
+
+        # Two checkpoints with DISTINCT snapshots.
+        cp1 = Checkpoint(
+            session_id="s-percp",
+            sequence=1,
+            messages=[{"role": "user", "content": "hi"}],
+            tool_state={},
+            agent_id="a-1",
+        )
+        cp2 = Checkpoint(
+            session_id="s-percp",
+            sequence=2,
+            messages=[
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ],
+            tool_state={},
+            agent_id="a-1",
+        )
+        await store.save(cp1)
+        await store.save(cp2)
+
+        # The session's checkpoint_writes hold the FULL conversation (longer
+        # than cp1's snapshot). If the buggy "always read writes" path ran,
+        # BOTH checkpoints would return this full list.
+        await shim.aput_writes(
+            config, [("messages", [HumanMessage(content="hi")])], task_id="t1"
+        )
+        await shim.aput_writes(
+            config, [("messages", [AIMessage(content="hello")])], task_id="t2"
+        )
+        await shim.aput_writes(
+            config, [("messages", [HumanMessage(content="third")])], task_id="t3"
+        )
+
+        rebuilt1 = await shim.reconstruct_checkpoint_messages(cp1)
+        rebuilt2 = await shim.reconstruct_checkpoint_messages(cp2)
+
+        # Each checkpoint returns ONLY its own snapshot.
+        assert rebuilt1 == [{"role": "user", "content": "hi"}], (
+            "cp1 must return its own 1-message snapshot, not the full session"
+        )
+        assert rebuilt2 == [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ], "cp2 must return its own 2-message snapshot, not the full session"
+        # And they must differ (prove they are not the same collapsed list).
+        assert rebuilt1 != rebuilt2
+
+
+# ── Checkpoint message fidelity (tool_calls / tool_call_id) ───────────────
+#
+# These guard against the "Messages with role 'tool' must be a response to a
+# preceding message with 'tool_calls'" BadRequestError. The shim must
+# preserve tool-call metadata when round-tripping messages through the
+# plain-dict format used by the ``messages`` column and the restore UI.
+
+
+class TestCheckpointMessageFidelity:
+    def _shim(self) -> LangGraphCheckpointShim:
+        store = SQLiteCheckpointStore()
+        return LangGraphCheckpointShim(store, "s-fid", "a-1")
+
+    def test_extract_plain_preserves_tool_calls_on_ai_message(self):
+        """_extract_plain_messages must keep AIMessage.tool_calls so the
+        restored conversation still has a preceding tool_call for its
+        ToolMessage."""
+        from langchain_core.messages import AIMessage
+
+        shim = self._shim()
+        ai = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "echo", "args": {"text": "x"}, "id": "call_1", "type": "tool_call"}
+            ],
+        )
+        out = shim._extract_plain_messages([ai])
+        assert len(out) == 1
+        assert out[0]["role"] == "assistant"
+        # Dict tool_calls are preserved verbatim (including "type").
+        assert out[0]["tool_calls"] == [
+            {"name": "echo", "args": {"text": "x"}, "id": "call_1", "type": "tool_call"}
+        ]
+
+    def test_extract_plain_preserves_tool_call_id_on_tool_message(self):
+        """_extract_plain_messages must keep ToolMessage.tool_call_id so the
+        tool message can be matched to its originating assistant tool_call."""
+        from langchain_core.messages import ToolMessage
+
+        shim = self._shim()
+        tool = ToolMessage(content="the result", tool_call_id="call_1")
+        out = shim._extract_plain_messages([tool])
+        assert len(out) == 1
+        assert out[0]["role"] == "tool"
+        assert out[0]["tool_call_id"] == "call_1"
+
+    def test_extract_plain_omits_tool_keys_when_absent(self):
+        """When there are no tool calls, no spurious tool_calls/tool_call_id
+        keys are added (keeps the plain format minimal and stable)."""
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        shim = self._shim()
+        out = shim._extract_plain_messages([
+            HumanMessage(content="hi"),
+            AIMessage(content="hello"),
+            ToolMessage(content="r", tool_call_id=""),  # empty id -> omitted
+        ])
+        assert "tool_calls" not in out[0]
+        assert "tool_calls" not in out[1]
+        assert "tool_call_id" not in out[2]
+
+    def test_extract_plain_flattens_nested_lists(self):
+        """LangGraph writes messages wrapped as a single-element list; the
+        extractor must flatten nested lists without duplicating."""
+        from langchain_core.messages import AIMessage
+
+        shim = self._shim()
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "echo", "args": {}, "id": "c1"}],
+        )
+        # Wrapped like a real LangGraph write: [ [AIMessage] ]
+        out = shim._extract_plain_messages([[ai]])
+        assert len(out) == 1
+        assert out[0]["tool_calls"][0]["id"] == "c1"
+
+    def test_to_langchain_message_restores_tool_calls(self):
+        """_to_langchain_message must rebuild AIMessage.tool_calls from a
+        plain dict — this is the exact path that was previously dropping
+        tool_calls and causing the provider BadRequestError."""
+        shim = self._shim()
+        ai = shim._to_langchain_message({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"name": "echo", "args": {"text": "x"}, "id": "call_1"}],
+        })
+        from langchain_core.messages import AIMessage
+
+        assert isinstance(ai, AIMessage)
+        assert len(ai.tool_calls) == 1
+        assert ai.tool_calls[0]["id"] == "call_1"
+        assert ai.tool_calls[0]["name"] == "echo"
+
+    def test_to_langchain_message_builds_tool_message_with_id(self):
+        """_to_langchain_message must rebuild ToolMessage with tool_call_id
+        from a plain dict."""
+        shim = self._shim()
+        tool = shim._to_langchain_message({
+            "role": "tool",
+            "content": "the result",
+            "tool_call_id": "call_1",
+        })
+        from langchain_core.messages import ToolMessage
+
+        assert isinstance(tool, ToolMessage)
+        assert tool.tool_call_id == "call_1"
+
+    def test_round_trip_ai_tool_calls_fidelity(self):
+        """Full fidelity: AIMessage(tool_calls) → plain dict →
+        AIMessage(tool_calls)."""
+        from langchain_core.messages import AIMessage
+
+        shim = self._shim()
+        original = AIMessage(
+            content="",
+            tool_calls=[{"name": "echo", "args": {"text": "x"}, "id": "call_1"}],
+        )
+        plain = shim._extract_plain_messages([original])
+        restored = shim._to_langchain_message(plain[0])
+
+        assert isinstance(restored, AIMessage)
+        assert restored.tool_calls == original.tool_calls
+
+    def test_round_trip_tool_message_fidelity(self):
+        """Full fidelity: ToolMessage(tool_call_id) → plain dict →
+        ToolMessage(tool_call_id)."""
+        from langchain_core.messages import ToolMessage
+
+        shim = self._shim()
+        original = ToolMessage(content="result", tool_call_id="call_1")
+        plain = shim._extract_plain_messages([original])
+        restored = shim._to_langchain_message(plain[0])
+
+        assert isinstance(restored, ToolMessage)
+        assert restored.tool_call_id == "call_1"
+
+    def test_restored_conversation_is_provider_valid(self):
+        """REGRESSION (BadRequestError): after a manual checkpoint restore,
+        the reconstructed message sequence must be valid for the LLM
+        provider — i.e. a ToolMessage is preceded by an AIMessage that
+        carries tool_calls.
+
+        This mirrors the stored plain-dict list (with tool metadata now
+        preserved) being converted back to LangChain messages before the
+        next turn.
+        """
+        shim = self._shim()
+        stored = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"name": "echo", "args": {"text": "x"}, "id": "call_1"}
+                ],
+            },
+            {"role": "tool", "content": "result", "tool_call_id": "call_1"},
+            {"role": "assistant", "content": "done"},
+        ]
+        msgs = shim._to_langchain_messages(stored)
+
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        assert isinstance(msgs[1], AIMessage)
+        assert msgs[1].tool_calls[0]["id"] == "call_1"
+        assert isinstance(msgs[2], ToolMessage)
+        assert msgs[2].tool_call_id == "call_1"
+        # The tool message has a preceding assistant message with tool_calls.
+        assert msgs[2].tool_call_id == msgs[1].tool_calls[0]["id"]
 
 
 # ── LangChainToolShim ───────────────────────────────────────────────────

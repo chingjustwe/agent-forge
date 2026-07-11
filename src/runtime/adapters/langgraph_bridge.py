@@ -1,6 +1,7 @@
 """Phase 4: Bridges between our harness and LangGraph/LangChain.
 
-Two shims live here:
+Two shims live here, moved from ``harness/langgraph_shims.py`` per Wave 2
+§2.1 so the harness layer has zero ``langgraph.*`` / ``langchain.*`` imports.
 
 - ``LangGraphCheckpointShim``: adapts our ``SQLiteCheckpointStore``
   (Phase 3a-P1) to LangGraph's ``BaseCheckpointSaver`` abstract class.
@@ -12,10 +13,6 @@ Two shims live here:
   ``ctx.tool_engine.execute()``. Per spec D6: tools are bridged, not
   re-implemented, so the Phase 3a pipeline (whitelist → sandbox →
   guardrail → hook → handler) runs for every deepagents tool call.
-
-Imports of ``langgraph.*`` / ``langchain.*`` are confined to this file
-(per spec §6.2 import discipline) so the ``direct_llm`` path stays
-zero-dependency.
 """
 from __future__ import annotations
 
@@ -25,9 +22,8 @@ import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, AsyncIterator, Optional, Sequence
 
-logger = logging.getLogger(__name__)
-
 from langchain_core.callbacks import AsyncCallbackManagerForToolRun
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import (
@@ -46,7 +42,6 @@ if TYPE_CHECKING:
     from src.runtime.harness.checkpoint import CheckpointStore
     from src.runtime.harness.context import HarnessContext
     from src.runtime.harness.tool_engine import ToolDefinition
-
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +123,19 @@ class LangGraphCheckpointShim(BaseCheckpointSaver):
         )
         merged = dict(tuple_.checkpoint.get("channel_values", {}) or {})
         merged.update(rebuilt_cv)
+        # The ``messages`` channel is a DeltaChannel whose per-step value is
+        # empty at ``aput`` time (LangGraph 1.2+ routes each appended message
+        # through ``aput_writes`` instead). The blob rebuild above therefore
+        # yields no ``messages``, which would make resume start from an empty
+        # conversation. Reconstruct the authoritative full message list from
+        # the ``checkpoint_writes`` table and inject it so deepagents resumes
+        # with the complete history.
+        if not merged.get("messages"):
+            lc_messages = await self._reconstruct_langchain_messages_from_writes(
+                thread_id
+            )
+            if lc_messages:
+                merged["messages"] = lc_messages
         tuple_ = tuple_._replace(
             checkpoint={**tuple_.checkpoint, "channel_values": merged}
         )
@@ -274,16 +282,47 @@ class LangGraphCheckpointShim(BaseCheckpointSaver):
         # Stash the langgraph checkpoint id in tool_state so aget_tuple
         # can recover it (our store only knows the sequence number).
         encoded["checkpoint_id"] = checkpoint_id
-        # Human-readable messages column (debug tooling only).
-        messages = channel_values.get("messages", [])
-        plain_messages = self._extract_plain_messages(messages)
+
+        # M20: persist per-channel value blobs FIRST so the full message
+        # list below can be reconstructed from them.
+        await self._save_blobs(thread_id, channel_values, new_versions or {})
+
+        # Reconstruct the FULL conversation messages for this checkpoint.
+        # In LangGraph 1.2+ the ``messages`` channel is a DeltaChannel and
+        # ``channel_values['messages']`` is empty at ``aput`` time — the
+        # authoritative full conversation lives in the per-step
+        # ``messages`` writes persisted by ``aput_writes`` (the
+        # ``checkpoint_writes`` table). Reconstruct from there first; fall
+        # back to the blob walk / channel_values for synthetic or legacy
+        # callers that don't go through ``aput_writes``.
+        mv = (
+            (new_versions or {}).get("messages")
+            if isinstance(new_versions, dict)
+            else None
+        )
+        target_version = None
+        if mv is not None:
+            try:
+                target_version = int(mv)
+            except (TypeError, ValueError):
+                target_version = None
+        full_messages = await self._reconstruct_messages_from_writes(thread_id)
+        if not full_messages:
+            full_messages = await self.reconstruct_messages(
+                thread_id, target_version
+            )
+        if not full_messages:
+            cv_messages = channel_values.get("messages", [])
+            if cv_messages:
+                full_messages = self._extract_plain_messages(cv_messages)
+
         # Persist the checkpoint envelope via our existing store.
         from src.runtime.harness.checkpoint import Checkpoint as CPCheckpoint
 
         cp_record = CPCheckpoint(
             session_id=thread_id,
             sequence=seq,
-            messages=plain_messages,
+            messages=full_messages,
             tool_state={"langgraph_checkpoint": encoded},
             agent_id=self._agent_id,
             metadata=metadata if isinstance(metadata, dict) else {},
@@ -364,6 +403,206 @@ class LangGraphCheckpointShim(BaseCheckpointSaver):
                 await db.commit()
         except Exception as exc:  # pragma: no cover — defensive
             logger.warning("Failed to save checkpoint blobs: %s", exc)
+
+    # ── Message reconstruction (Wave 2 restore) ──
+
+    async def _load_all_message_blobs(
+        self, thread_id: str
+    ) -> list[tuple[int, Any]]:
+        """Load every ``messages``-channel blob for a thread, ordered by
+        version ascending. Returns ``(version, decoded_value)`` pairs;
+        ``empty`` markers and malformed rows are skipped.
+        """
+        from src.infra.db.engine import async_session
+
+        out: list[tuple[int, Any]] = []
+        try:
+            async with async_session() as db:
+                rows = (
+                    await db.execute(
+                        text(
+                            "SELECT version, type, payload FROM checkpoint_blobs "
+                            "WHERE session_id = :sid AND channel = 'messages' "
+                            "ORDER BY CAST(version AS INTEGER) ASC"
+                        ),
+                        {"sid": thread_id},
+                    )
+                ).fetchall()
+                for row in rows:
+                    if row.type == "empty" or not row.payload:
+                        continue
+                    try:
+                        version = int(row.version)
+                        decoded = self.serde.loads_typed(
+                            (row.type, base64.b64decode(row.payload))
+                        )
+                    except Exception:
+                        continue
+                    out.append((version, decoded))
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("Failed to load message blobs: %s", exc)
+        return out
+
+    async def _load_message_writes(self, thread_id: str) -> list[Any]:
+        """Load every ``messages``-channel pending write for a thread, in
+        conversation order.
+
+        LangGraph 1.2+ routes each appended message through
+        ``aput_writes`` (the ``checkpoint_writes`` table). The checkpoint's
+        ``channel_values['messages']`` is empty for a DeltaChannel, so the
+        authoritative full conversation lives here, not in the checkpoint
+        blob. Ordered by ``created_at`` (then checkpoint_id, task_id) so the
+        appended messages reconstruct in the order the graph produced them.
+        """
+        from src.infra.db.engine import async_session
+
+        out: list[Any] = []
+        try:
+            async with async_session() as db:
+                rows = (
+                    await db.execute(
+                        text(
+                            "SELECT value FROM checkpoint_writes "
+                            "WHERE session_id = :sid AND channel = 'messages' "
+                            "ORDER BY created_at, checkpoint_id, task_id"
+                        ),
+                        {"sid": thread_id},
+                    )
+                ).fetchall()
+                for row in rows:
+                    try:
+                        encoded = json.loads(row.value)
+                        payload_bytes = base64.b64decode(encoded["payload_b64"])
+                        value = self.serde.loads_typed(
+                            (encoded.get("type", "json"), payload_bytes)
+                        )
+                    except Exception:
+                        continue
+                    out.append(value)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("Failed to load message writes: %s", exc)
+        return out
+
+    async def _reconstruct_messages_from_writes(self, thread_id: str) -> list[dict]:
+        """Rebuild the FULL plain message list from the ``checkpoint_writes``
+        ``messages`` channel (the authoritative source in LangGraph 1.2+)."""
+        writes = await self._load_message_writes(thread_id)
+        return self._extract_plain_messages(writes)
+
+    async def _reconstruct_langchain_messages_from_writes(
+        self, thread_id: str
+    ) -> list[Any]:
+        """Rebuild the FULL message list as LangChain BaseMessages (for
+        ``aget_tuple`` resume, where deepagents expects real message
+        objects, not plain dicts)."""
+        writes = await self._load_message_writes(thread_id)
+        out: list[Any] = []
+        for m in writes:
+            if isinstance(m, list):
+                out.extend(self._to_langchain_messages(m))
+            else:
+                out.append(self._to_langchain_message(m))
+        return out
+
+    @staticmethod
+    def _to_langchain_message(m: Any) -> Any:
+        """Convert a single plain dict or LangChain BaseMessage to a
+        canonical LangChain BaseMessage (Human/AIMessage/System/Tool)."""
+        if m is None:
+            return m
+        if not isinstance(m, dict):
+            # Already a BaseMessage (or close enough); return as-is.
+            return m
+        role = m.get("role", m.get("type", "user"))
+        content = m.get("content", "")
+        if role in ("assistant", "ai"):
+            tool_calls = m.get("tool_calls")
+            if tool_calls:
+                return AIMessage(content=content, tool_calls=tool_calls)
+            return AIMessage(content=content)
+        if role == "system":
+            return SystemMessage(content=content)
+        if role == "tool":
+            return ToolMessage(
+                content=content, tool_call_id=m.get("tool_call_id", "") or ""
+            )
+        return HumanMessage(content=content)
+
+    def _to_langchain_messages(self, msgs: list) -> list[Any]:
+        return [self._to_langchain_message(m) for m in msgs]
+
+    async def reconstruct_messages(
+        self, thread_id: str, target_version: int | None = None
+    ) -> list[dict]:
+        """Rebuild the FULL plain message list for the ``messages`` channel
+        up to (and including) ``target_version``.
+
+        The ``messages`` channel is a DeltaChannel, so each blob carries
+        only the newly appended message(s) for that version. We walk the
+        blobs in version order, concatenating deltas. Every
+        ``snapshot_frequency`` versions LangGraph stores a full snapshot
+        instead of a delta — we detect that via ``_is_prefix`` and replace
+        the running list rather than double-counting.
+        """
+        blobs = await self._load_all_message_blobs(thread_id)
+        running: list[Any] = []
+        for version, decoded in blobs:
+            if target_version is not None and version > target_version:
+                break
+            if not isinstance(decoded, list):
+                continue
+            if self._is_prefix(decoded, running):
+                running = list(decoded)
+            else:
+                running = running + list(decoded)
+        return self._extract_plain_messages(running)
+
+    async def reconstruct_checkpoint_messages(
+        self, cp: Any
+    ) -> list[dict]:
+        """Return the full plain message list for a stored checkpoint row.
+
+        Uses the already-populated ``cp.messages`` when non-empty — each
+        checkpoint row stores the full conversation snapshot at the moment
+        it was created. Otherwise reconstructs from the per-step ``messages``
+        writes in ``checkpoint_writes`` (the authoritative source for
+        DeltaChannel rows), falling back to the blob walk for legacy
+        Phase 3 rows.
+
+        Note: ``_extract_plain_messages`` (called by ``aput`` when populating
+        ``cp.messages``) preserves ``tool_calls`` and ``tool_call_id`` so the
+        round-trip through the plain-dict format is now faithful.
+        """
+        existing = cp.messages if isinstance(cp.messages, list) else []
+        if existing:
+            return existing
+        # Fallback: per-step writes from the checkpoint_writes table.
+        # These are serialized by JsonPlusSerializer which preserves
+        # AIMessage.tool_calls and ToolMessage.tool_call_id.
+        return await self._reconstruct_messages_from_writes(cp.session_id)
+
+    @staticmethod
+    def _is_prefix(candidate: list, base: list) -> bool:
+        """True if ``candidate`` is a full snapshot that begins with ``base``.
+
+        Used to detect LangGraph ``messages`` snapshots (vs. deltas) so we
+        replace rather than append when a snapshot appears mid-history.
+        """
+        if not base or len(candidate) < len(base):
+            return False
+        for i, m in enumerate(base):
+            if LangGraphCheckpointShim._msg_key(m) != LangGraphCheckpointShim._msg_key(
+                candidate[i]
+            ):
+                return False
+        return True
+
+    @staticmethod
+    def _msg_key(m: Any) -> tuple:
+        """Normalize a message (dict or LangChain BaseMessage) to a key."""
+        if isinstance(m, dict):
+            return (m.get("role"), m.get("content"))
+        return (getattr(m, "type", None), getattr(m, "content", None))
 
     async def _load_channel_values(
         self,
@@ -652,6 +891,13 @@ class LangGraphCheckpointShim(BaseCheckpointSaver):
         # Prefer the stashed langgraph checkpoint_id; fall back to the
         # internal sequence number for legacy checkpoints without one.
         config_checkpoint_id = lg_checkpoint_id or str(cp.sequence)
+        # LangGraph's pregel loop reads ``metadata["step"]`` when resuming a
+        # thread (``self.step = self.checkpoint_metadata["step"] + 1``). A
+        # checkpoint created without that key (e.g. a hand-seeded branch or
+        # a legacy Phase 3 snapshot) would raise ``KeyError: 'step'`` on the
+        # next message. Guarantee the key exists so resume never crashes.
+        out_metadata = dict(cp.metadata) if isinstance(cp.metadata, dict) else {}
+        out_metadata.setdefault("step", 0)
         return CheckpointTuple(
             config={
                 "configurable": {
@@ -660,27 +906,109 @@ class LangGraphCheckpointShim(BaseCheckpointSaver):
                 }
             },
             checkpoint=checkpoint,
-            metadata=cp.metadata if isinstance(cp.metadata, dict) else {},
+            metadata=out_metadata,
             parent_config=None,
             pending_writes=pending_writes or [],
         )
 
+    @staticmethod
+    def _content_to_text(content: Any) -> str:
+        """Normalize message content to a plain string.
+
+        LangChain v1 may store content as a list of content-part dicts
+        (e.g. ``[{'type': 'text', 'text': '...'}]``); older/debug messages
+        use a plain string. Tool/structured content falls back to str().
+        """
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if text is None and "content" in item:
+                        text = item["content"]
+                    parts.append(str(text) if text is not None else "")
+                else:
+                    parts.append(str(item))
+            return "".join(parts)
+        return str(content)
+
+    @staticmethod
+    def _role_to_canonical(role: str) -> str:
+        """Map LangChain message ``type`` / role to the canonical
+        ``user`` / ``assistant`` / ``system`` / ``tool`` used by the UI."""
+        return {
+            "human": "user",
+            "user": "user",
+            "ai": "assistant",
+            "assistant": "assistant",
+            "system": "system",
+            "tool": "tool",
+        }.get(role, role)
+
     def _extract_plain_messages(self, langchain_messages: list) -> list[dict]:
         """Convert LangChain BaseMessage list → plain dicts for the
-        ``messages`` column. Used for human-readable debug output."""
+        ``messages`` column and the Wave 2 restore UI.
+
+        Each ``messages`` write from LangGraph is itself a single-element
+        list of messages (the delta), so nested lists are flattened.
+        LangChain ``type`` values (``human``/``ai``/``tool``/``system``)
+        are mapped to the canonical UI roles, and structured content
+        (list-of-parts) is flattened to a string.
+
+        **tool_calls / tool_call_id** are preserved so that round-tripping
+        through the plain-dict format (e.g. manual checkpoint restore via
+        ``sessions.py``) does not lose tool call fidelity. Without this,
+        resuming from a restored checkpoint sends ``ToolMessage`` instances
+        without a preceding ``AIMessage.tool_calls``, which causes
+        ``BadRequestError`` from the LLM provider.
+        """
         out: list[dict] = []
         for m in langchain_messages:
-            # LangChain BaseMessage has .type and .content attrs; dicts
-            # (from older checkpoints) are passed through.
+            # Writes come wrapped as a single-element list of messages.
+            if isinstance(m, list):
+                out.extend(self._extract_plain_messages(m))
+                continue
             if isinstance(m, dict):
-                out.append({
-                    "role": m.get("role", "user"),
-                    "content": m.get("content", ""),
-                })
+                role = m.get("role", m.get("type", "user"))
+                content = m.get("content", "")
+                entry: dict = {
+                    "role": self._role_to_canonical(role),
+                    "content": self._content_to_text(content),
+                }
+                # Preserve tool_call metadata for round-trip fidelity.
+                if role in ("assistant", "ai") and m.get("tool_calls"):
+                    entry["tool_calls"] = m["tool_calls"]
+                if role == "tool" and m.get("tool_call_id"):
+                    entry["tool_call_id"] = m["tool_call_id"]
+                out.append(entry)
             else:
                 role = getattr(m, "type", "user")
                 content = getattr(m, "content", "")
-                out.append({"role": role, "content": content})
+                entry: dict = {
+                    "role": self._role_to_canonical(role),
+                    "content": self._content_to_text(content),
+                }
+                # Preserve tool_call metadata for round-trip fidelity.
+                if role in ("assistant", "ai"):
+                    tool_calls = getattr(m, "tool_calls", None)
+                    if tool_calls:
+                        entry["tool_calls"] = [
+                            tc if isinstance(tc, dict) else {
+                                "name": getattr(tc, "name", ""),
+                                "args": getattr(tc, "args", {}),
+                                "id": getattr(tc, "id", ""),
+                            }
+                            for tc in tool_calls
+                        ]
+                if role == "tool":
+                    tool_call_id = getattr(m, "tool_call_id", None)
+                    if tool_call_id:
+                        entry["tool_call_id"] = tool_call_id
+                out.append(entry)
         return out
 
 
