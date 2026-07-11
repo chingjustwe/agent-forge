@@ -60,7 +60,7 @@ class TestAgentMCPRegistry:
                 db,
                 workspace_id=ws,
                 name="Bound",
-                adapter="direct_llm",
+                adapter="deepagents",
                 created_by="u1",
                 tools=["builtin_a"],
                 mcp_servers=["cloud", "local"],
@@ -80,7 +80,7 @@ class TestAgentMCPRegistry:
         reg = AgentRegistry()
         async with async_session() as db:
             agent = await reg.register(
-                db, workspace_id=ws, name="Plain", adapter="direct_llm", created_by="u1"
+                db, workspace_id=ws, name="Plain", adapter="deepagents", created_by="u1"
             )
             assert agent.mcp_servers == []
             row = await db.get(AgentConfig, agent.id)
@@ -135,7 +135,7 @@ class TestAgentMCPRoute:
             resp = await ac.post(
                 f"/api/v1/workspaces/{ws}/agents",
                 headers={"Authorization": f"Bearer {tok}"},
-                json={"name": "bound", "framework": "direct_llm", "mcp_servers": ["cloud"]},
+                json={"name": "bound", "framework": "deepagents", "mcp_servers": ["cloud"]},
             )
             assert resp.status_code == 201, resp.text
             body = resp.json()
@@ -163,7 +163,7 @@ class TestAgentMCPRoute:
             resp = await ac.post(
                 f"/api/v1/workspaces/{ws}/agents",
                 headers={"Authorization": f"Bearer {tok}"},
-                json={"name": "bad", "framework": "direct_llm", "mcp_servers": ["ghost"]},
+                json={"name": "bad", "framework": "deepagents", "mcp_servers": ["ghost"]},
             )
             assert resp.status_code == 400, resp.text
             assert "ghost" in resp.json()["error"]["message"]
@@ -181,7 +181,7 @@ class TestAgentMCPRoute:
             created = await ac.post(
                 f"/api/v1/workspaces/{ws}/agents",
                 headers={"Authorization": f"Bearer {tok}"},
-                json={"name": "bound", "framework": "direct_llm", "mcp_servers": ["cloud"]},
+                json={"name": "bound", "framework": "deepagents", "mcp_servers": ["cloud"]},
             )
             assert created.status_code == 201
             agent_id = created.json()["id"]

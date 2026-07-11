@@ -81,7 +81,7 @@ async def _create_agent_via_api(
         return await ac.post(
             f"/api/v1/workspaces/{ws_id}/agents",
             headers={"Authorization": f"Bearer {token}"},
-            json={"name": name, "framework": "direct_llm", "config": config or {"model": "gpt-4"}},
+            json={"name": name, "framework": "deepagents", "config": config or {"model": "gpt-4"}},
         )
 
 
@@ -112,7 +112,7 @@ class TestCopyAgentTo:
         assert body["id"] != created["id"]  # new ID
         assert body["workspace_id"] == ws_dst
         assert body["name"] == "MyAgent"  # same name
-        assert body["framework"] == "direct_llm"
+        assert body["framework"] == "deepagents"
         assert body["config"] == {"model": "gpt-4"}
         assert body["created_by"] == f"admin-{suffix}"
 

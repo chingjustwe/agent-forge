@@ -51,28 +51,40 @@ class PromptAssembler:
                 except Exception as exc:
                     logger.warning("Failed to load skill %r: %s", skill_name, exc)
 
-        # 3. Available tools description
-        if ctx.tool_engine is not None:
-            tool_docs = await ctx.tool_engine.schemas(ctx.workspace_id)
-            if tool_docs:
-                sections.append(self._format_tools_section(tool_docs))
+        # 3. Available tools — NOT injected into system prompt.
+        # deepagents passes tool schemas to the LLM via the native tool-use
+        # API (tools= arg → bind_tools). Listing them again in the system
+        # prompt is redundant and causes the LLM to "know" about tools
+        # by name even when they're filtered out by _ToolExclusionMiddleware.
 
-        # 4. Recalled long-term memories (P2)
+        # 4. Recalled long-term memories (Wave 3 enhancement)
         if (
             agent.memory
             and agent.memory.enable_long_term
             and ctx.memory is not None
         ):
             try:
+                # 4a. Profile records — always injected (user prefs, config)
+                profiles = await ctx.memory.recall_profiles(
+                    scope="user",
+                    limit=50,
+                )
+                if profiles:
+                    sections.append(self._format_profiles_section(profiles))
+
+                # 4b. Episodic records — recalled by last user message
                 last_msg = ctx.working_memory.get("last_user_message", "")
                 if last_msg:
-                    memories = await ctx.memory.recall(
+                    episodic = await ctx.memory.recall(
                         query=last_msg,
                         scope="user",
                         limit=agent.memory.recall_top_k,
+                        memory_type="episodic",
                     )
-                    if memories:
-                        sections.append(self._format_memories_section(memories))
+                    if episodic:
+                        sections.append(
+                            self._format_episodic_section(episodic)
+                        )
             except Exception as exc:
                 logger.warning("Memory recall failed: %s", exc)
 
@@ -85,17 +97,22 @@ class PromptAssembler:
         ctx.working_memory["system_prompt"] = prompt
         return prompt
 
-    def _format_tools_section(self, tool_docs: list[dict]) -> str:
-        """Format the available tools as a markdown section."""
-        lines = ["## Available Tools", ""]
-        for tool in tool_docs:
-            name = tool.get("name", "")
-            desc = tool.get("description", "")
-            lines.append(f"- **{name}**: {desc}")
+    def _format_memories_section(self, memories: "list[MemoryRecord]") -> str:
+        """Format recalled memories as a markdown section (legacy, kept for compat)."""
+        lines = ["## Relevant Memories", ""]
+        for mem in memories:
+            lines.append(f"- {mem.content}")
         return "\n".join(lines)
 
-    def _format_memories_section(self, memories: "list[MemoryRecord]") -> str:
-        """Format recalled memories as a markdown section."""
+    def _format_profiles_section(self, profiles: "list[MemoryRecord]") -> str:
+        """Format profile memories (always-inject user prefs/config)."""
+        lines = ["## User Profile", ""]
+        for mem in profiles:
+            lines.append(f"- {mem.content}")
+        return "\n".join(lines)
+
+    def _format_episodic_section(self, memories: "list[MemoryRecord]") -> str:
+        """Format episodic memories (topic-relevant recalled facts)."""
         lines = ["## Relevant Memories", ""]
         for mem in memories:
             lines.append(f"- {mem.content}")

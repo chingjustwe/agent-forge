@@ -31,7 +31,7 @@ def _make_agent(system_prompt="", tools=None, skills=None, memory=None):
         tools=tools or [],
         skills=skills or [],
         memory=memory,
-        adapter="direct_llm",
+        adapter="deepagents",
     )
 
 
@@ -87,6 +87,9 @@ class TestPromptAssembler:
 
     @pytest.mark.asyncio
     async def test_persona_and_tools(self):
+        # Tools are no longer injected into the system prompt (deepagents
+        # passes tool schemas via the native tool-use API). Having tools
+        # in the whitelist must not change the prompt text.
         agent = _make_agent(
             system_prompt="You are a helpful assistant.",
             tools=["todo_write"],
@@ -95,24 +98,19 @@ class TestPromptAssembler:
         ctx = _make_ctx(agent, tool_engine=engine)
         assembler = PromptAssembler()
         prompt = await assembler.assemble(agent, ctx)
-        assert "You are a helpful assistant." in prompt
-        assert "## Available Tools" in prompt
-        # Sections must be separated by a horizontal rule.
-        assert "\n\n---\n\n" in prompt
-        # Persona comes before tools.
-        assert prompt.index("You are a helpful assistant.") < prompt.index(
-            "## Available Tools"
-        )
+        assert prompt == "You are a helpful assistant."
+        assert "## Available Tools" not in prompt
 
     @pytest.mark.asyncio
     async def test_tools_only(self):
+        # With no persona and no tools section, the prompt is empty.
         agent = _make_agent(tools=["todo_write"])
         engine = _make_tool_engine(["todo_write"])
         ctx = _make_ctx(agent, tool_engine=engine)
         assembler = PromptAssembler()
         prompt = await assembler.assemble(agent, ctx)
-        assert prompt.startswith("## Available Tools")
-        assert "You are a helpful assistant." not in prompt
+        assert prompt == ""
+        assert "## Available Tools" not in prompt
 
     @pytest.mark.asyncio
     async def test_policy_section(self):
@@ -120,13 +118,13 @@ class TestPromptAssembler:
         ctx = _make_ctx(
             agent,
             workspace_settings={
-                "policy": {"allowed_models": ["deepseek-chat"]}
+                "policy": {"allowed_models": ["deepseek-v4-flash"]}
             },
         )
         assembler = PromptAssembler()
         prompt = await assembler.assemble(agent, ctx)
         assert "## Workspace Policy" in prompt
-        assert "deepseek-chat" in prompt
+        assert "deepseek-v4-flash" in prompt
         assert "Allowed models" in prompt
 
     @pytest.mark.asyncio
@@ -311,20 +309,27 @@ class _MockMemoryScope:
     def __init__(
         self,
         records: list[MemoryRecord] | None = None,
+        profiles: list[MemoryRecord] | None = None,
         raise_error: bool = False,
     ):
         self._records = records or []
+        self._profiles = profiles or []
         self._raise = raise_error
 
-    async def recall(self, query, scope="user", limit=5):
+    async def recall(self, query, scope="user", limit=5, memory_type=None):
         if self._raise:
             raise RuntimeError("recall failed")
         return self._records
 
-    async def remember(self, key, content, scope="session", metadata=None):
+    async def recall_profiles(self, scope="user", limit=50):
+        if self._raise:
+            raise RuntimeError("recall_profiles failed")
+        return self._profiles
+
+    async def remember(self, key, content, scope="session", metadata=None, memory_type="episodic"):
         return "mock-id"
 
-    async def list(self, scope="session", limit=100):
+    async def list(self, scope="session", limit=100, memory_type=None):
         return self._records
 
     async def get(self, record_id):
@@ -416,22 +421,20 @@ class TestPromptAssemblerMemory:
             tool_engine=engine,
             skills=_MockSkillRegistry({"my-skill": skill}),
             memory=_MockMemoryScope(records=[record]),
-            workspace_settings={"policy": {"allowed_models": ["deepseek-chat"]}},
+            workspace_settings={"policy": {"allowed_models": ["deepseek-v4-flash"]}},
         )
         ctx.working_memory["last_user_message"] = "what do you remember?"
         assembler = PromptAssembler()
         prompt = await assembler.assemble(agent, ctx)
-        # All five sections present.
+        # Four sections present (tools are no longer in the prompt).
         assert "You are a helpful assistant." in prompt
         assert "## Skill: my-skill" in prompt
-        assert "## Available Tools" in prompt
         assert "## Relevant Memories" in prompt
         assert "## Workspace Policy" in prompt
         # And in the expected order.
         order = [
             prompt.index("You are a helpful assistant."),
             prompt.index("## Skill: my-skill"),
-            prompt.index("## Available Tools"),
             prompt.index("## Relevant Memories"),
             prompt.index("## Workspace Policy"),
         ]
@@ -445,3 +448,171 @@ class TestPromptAssemblerMemory:
         assembler = PromptAssembler()
         prompt = await assembler.assemble(agent, ctx)
         assert "## Relevant Memories" not in prompt
+
+
+# ── Wave 3: Profile / Episodic split ───────────────────────────────────
+
+
+class TestPromptAssemblerProfileMemory:
+    """Wave 3: profile records are always injected, episodic by query."""
+
+    @staticmethod
+    def _make_profile_agent(enable_long_term=True):
+        return _make_agent(
+            system_prompt="You are a helpful assistant.",
+            memory=MemoryConfig(
+                enable_long_term=enable_long_term,
+                recall_top_k=3,
+            ),
+        )
+
+    @staticmethod
+    def _make_profile(content, record_id="prof-1"):
+        return MemoryRecord(
+            id=record_id,
+            scope="user",
+            scope_id="u-1",
+            content=content,
+            memory_type="profile",
+        )
+
+    @pytest.mark.asyncio
+    async def test_profile_always_injected_without_last_message(self):
+        """Profile memories appear even when there's no last_user_message."""
+        agent = self._make_profile_agent()
+        profile = self._make_profile("User prefers concise answers.")
+        ctx = _make_ctx(
+            agent,
+            memory=_MockMemoryScope(profiles=[profile]),
+        )
+        assembler = PromptAssembler()
+        prompt = await assembler.assemble(agent, ctx)
+        assert "## User Profile" in prompt
+        assert "User prefers concise answers." in prompt
+
+    @pytest.mark.asyncio
+    async def test_profile_not_injected_when_disabled(self):
+        """Profiles are skipped when long-term memory is disabled."""
+        agent = self._make_profile_agent(enable_long_term=False)
+        profile = self._make_profile("User prefers Python.")
+        ctx = _make_ctx(
+            agent,
+            memory=_MockMemoryScope(profiles=[profile]),
+        )
+        assembler = PromptAssembler()
+        prompt = await assembler.assemble(agent, ctx)
+        assert "## User Profile" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_profile_and_episodic_coexist(self):
+        """Both profile and episodic sections appear when both have data."""
+        agent = self._make_profile_agent()
+        profile = self._make_profile("User uses uv.")
+        episodic = MemoryRecord(
+            id="ep-1",
+            scope="user",
+            scope_id="u-1",
+            content="Project is in /data folder.",
+        )
+        ctx = _make_ctx(
+            agent,
+            memory=_MockMemoryScope(
+                profiles=[profile],
+                records=[episodic],
+            ),
+        )
+        ctx.working_memory["last_user_message"] = "where is the project?"
+        assembler = PromptAssembler()
+        prompt = await assembler.assemble(agent, ctx)
+        assert "## User Profile" in prompt
+        assert "User uses uv." in prompt
+        assert "## Relevant Memories" in prompt
+        assert "Project is in /data folder." in prompt
+        assert prompt.index("## User Profile") < prompt.index(
+            "## Relevant Memories"
+        )
+
+    @pytest.mark.asyncio
+    async def test_episodic_not_shown_without_last_message(self):
+        """Episodic records are skipped when no last_user_message,
+        but profile records still appear."""
+        agent = self._make_profile_agent()
+        profile = self._make_profile("User prefers dark mode.")
+        episodic = MemoryRecord(
+            id="ep-2",
+            scope="user",
+            scope_id="u-1",
+            content="Meeting at 3pm.",
+        )
+        ctx = _make_ctx(
+            agent,
+            memory=_MockMemoryScope(
+                profiles=[profile],
+                records=[episodic],
+            ),
+        )
+        assembler = PromptAssembler()
+        prompt = await assembler.assemble(agent, ctx)
+        assert "## User Profile" in prompt
+        assert "User prefers dark mode." in prompt
+        assert "## Relevant Memories" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_profile_error_silently_skipped(self):
+        """If recall_profiles raises, the whole memory block is skipped."""
+        agent = self._make_profile_agent()
+        ctx = _make_ctx(
+            agent,
+            memory=_MockMemoryScope(raise_error=True),
+        )
+        ctx.working_memory["last_user_message"] = "test query"
+        assembler = PromptAssembler()
+        prompt = await assembler.assemble(agent, ctx)
+        assert "## User Profile" not in prompt
+        assert "## Relevant Memories" not in prompt
+        assert "You are a helpful assistant." in prompt
+
+    @pytest.mark.asyncio
+    async def test_full_ordering_with_profiles(self):
+        """Verify full section ordering: persona, skills, tools, profile, episodic, policy."""
+        skill = SkillPackage(name="my-skill", instructions="Be concise.")
+        profile = self._make_profile("User uses Python.")
+        episodic = MemoryRecord(
+            id="ep-3",
+            scope="user",
+            scope_id="u-1",
+            content="Relevant fact.",
+        )
+        agent = _make_agent(
+            system_prompt="You are a helpful assistant.",
+            tools=["todo_write"],
+            skills=["my-skill"],
+            memory=MemoryConfig(enable_long_term=True, recall_top_k=3),
+        )
+        engine = _make_tool_engine(["todo_write"])
+        ctx = _make_ctx(
+            agent,
+            tool_engine=engine,
+            skills=_MockSkillRegistry({"my-skill": skill}),
+            memory=_MockMemoryScope(
+                profiles=[profile],
+                records=[episodic],
+            ),
+            workspace_settings={"policy": {"allowed_models": ["deepseek-v4-flash"]}},
+        )
+        ctx.working_memory["last_user_message"] = "test query"
+        assembler = PromptAssembler()
+        prompt = await assembler.assemble(agent, ctx)
+        assert "You are a helpful assistant." in prompt
+        assert "## Skill: my-skill" in prompt
+        assert "## User Profile" in prompt
+        assert "## Relevant Memories" in prompt
+        assert "## Workspace Policy" in prompt
+        order = [
+            prompt.index("You are a helpful assistant."),
+            prompt.index("## Skill: my-skill"),
+            prompt.index("## User Profile"),
+            prompt.index("## Relevant Memories"),
+            prompt.index("## Workspace Policy"),
+        ]
+        assert order == sorted(order)

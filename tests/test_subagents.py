@@ -63,7 +63,7 @@ class TestSubagentMapper:
                 description="Delegates web searches.",
                 system_prompt="You are a search specialist.",
                 tools=["search"],
-                model="deepseek-chat",
+                model="deepseek-v4-flash",
             ),
         ]
         out = SubagentMapper.to_subagents(specs, ctx)
@@ -72,7 +72,7 @@ class TestSubagentMapper:
         assert entry["name"] == "web-searcher"
         assert entry["description"] == "Delegates web searches."
         assert entry["system_prompt"] == "You are a search specialist."
-        assert entry["model"] == "deepseek-chat"
+        assert entry["model"] == "deepseek-v4-flash"
         # tools is a list of LangChainToolShim instances.
         assert len(entry["tools"]) == 1
 
@@ -140,11 +140,11 @@ class TestSubagentMapper:
                 description="Uses custom model.",
                 system_prompt="x",
                 tools=[],
-                model="deepseek-reasoner",
+                model="deepseek-v4-pro",
             ),
         ]
         out = SubagentMapper.to_subagents(specs, ctx)
-        assert out[0]["model"] == "deepseek-reasoner"
+        assert out[0]["model"] == "deepseek-v4-pro"
 
     def test_no_tool_engine_yields_empty_tools(self):
         """When ctx.tool_engine is None, every subagent gets empty tools."""

@@ -37,10 +37,10 @@ class TestAgentRegistryCRUD:
                 db,
                 workspace_id=ws_id,
                 name="Helper",
-                adapter="direct_llm",
+                adapter="deepagents",
                 created_by="u1",
                 system_prompt="You are helpful.",
-                model="deepseek-chat",
+                model="deepseek-v4-flash",
                 tools=["todo_write", "ls"],
             )
             await db.commit()
@@ -48,7 +48,7 @@ class TestAgentRegistryCRUD:
             fetched = await reg.get(db, agent.id)
         assert fetched is not None
         assert fetched.name == "Helper"
-        assert fetched.adapter == "direct_llm"
+        assert fetched.adapter == "deepagents"
         assert fetched.system_prompt == "You are helpful."
         assert fetched.tools == ["todo_write", "ls"]
         # Legacy ORM column ``framework`` mirrors ``adapter``.
@@ -60,13 +60,13 @@ class TestAgentRegistryCRUD:
         reg = AgentRegistry()
         async with async_session() as db:
             await reg.register(
-                db, workspace_id=ws_id, name="Dup", adapter="direct_llm",
+                db, workspace_id=ws_id, name="Dup", adapter="deepagents",
                 created_by="u1",
             )
             await db.commit()
             with pytest.raises(ValueError, match="already exists"):
                 await reg.register(
-                    db, workspace_id=ws_id, name="Dup", adapter="direct_llm",
+                    db, workspace_id=ws_id, name="Dup", adapter="deepagents",
                     created_by="u1",
                 )
 
@@ -94,11 +94,11 @@ class TestAgentRegistryCRUD:
         ws_b = await _seed_workspace("ws-b", "t-list")
         async with async_session() as db:
             await reg.register(
-                db, workspace_id=ws_a, name="A1", adapter="direct_llm",
+                db, workspace_id=ws_a, name="A1", adapter="deepagents",
                 created_by="u",
             )
             await reg.register(
-                db, workspace_id=ws_b, name="B1", adapter="direct_llm",
+                db, workspace_id=ws_b, name="B1", adapter="deepagents",
                 created_by="u",
             )
             await db.commit()
@@ -113,7 +113,7 @@ class TestAgentRegistryCRUD:
         reg = AgentRegistry()
         async with async_session() as db:
             agent = await reg.register(
-                db, workspace_id=ws_id, name="Up", adapter="direct_llm",
+                db, workspace_id=ws_id, name="Up", adapter="deepagents",
                 created_by="u",
             )
             await db.commit()
@@ -135,7 +135,7 @@ class TestAgentRegistryCRUD:
         reg = AgentRegistry()
         async with async_session() as db:
             agent = await reg.register(
-                db, workspace_id=ws_id, name="U2", adapter="direct_llm",
+                db, workspace_id=ws_id, name="U2", adapter="deepagents",
                 created_by="u",
             )
             await db.commit()
@@ -155,7 +155,7 @@ class TestAgentRegistryCRUD:
         reg = AgentRegistry()
         async with async_session() as db:
             agent = await reg.register(
-                db, workspace_id=ws_id, name="Del", adapter="direct_llm",
+                db, workspace_id=ws_id, name="Del", adapter="deepagents",
                 created_by="u",
             )
             await db.commit()
@@ -182,7 +182,7 @@ class TestAgentRegistryConversion:
                 id="legacy-1",
                 workspace_id=ws_id,
                 name="Legacy",
-                framework="direct_llm",
+                framework="deepagents",
                 config={"old": "json"},
                 created_by="u",
                 # system_prompt, model, tools etc. are NULL
@@ -192,7 +192,7 @@ class TestAgentRegistryConversion:
             agent = await reg.get(db, "legacy-1")
         assert agent is not None
         assert agent.system_prompt == ""
-        assert agent.model == "deepseek-chat"
+        assert agent.model == "deepseek-v4-flash"
         assert agent.temperature == 0.7
         assert agent.max_tokens == 4096
         assert agent.tools == []
@@ -208,7 +208,7 @@ class TestAgentRegistryConversion:
                 id="mem-1",
                 workspace_id=ws_id,
                 name="Mem",
-                framework="direct_llm",
+                framework="deepagents",
                 config={},
                 created_by="u",
                 memory_config={
@@ -235,7 +235,7 @@ class TestAgentRegistryConversion:
                 id="bad-mem-1",
                 workspace_id=ws_id,
                 name="Bad",
-                framework="direct_llm",
+                framework="deepagents",
                 config={},
                 created_by="u",
                 # recall_top_k expects int; a non-coercible string triggers

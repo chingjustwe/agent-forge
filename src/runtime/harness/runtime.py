@@ -1,7 +1,7 @@
 """P3a: HarnessRuntime — sole orchestrator.
 
-Replaces the direct ``DirectLLMAdapter()`` call in ``chat.py``. The
-runtime owns the full pipeline:
+Owns the full agent run pipeline (Wave 2.5: deepagents is the sole
+adapter; DirectLLM was removed):
 1. Resolve agent definition (AgentRegistry)
 2. Build per-run HarnessContext
 3. PromptAssembler.assemble() (P1)
@@ -29,12 +29,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.infra.db.engine import async_session
 from src.runtime.abc import AgentRuntime
 from src.runtime.adapters.base import RunAdapter
-from src.runtime.adapters.direct_llm import DirectLLMAdapter
 from src.runtime.models import RuntimeConfig, StreamEvent
 
 from .agents import AgentDefinition, AgentNotFoundError
 from .context import HarnessContext
-from .checkpoint import CheckpointScope
+from .checkpoint import CheckpointStore
 from .memory import MemoryScope
 from .registry import HarnessRegistry
 from .retry import CircuitBreaker, CircuitOpenError, RetryPolicy
@@ -188,13 +187,6 @@ class HarnessRuntime(AgentRuntime):
                                     "tool.result", tool_result_data, ctx
                                 )
 
-                            # Mid-run checkpoint save
-                            if ctx.checkpoint is not None:
-                                await ctx.checkpoint.save(
-                                    messages=safe_messages,
-                                    tool_state=ctx.working_memory,
-                                )
-
                         except ToolError as exc:
                             err_data = {
                                 "name": tool_name,
@@ -214,14 +206,9 @@ class HarnessRuntime(AgentRuntime):
                 else:
                     yield event
         finally:
-            # 8. Post-hooks + checkpoint commit
+            # 8. Post-hooks
             if ctx.hooks is not None:
                 await ctx.hooks.trigger("run.end", {}, ctx)
-            if ctx.checkpoint is not None:
-                try:
-                    await ctx.checkpoint.commit()
-                except Exception as exc:
-                    logger.warning("Checkpoint commit failed: %s", exc)
 
     # ── Internals ──
     async def _resolve_agent(
@@ -308,7 +295,7 @@ class HarnessRuntime(AgentRuntime):
             skills=[],
             hooks=[],
             memory=None,
-            adapter="direct_llm",
+            adapter="deepagents",
             metadata={},
         )
 
@@ -419,6 +406,20 @@ class HarnessRuntime(AgentRuntime):
         if extra_allowed:
             allowed |= set(extra_allowed)
 
+        # P2: if long-term memory is enabled, the agent must be able to call
+        # the memory tools — otherwise enabling the feature is a no-op for
+        # storage (the user toggles "Enable Long-Term Memory" in the UI but the
+        # agent never sees save_memory/recall_memory in its toolset). Gate on
+        # the same condition used to build MemoryScope so tool availability
+        # stays consistent with whether ctx.memory is actually wired.
+        if (
+            self._registry.memory is not None
+            and agent.memory
+            and agent.memory.enable_long_term
+        ):
+            allowed.add("save_memory")
+            allowed.add("recall_memory")
+
         tool_engine = ToolEngine(
             registry=self._registry.tools,
             allowed_tools=list(allowed),
@@ -427,14 +428,12 @@ class HarnessRuntime(AgentRuntime):
             sandbox=self._registry.sandbox,
         )
 
-        # Build per-run CheckpointScope
-        checkpoint: CheckpointScope | None = None
+        # Wire checkpoint store directly (deepagents adapter consumes
+        # ctx.checkpoint as a CheckpointStore; CheckpointScope removed in
+        # Wave 2.5 along with DirectLLM).
+        checkpoint: CheckpointStore | None = None
         if self._registry.checkpoints is not None and session_id:
-            checkpoint = CheckpointScope(
-                store=self._registry.checkpoints,
-                session_id=session_id,
-                agent_id=agent.id,
-            )
+            checkpoint = self._registry.checkpoints
 
         # P2: Build per-run MemoryScope (only if agent has memory enabled)
         memory_scope: MemoryScope | None = None
@@ -474,25 +473,25 @@ class HarnessRuntime(AgentRuntime):
     ) -> RunAdapter:
         """Resolve adapter by name.
 
-        Phase 4 (spec D1, D10): supports ``direct_llm`` and
-        ``deepagents``. Unknown adapters fall back to ``direct_llm``
-        with a loud warning (keeps existing behavior for legacy
-        ``adk``/``langgraph`` values that may exist in old DB rows).
+        Wave 2.5: DirectLLM removed; ``deepagents`` is the only adapter.
+        Unknown/legacy adapter names (``direct_llm`` / ``adk`` /
+        ``langgraph``) fall back to ``deepagents`` with a loud warning
+        — keeps existing behavior for old DB rows until the one-shot
+        migration (D2) rewrites them to ``deepagents``.
         """
         if adapter_name in self._adapters:
             return self._adapters[adapter_name]
 
-        if adapter_name == "direct_llm":
-            adapter = DirectLLMAdapter(model=config.model)
-        elif adapter_name == "deepagents":
+        if adapter_name == "deepagents":
             from src.runtime.adapters.deepagents import DeepAgentsAdapter
             adapter = DeepAgentsAdapter(model=config.model)
         else:
             logger.warning(
-                "Adapter %r not implemented; falling back to direct_llm",
+                "Adapter %r not implemented; falling back to deepagents",
                 adapter_name,
             )
-            adapter = DirectLLMAdapter(model=config.model)
+            from src.runtime.adapters.deepagents import DeepAgentsAdapter
+            adapter = DeepAgentsAdapter(model=config.model)
 
         self._adapters[adapter_name] = adapter
         return adapter

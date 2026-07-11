@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infra.db.models import AgentConfig
+from src.infra.llm.models import resolve_default_model
 
 
 # ── Pydantic models ──────────────────────────────────────────────────────
@@ -82,17 +83,17 @@ class AgentDefinition(BaseModel):
     ``adapter`` maps to the ORM ``framework`` column (legacy name kept
     for backward compat with existing API clients and tests).
 
-    Phase 4 (spec D1, D10): adapter literal changed from
-    ``["direct_llm", "adk", "langgraph"]`` to
-    ``["direct_llm", "deepagents"]``. The ``adk``/``langgraph`` values
-    were never functional (P3a fell back to direct_llm for them).
+    Wave 2.5: DirectLLM removed; ``deepagents`` is the sole adapter.
+    Legacy ``direct_llm``/``adk``/``langgraph`` values fall back to
+    deepagents in ``_resolve_adapter`` (and are rewritten to
+    ``deepagents`` by migration M23).
     """
 
     id: str
     name: str
     workspace_id: str
     system_prompt: str = ""
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-flash"
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = 4096
     tools: list[str] = Field(default_factory=list)
@@ -100,7 +101,7 @@ class AgentDefinition(BaseModel):
     skills: list[str] = Field(default_factory=list)
     hooks: list[str] = Field(default_factory=list)
     memory: MemoryConfig | None = None
-    adapter: Literal["direct_llm", "deepagents"] = "direct_llm"
+    adapter: Literal["deepagents"] = "deepagents"
     # Phase 4 (spec D3): subagent specs; only used when adapter="deepagents"
     subagents: list[SubagentSpec] = Field(default_factory=list)
     # Phase 5: explicitly bound MCP servers (workspace-scoped names). The
@@ -137,7 +138,7 @@ class AgentRegistry:
         adapter: str,
         created_by: str,
         system_prompt: str = "",
-        model: str = "deepseek-chat",
+        model: str = "deepseek-v4-flash",
         temperature: float = 0.7,
         max_tokens: int = 4096,
         tools: list[str] | None = None,
@@ -296,7 +297,7 @@ class AgentRegistry:
             name=row.name,
             workspace_id=row.workspace_id,
             system_prompt=row.system_prompt or "",
-            model=row.model or "deepseek-chat",
+            model=row.model or resolve_default_model(),
             temperature=row.temperature if row.temperature is not None else 0.7,
             max_tokens=row.max_tokens if row.max_tokens is not None else 4096,
             tools=row.tools or [],

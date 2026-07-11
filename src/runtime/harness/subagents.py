@@ -40,7 +40,7 @@ class SubagentMapper:
         specs: "list[SubagentSpec]",
         ctx: "HarnessContext",
     ) -> list[dict]:
-        from src.runtime.harness.langgraph_shims import LangChainToolShim
+        from src.runtime.adapters.langgraph_bridge import LangChainToolShim
 
         out: list[dict] = []
         for spec in specs:

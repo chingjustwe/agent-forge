@@ -84,7 +84,7 @@ async def _create_agent_via_api(
     token: str,
     ws_id: str,
     name: str = "Helper Agent",
-    framework: str = "direct_llm",
+    framework: str = "deepagents",
     config: dict | None = None,
 ):
     transport = ASGITransport(app=app)
@@ -149,7 +149,7 @@ class TestCreateAgent:
         assert body["id"]
         assert body["workspace_id"] == ws
         assert body["name"] == "My Agent"
-        assert body["framework"] == "direct_llm"
+        assert body["framework"] == "deepagents"
         assert body["config"] == {"model": "gpt-4"}
         assert body["created_by"] == uid
         assert body["created_at"]
@@ -202,7 +202,7 @@ class TestCreateAgent:
             resp = await ac.post(
                 f"/api/v1/workspaces/ws-{suffix}/agents",
                 headers={"Authorization": f"Bearer {tok}"},
-                json={"name": "", "framework": "direct_llm", "config": {}},
+                json={"name": "", "framework": "deepagents", "config": {}},
             )
         assert resp.status_code == 422  # Pydantic min_length validation
 
@@ -371,7 +371,7 @@ class TestUpdateAgent:
         body = resp.json()
         assert body["name"] == "Renamed"
         assert body["config"]["model"] == "claude-3"
-        assert body["framework"] == "direct_llm"  # unchanged
+        assert body["framework"] == "deepagents"  # unchanged
 
     @pytest.mark.asyncio
     async def test_update_framework(self, app):
@@ -600,7 +600,7 @@ class TestSubagentsField:
                             "description": "Delegates web searches.",
                             "system_prompt": "You are a search specialist.",
                             "tools": ["search"],
-                            "model": "deepseek-chat",
+                            "model": "deepseek-v4-flash",
                         },
                         {
                             "name": "summarizer",
@@ -627,7 +627,7 @@ class TestSubagentsField:
             resp = await ac.post(
                 f"/api/v1/workspaces/{ws}/agents",
                 headers={"Authorization": f"Bearer {tok}"},
-                json={"name": "plain", "framework": "direct_llm"},
+                json={"name": "plain", "framework": "deepagents"},
             )
         assert resp.status_code == 201
         assert resp.json()["subagents"] == []

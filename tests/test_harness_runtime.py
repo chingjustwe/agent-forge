@@ -3,7 +3,7 @@
 Covers:
 - _resolve_agent: empty agent → default; not found → default; found → returned
 - _default_agent: built from RuntimeConfig fields
-- _resolve_adapter: direct_llm returns DirectLLMAdapter; unknown falls back
+- _resolve_adapter: deepagents returns DeepAgentsAdapter; unknown/legacy falls back to deepagents
 - _build_context: tool_engine scoped to agent.tools; guardrails wired
 - run() happy path: yields text events from adapter
 - run() guardrail block: yields GUARDRAIL_BLOCKED error and stops
@@ -26,7 +26,6 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.runtime.adapters.base import RunAdapter
-from src.runtime.adapters.direct_llm import DirectLLMAdapter
 from src.runtime.harness.agents import AgentDefinition
 from src.runtime.harness.context import HarnessContext
 from src.runtime.harness.registry import HarnessRegistry
@@ -42,7 +41,7 @@ def _make_config(
     *,
     agent: str = "",
     workspace_id: str = "ws-rt",
-    model: str = "deepseek-chat",
+    model: str = "deepseek-v4-flash",
 ) -> RuntimeConfig:
     return RuntimeConfig(
         agent=agent,
@@ -58,8 +57,9 @@ def _make_agent(
     id: str = "a-rt",
     name: str = "rt-agent",
     tools: list[str] | None = None,
-    adapter: str = "direct_llm",
-    model: str = "deepseek-chat",
+    adapter: str = "deepagents",
+    model: str = "deepseek-v4-flash",
+    memory: Any | None = None,
 ) -> AgentDefinition:
     return AgentDefinition(
         id=id,
@@ -68,6 +68,7 @@ def _make_agent(
         model=model,
         tools=tools if tools is not None else [],
         adapter=adapter,
+        memory=memory,
     )
 
 
@@ -110,7 +111,7 @@ def _make_runtime(
     runtime._resolve_agent = AsyncMock(return_value=agent)  # type: ignore
     if adapter is not None:
         # Pre-seed adapter cache so _resolve_adapter returns our fake.
-        runtime._adapters[agent.adapter if agent else "direct_llm"] = adapter
+        runtime._adapters[agent.adapter if agent else "deepagents"] = adapter
     return runtime, registry
 
 
@@ -137,7 +138,7 @@ class TestResolveAgent:
         assert agent.id == ""
         assert agent.name == "default"
         assert agent.model == config.model
-        assert agent.adapter == "direct_llm"
+        assert agent.adapter == "deepagents"
 
     @pytest.mark.asyncio
     async def test_default_agent_carries_config_fields(self):
@@ -151,35 +152,39 @@ class TestResolveAgent:
 
 
 class TestResolveAdapter:
-    def test_direct_llm_returns_direct_adapter(self):
-        runtime, _ = _make_runtime(agent=_make_agent(adapter="direct_llm"))
-        config = _make_config()
-        adapter = runtime._resolve_adapter("direct_llm", config)
-        assert isinstance(adapter, DirectLLMAdapter)
-
     def test_deepagents_returns_deepagents_adapter(self):
-        """Phase 4: 'deepagents' adapter resolves to DeepAgentsAdapter."""
+        """Wave 2.5: 'deepagents' is the sole adapter."""
         from src.runtime.adapters.deepagents import DeepAgentsAdapter
         runtime, _ = _make_runtime(agent=_make_agent(adapter="deepagents"))
         config = _make_config()
         adapter = runtime._resolve_adapter("deepagents", config)
         assert isinstance(adapter, DeepAgentsAdapter)
 
-    def test_unknown_adapter_falls_back_to_direct(self):
-        """Legacy 'adk' value (removed in Phase 4) still falls back gracefully.
+    def test_legacy_direct_llm_falls_back_to_deepagents(self):
+        """Wave 2.5 (D1): legacy 'direct_llm' value (removed) falls back
+        to deepagents so old DB rows keep working until M23 rewrites them."""
+        from src.runtime.adapters.deepagents import DeepAgentsAdapter
+        runtime, _ = _make_runtime(agent=_make_agent())
+        config = _make_config()
+        adapter = runtime._resolve_adapter("direct_llm", config)
+        assert isinstance(adapter, DeepAgentsAdapter)
+
+    def test_unknown_adapter_falls_back_to_deepagents(self):
+        """Unknown/legacy 'adk' value falls back to deepagents gracefully.
         _resolve_adapter takes adapter_name as a separate arg, so we can
         test it without needing an AgentDefinition with an invalid literal."""
+        from src.runtime.adapters.deepagents import DeepAgentsAdapter
         runtime, _ = _make_runtime(agent=_make_agent())
         config = _make_config()
         adapter = runtime._resolve_adapter("adk", config)
-        # Unknown adapters fall back to DirectLLMAdapter.
-        assert isinstance(adapter, DirectLLMAdapter)
+        # Unknown adapters fall back to DeepAgentsAdapter.
+        assert isinstance(adapter, DeepAgentsAdapter)
 
     def test_adapter_is_cached(self):
         runtime, _ = _make_runtime(agent=_make_agent())
         config = _make_config()
-        a1 = runtime._resolve_adapter("direct_llm", config)
-        a2 = runtime._resolve_adapter("direct_llm", config)
+        a1 = runtime._resolve_adapter("deepagents", config)
+        a2 = runtime._resolve_adapter("deepagents", config)
         assert a1 is a2
 
 
@@ -202,6 +207,43 @@ class TestBuildContext:
         assert ctx.tool_engine.is_allowed("todo_read") is True
         # Non-whitelisted tool is blocked.
         assert ctx.tool_engine.is_allowed("shell_exec") is False
+
+    @pytest.mark.asyncio
+    async def test_long_term_memory_grants_memory_tools(self):
+        """Enabling long-term memory must expose save_memory/recall_memory
+        even if the agent's tools whitelist does not list them — otherwise
+        the toggle is a no-op for storage (bug: agent could not store memory
+        despite 'Enable Long-Term Memory' being on)."""
+        from src.runtime.harness.agents import MemoryConfig
+
+        agent = _make_agent(
+            tools=["todo_write"],
+            memory=MemoryConfig(enable_long_term=True, recall_top_k=5),
+        )
+        runtime, _ = _make_runtime(agent=agent)
+        config = _make_config()
+        ctx = runtime._build_context(
+            agent=agent, config=config, session_id="s-1", user_id="u-1",
+            trace_id="t-1", workspace_settings={}, workspace_root="",
+        )
+        assert ctx.tool_engine.is_allowed("save_memory") is True
+        assert ctx.tool_engine.is_allowed("recall_memory") is True
+        # Unrelated whitelisted tool still allowed.
+        assert ctx.tool_engine.is_allowed("todo_write") is True
+
+    @pytest.mark.asyncio
+    async def test_long_term_memory_off_does_not_grant_memory_tools(self):
+        """When long-term memory is disabled, memory tools stay out of the
+        allowlist unless explicitly whitelisted."""
+        agent = _make_agent(tools=["todo_write"])
+        runtime, _ = _make_runtime(agent=agent)
+        config = _make_config()
+        ctx = runtime._build_context(
+            agent=agent, config=config, session_id="s-1", user_id="u-1",
+            trace_id="t-1", workspace_settings={}, workspace_root="",
+        )
+        assert ctx.tool_engine.is_allowed("save_memory") is False
+        assert ctx.tool_engine.is_allowed("recall_memory") is False
 
     @pytest.mark.asyncio
     async def test_context_wires_registry_guardrails(self):
