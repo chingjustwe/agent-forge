@@ -26,6 +26,7 @@ class MemoryOut(BaseModel):
     scope: str
     key: str
     content: str
+    memory_type: str = "episodic"
     created_at: str | None = None
 
 
@@ -33,6 +34,7 @@ class CreateMemoryRequest(BaseModel):
     key: str = ""
     content: str = Field(..., min_length=1)
     scope: str = Field(default="session")
+    memory_type: str = Field(default="episodic")
     metadata: dict = Field(default_factory=dict)
 
 
@@ -47,6 +49,7 @@ def _get_memory_store() -> MemoryStore:
 async def list_memory(
     workspace_id: str,
     scope: str = "user",
+    memory_type: str | None = None,
     limit: int = 50,
     request_user=Depends(require_permission("memory:read", workspace_id_param="workspace_id")),
 ):
@@ -56,17 +59,25 @@ async def list_memory(
             status_code=422,
             content={"error": {"code": "VALIDATION_ERROR", "message": "scope must be session|user|workspace|agent"}},
         )
+    if memory_type is not None and memory_type not in ("profile", "episodic"):
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"code": "VALIDATION_ERROR", "message": "memory_type must be 'profile' or 'episodic'"}},
+        )
     limit = max(1, min(limit, 500))
     store = _get_memory_store()
     user_id = request_user.get("sub") or request_user.get("id", "")
     scope_id = user_id if scope == "user" else workspace_id
-    records = await store.list(scope=scope, scope_id=scope_id, limit=limit)
+    records = await store.list(
+        scope=scope, scope_id=scope_id, limit=limit, memory_type=memory_type
+    )
     return [
         MemoryOut(
             id=r.id,
             scope=r.scope,
             key=r.key,
             content=r.content,
+            memory_type=r.memory_type,
             created_at=r.created_at.isoformat() if r.created_at else None,
         ).model_dump()
         for r in records
@@ -85,6 +96,11 @@ async def create_memory(
             status_code=422,
             content={"error": {"code": "VALIDATION_ERROR", "message": "scope must be session|user|workspace|agent"}},
         )
+    if body.memory_type not in ("profile", "episodic"):
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"code": "VALIDATION_ERROR", "message": "memory_type must be 'profile' or 'episodic'"}},
+        )
     store = _get_memory_store()
     user_id = request_user.get("sub") or request_user.get("id", "")
     scope_id = user_id if body.scope == "user" else workspace_id
@@ -97,13 +113,14 @@ async def create_memory(
         scope_id=scope_id,
         key=body.key,
         content=body.content,
+        memory_type=body.memory_type,
         metadata=body.metadata,
         created_at=datetime.now(timezone.utc),
     )
     record_id = await store.save(record)
     return JSONResponse(
         status_code=201,
-        content={"id": record_id},
+        content={"id": record_id, "memory_type": body.memory_type},
     )
 
 
@@ -135,10 +152,16 @@ async def search_memory(
     query = body.get("query", "")
     scope = body.get("scope", "user")
     limit = body.get("limit", 5)
+    memory_type = body.get("memory_type")
     if scope not in ("session", "user", "workspace", "agent"):
         return JSONResponse(
             status_code=422,
             content={"error": {"code": "VALIDATION_ERROR", "message": "scope must be session|user|workspace|agent"}},
+        )
+    if memory_type is not None and memory_type not in ("profile", "episodic"):
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"code": "VALIDATION_ERROR", "message": "memory_type must be 'profile' or 'episodic'"}},
         )
     if not query:
         return JSONResponse(
@@ -149,13 +172,17 @@ async def search_memory(
     store = _get_memory_store()
     user_id = request_user.get("sub") or request_user.get("id", "")
     scope_id = user_id if scope == "user" else workspace_id
-    records = await store.recall(query=query, scope=scope, scope_id=scope_id, limit=limit)
+    records = await store.recall(
+        query=query, scope=scope, scope_id=scope_id, limit=limit,
+        memory_type=memory_type,
+    )
     return [
         MemoryOut(
             id=r.id,
             scope=r.scope,
             key=r.key,
             content=r.content,
+            memory_type=r.memory_type,
             created_at=r.created_at.isoformat() if r.created_at else None,
         ).model_dump()
         for r in records

@@ -102,7 +102,7 @@ async def test_create_workspace_seeds_default_agent(app):
         agents = agents_resp.json()
         assert len(agents) == 1
         assert agents[0]["name"] == "Assistant"
-        assert agents[0]["framework"] == "direct_llm"
+        assert agents[0]["framework"] == "deepagents"
 
 
 @pytest.mark.asyncio

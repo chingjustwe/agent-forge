@@ -46,7 +46,7 @@ def _make_ctx(
         id=agent_id,
         name="test-agent",
         workspace_id=workspace_id,
-        adapter="direct_llm",
+        adapter="deepagents",
     )
     return HarnessContext(
         workspace_id=workspace_id,
@@ -136,6 +136,19 @@ class TestToolRegistry:
         # Another workspace only sees builtins.
         other = {t.name for t in reg.list("ws-2")}
         assert other == {"a"}
+
+    def test_save_memory_description_is_proactive(self):
+        """save_memory must instruct the agent to call it proactively when
+        the user shares personal details — otherwise the model never stores
+        memory on its own (regression for 'agent doesn't remember my name')."""
+        save_def = next(
+            d for d in BUILTIN_TOOL_DEFINITIONS if d.name == "save_memory"
+        )
+        desc = save_def.description.lower()
+        assert "proactiv" in desc
+        assert "name" in desc
+        assert "profile" in desc
+        assert "episodic" in desc
 
 
 # ── ToolEngine ───────────────────────────────────────────────────────────

@@ -19,7 +19,7 @@ from src.runtime.harness.tool_engine import ToolDefinition, ToolResult
 
 
 def _make_ctx():
-    agent = AgentDefinition(id="", name="test", workspace_id="ws-1", adapter="direct_llm")
+    agent = AgentDefinition(id="", name="test", workspace_id="ws-1", adapter="deepagents")
     return HarnessContext(
         workspace_id="ws-1",
         user_id="u-1",

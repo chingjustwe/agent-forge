@@ -30,7 +30,7 @@ from src.runtime.harness.hooks import (
 
 def _make_ctx() -> HarnessContext:
     agent = AgentDefinition(
-        id="a-1", name="test", workspace_id="ws-1", adapter="direct_llm"
+        id="a-1", name="test", workspace_id="ws-1", adapter="deepagents"
     )
     return HarnessContext(
         workspace_id="ws-1",

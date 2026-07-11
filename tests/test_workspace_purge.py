@@ -103,7 +103,7 @@ async def _seed_archived_workspace(
                 id=f"ac-{ws_id}",
                 workspace_id=ws_id,
                 name="A",
-                framework="direct_llm",
+                framework="deepagents",
                 config={},
                 created_by=user_id,
             )

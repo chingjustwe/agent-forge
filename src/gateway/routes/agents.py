@@ -1,10 +1,10 @@
 """P2-2 + P3a: Workspace-scoped agent configurations.
 
 Each agent config is bound to a workspace and references an adapter
-(``direct_llm`` / ``adk`` / ``langgraph``). The legacy ``framework`` JSON
-column is kept as the canonical adapter field (P3a maps it to
-``AgentDefinition.adapter``). The legacy ``config`` JSON column is kept
-as free-form ``metadata``.
+(``deepagents``). The legacy ``framework`` JSON column is kept as the
+canonical adapter field (P3a maps it to ``AgentDefinition.adapter``);
+Wave 2.5 removed ``direct_llm`` / ``adk`` / ``langgraph``. The legacy
+``config`` JSON column is kept as free-form ``metadata``.
 
 P3a adds structured fields (system_prompt, model, temperature, max_tokens,
 tools, guardrails, skills, hooks, memory_config) so the harness can build
@@ -29,11 +29,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.gateway.auth.rbac import require_permission
 from src.infra.db.models import AgentConfig, AuditLog, Workspace
 from src.infra.db.session import get_db
+from src.infra.llm.models import resolve_default_model
 
 router = APIRouter()
 
 # Phase 4: "adk" and "langgraph" removed (never functional); "deepagents" added.
-ALLOWED_FRAMEWORKS = ("direct_llm", "deepagents")
+# Wave 2.5: "direct_llm" removed; deepagents is the sole framework.
+ALLOWED_FRAMEWORKS = ("deepagents",)
 
 
 class MemoryConfigPayload(BaseModel):
@@ -108,7 +110,7 @@ def _serialize_agent(a: AgentConfig) -> dict:
         "config": a.config or {},
         # P3a structured fields
         "system_prompt": a.system_prompt or "",
-        "model": a.model or "deepseek-chat",
+        "model": a.model or resolve_default_model(),
         "temperature": a.temperature if a.temperature is not None else 0.7,
         "max_tokens": a.max_tokens if a.max_tokens is not None else 4096,
         "tools": a.tools or [],

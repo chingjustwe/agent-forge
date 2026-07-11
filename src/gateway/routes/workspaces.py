@@ -8,6 +8,7 @@ from src.gateway.auth.rbac import require_permission
 from src.gateway.routes.me import invalidate_workspace_cache
 from src.infra.db.models import AgentConfig, User, Workspace, WorkspaceMember
 from src.infra.db.session import get_db
+from src.infra.llm.models import resolve_default_model
 from src.utils.slugify import slugify, unique_slug
 
 
@@ -94,10 +95,10 @@ async def create_workspace(
     db.add(AgentConfig(
         workspace_id=ws.id,
         name=_DEFAULT_AGENT_NAME,
-        framework="direct_llm",
+        framework="deepagents",
         config={},
         system_prompt=_DEFAULT_AGENT_SYSTEM_PROMPT,
-        model="deepseek-chat",
+        model=resolve_default_model(),
         temperature=0.7,
         max_tokens=4096,
         created_by=user_id or "",

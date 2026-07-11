@@ -80,12 +80,18 @@ async def test_health_endpoint(app):
 
 
 @pytest.mark.asyncio
-async def test_chat_streaming(app, httpx_mock):
-    httpx_mock.add_response(
-        url="https://api.deepseek.com/v1/chat/completions",
-        content=b'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}\n\ndata: [DONE]\n',
-        headers={"Content-Type": "text/event-stream"},
-    )
+async def test_chat_streaming(app, monkeypatch):
+    from src.runtime.models import StreamEvent
+    from src.runtime.adapters.deepagents import DeepAgentsAdapter
+
+    async def _fake_run(self, messages, ctx):
+        yield StreamEvent(type="text", data={"content": "Hello"})
+        yield StreamEvent(
+            type="status",
+            data={"usage": {"input_tokens": 1, "output_tokens": 1}},
+        )
+
+    monkeypatch.setattr(DeepAgentsAdapter, "run", _fake_run)
 
     # P0-4: /chat requires config.workspace_id and a WorkspaceMember row.
     await _seed_chat_membership()
@@ -164,12 +170,18 @@ async def test_chat_viewer_forbidden(app):
 
 
 @pytest.mark.asyncio
-async def test_chat_creates_request_log(app, httpx_mock):
-    httpx_mock.add_response(
-        url="https://api.deepseek.com/v1/chat/completions",
-        content=b'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}\n\ndata: [DONE]\n',
-        headers={"Content-Type": "text/event-stream"},
-    )
+async def test_chat_creates_request_log(app, monkeypatch):
+    from src.runtime.models import StreamEvent
+    from src.runtime.adapters.deepagents import DeepAgentsAdapter
+
+    async def _fake_run(self, messages, ctx):
+        yield StreamEvent(type="text", data={"content": "Hi"})
+        yield StreamEvent(
+            type="status",
+            data={"usage": {"input_tokens": 1, "output_tokens": 1}},
+        )
+
+    monkeypatch.setattr(DeepAgentsAdapter, "run", _fake_run)
 
     # P0-4: /chat requires config.workspace_id and a WorkspaceMember row.
     await _seed_chat_membership()
@@ -197,16 +209,22 @@ async def test_chat_creates_request_log(app, httpx_mock):
 
 
 @pytest.mark.asyncio
-async def test_chat_lazy_session_creation(app, httpx_mock):
+async def test_chat_lazy_session_creation(app, monkeypatch):
     """When no session_id is provided, the backend should create a ChatSession
     on the first message and emit a `session.created` SSE event before any
     text events. The session_id should then be usable for subsequent calls.
     """
-    httpx_mock.add_response(
-        url="https://api.deepseek.com/v1/chat/completions",
-        content=b'data: {"choices":[{"delta":{"content":"Hi there"},"finish_reason":null}]}\n\ndata: [DONE]\n',
-        headers={"Content-Type": "text/event-stream"},
-    )
+    from src.runtime.models import StreamEvent
+    from src.runtime.adapters.deepagents import DeepAgentsAdapter
+
+    async def _fake_run(self, messages, ctx):
+        yield StreamEvent(type="text", data={"content": "Hi there"})
+        yield StreamEvent(
+            type="status",
+            data={"usage": {"input_tokens": 1, "output_tokens": 1}},
+        )
+
+    monkeypatch.setattr(DeepAgentsAdapter, "run", _fake_run)
     await _seed_chat_membership()
 
     transport = ASGITransport(app=app)

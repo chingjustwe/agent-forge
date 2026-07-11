@@ -52,7 +52,7 @@ def _make_ctx(
 
 def _make_agent(
     *,
-    model: str = "deepseek-chat",
+    model: str = "deepseek-v4-flash",
     tools: list[str] | None = None,
 ) -> AgentDefinition:
     return AgentDefinition(
@@ -385,21 +385,21 @@ class TestPolicyGuardrail:
         agent = _make_agent(model="gpt-4")
         ctx = _make_ctx(
             agent=agent,
-            workspace_settings={"policy": {"allowed_models": ["deepseek-chat"]}},
+            workspace_settings={"policy": {"allowed_models": ["deepseek-v4-flash"]}},
         )
         result = await g.check("anything", ctx)
         assert result.passed is False
         assert result.action == "block"
         assert "gpt-4" in (result.reason or "")
-        assert "deepseek-chat" in (result.reason or "")
+        assert "deepseek-v4-flash" in (result.reason or "")
 
     @pytest.mark.asyncio
     async def test_allow_when_model_in_whitelist(self):
         g = PolicyGuardrail()
-        agent = _make_agent(model="deepseek-chat")
+        agent = _make_agent(model="deepseek-v4-flash")
         ctx = _make_ctx(
             agent=agent,
-            workspace_settings={"policy": {"allowed_models": ["deepseek-chat", "gpt-4"]}},
+            workspace_settings={"policy": {"allowed_models": ["deepseek-v4-flash", "gpt-4"]}},
         )
         result = await g.check("anything", ctx)
         assert result.passed is True

@@ -203,7 +203,7 @@ class TestWorkspaceOrdering:
             tid, uid, [(ws_id, "Chat WS", old_time)],
         )
 
-        # Stub the DirectLLMAdapter to avoid real LLM calls — emit one text
+        # Stub the DeepAgentsAdapter to avoid real LLM calls — emit one text
         # event then end the stream.
         from src.runtime.models import StreamEvent
 
@@ -214,8 +214,8 @@ class TestWorkspaceOrdering:
                 data={"usage": {"input_tokens": 1, "output_tokens": 1}},
             )
 
-        from src.runtime.adapters.direct_llm import DirectLLMAdapter
-        monkeypatch.setattr(DirectLLMAdapter, "run", _fake_run)
+        from src.runtime.adapters.deepagents import DeepAgentsAdapter
+        monkeypatch.setattr(DeepAgentsAdapter, "run", _fake_run)
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
