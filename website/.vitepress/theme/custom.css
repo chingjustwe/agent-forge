@@ -256,20 +256,26 @@ code, kbd, samp, pre {
   align-items: stretch;
 }
 .terminal {
-  border: 1px solid var(--vp-c-border);
+  border: 1px solid #e5e5e5;
   border-radius: 12px;
-  background: #0a0a0a;
+  background: #f5f5f5;
   overflow: hidden;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
 }
 .dark .terminal {
   border-color: #2a2a2a;
+  background: #0a0a0a;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
 }
 .terminal-bar {
   display: flex;
   align-items: center;
   gap: 7px;
   padding: 11px 14px;
+  background: #ececec;
+  border-bottom: 1px solid #e0e0e0;
+}
+.dark .terminal-bar {
   background: #111111;
   border-bottom: 1px solid #1f1f1f;
 }
@@ -294,8 +300,11 @@ code, kbd, samp, pre {
   font-family: var(--vp-font-family-mono);
   font-size: 13px;
   line-height: 1.7;
-  color: #e5e5e5;
+  color: #0a0a0a;
   overflow-x: auto;
+}
+.dark .terminal pre {
+  color: #e5e5e5;
 }
 .terminal code {
   font-family: inherit;
