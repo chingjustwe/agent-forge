@@ -22,30 +22,30 @@ hero:
       link: https://github.com/chingjustwe/agent-forge
 
 features:
-  - title: Multi-Tenant + RBAC
-    details: Workspace-scoped RBAC driven by permissions.yaml. Roles from viewer to tenant_admin, with scoped admin access.
+  - title: Agents — pluggable runtime
+    details: One AgentRuntime interface, many frameworks. DirectLLM (DeepSeek) ships today; Google ADK and LangGraph adapters plug in with zero gateway changes.
     icon:
-      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>'
-  - title: Pluggable Runtime
-    details: Agent Runtime behind an AgentRuntime ABC. DirectLLMAdapter (DeepSeek) today; ADK and LangGraph adapters plug in with zero gateway changes.
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 4v4"/><circle cx="12" cy="4" r="1.6"/><path d="M9 14h.01M15 14h.01"/><path d="M9.5 17h5"/></svg>'
+  - title: Skills
+    details: Reusable skill packages across three layers — user, project, and per-workspace. RBAC-guarded, audited CRUD wired straight into the harness.
     icon:
-      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>'
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.8L18.6 9.6 13.8 11.4 12 16.2 10.2 11.4 5.4 9.6 10.2 7.8z"/><path d="M18.5 14.5l.8 2.1 2.2.8-2.2.8-.8 2.1-.8-2.1-2.2-.8 2.2-.8z"/></svg>'
+  - title: MCP integrations
+    details: Workspace-scoped MCP server registry with CRUD, live tool discovery, and health checks — extend agents with external tools and context.
+    icon:
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2v5"/><path d="M15 2v5"/><path d="M6.5 7h11a1.5 1.5 0 0 1 1.5 1.5V12a5.5 5.5 0 0 1-11 0V8.5A1.5 1.5 0 0 1 6.5 7z"/><path d="M12 17.5V22"/><path d="M9.5 22h5"/></svg>'
+  - title: Global usage control
+    details: Tenant-wide quota management with token and cost tracking. QuotaGuardrail enforces limits per workspace and feeds the usage dashboards.
+    icon:
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="11" width="3" height="6" rx="1"/><rect x="12" y="7" width="3" height="10" rx="1"/><rect x="17" y="13" width="3" height="4" rx="1"/></svg>'
+  - title: Multi-tenant + RBAC
+    details: Workspace-scoped RBAC driven by permissions.yaml — from viewer to tenant_admin, with scoped admin access and a single source of truth.
+    icon:
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>'
   - title: Observability
-    details: Traces, metrics, and quota tracking via OpenTelemetry. Dashboards for requests, sessions, cost, errors, and live SSE events.
+    details: Traces, metrics, and quota signals exported via OpenTelemetry — live dashboards for requests, sessions, cost, errors, and SSE events.
     icon:
-      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>'
-  - title: Agent Harness
-    details: Guardrail pipeline, sandboxing, tool management, retry, and circuit breaker behind a single execution interface.
-    icon:
-      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'
-  - title: Admin Dashboard
-    details: User CRUD, workspace management, invitation flow, API key management, audit log viewer, and usage statistics.
-    icon:
-      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>'
-  - title: React SPA Frontend
-    details: Custom CSS design system (no UI library), dark/light theme, SSE streaming chat, recharts analytics, shared Modal/Toast/Confirm components.
-    icon:
-      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>'
+      svg: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>'
 ---
 
 <!-- How it works -->
