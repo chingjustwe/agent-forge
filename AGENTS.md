@@ -6,6 +6,19 @@ Agent Platform is an open-source, self-hostable, multi-tenant AI agent platform 
 
 Design specs live in [`docs/superpowers/specs/`](docs/superpowers/specs/). The project follows a 7-phase spec-driven development approach.
 
+## Documentation Requirement
+
+The published documentation site lives in [`website/`](website/) — a VitePress project deployed to GitHub Pages at `https://chingjustwe.github.io/agent-forge/`. It is part of this repo and must stay in sync with the code.
+
+**Rule — update the docs with every change.** Any modification to code, configuration, APIs, features, or runtime behavior MUST be accompanied by a corresponding update under `website/`. Concretely:
+
+- **API routes / permissions** → update `website/guide/api-reference.md` and `website/guide/rbac.md`
+- **Features** (Agents, Skills, MCP, quota/usage control, RBAC, observability, etc.) → update `website/index.md` (home feature cards) and the relevant `website/guide/*.md` pages
+- **Configuration / deployment** → update `website/guide/configuration.md` and `website/guide/deployment.md`
+- **Architecture** → update `website/guide/architecture.md`
+
+If a change is purely internal with no user-facing or behavioral impact, state in the commit message that no doc update was required. Never leave the published docs silently out of sync with the implementation.
+
 ## Project Structure
 
 ```
