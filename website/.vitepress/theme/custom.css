@@ -1,56 +1,50 @@
-/* ===== Design System — Agent Forge ===== */
+/* ===== Design System — Agent Forge (Industrial / Linear-inspired) ===== */
 
 /* ---- Light mode (default) ---- */
 :root {
-  --vp-c-bg: #f8fafc;
-  --vp-c-bg-soft: #ffffff;
-  --vp-c-bg-mute: #f1f5f9;
-  --vp-c-bg-alt: #e2e8f0;
+  --vp-c-bg: #ffffff;
+  --vp-c-bg-soft: #fafafa;
+  --vp-c-bg-mute: #f5f5f5;
+  --vp-c-bg-alt: #ededed;
 
-  --vp-c-text-1: #0f172a;
-  --vp-c-text-2: #475569;
-  --vp-c-text-3: #94a3b8;
+  --vp-c-text-1: #0a0a0a;
+  --vp-c-text-2: #525252;
+  --vp-c-text-3: #737373;
 
-  --vp-c-brand-1: #6366f1;
-  --vp-c-brand-2: #4f46e5;
-  --vp-c-brand-3: #818cf8;
+  --vp-c-brand-1: #3a81f6;
+  --vp-c-brand-2: #2563ef;
+  --vp-c-brand-3: #60a5fa;
 
-  --vp-c-border: #e2e8f0;
-  --vp-c-divider: #e2e8f0;
+  --vp-c-border: #e5e5e5;
+  --vp-c-divider: #eaeaea;
 
-  --vp-c-indigo: #6366f1;
-  --vp-c-indigo-light: #818cf8;
-  --vp-c-indigo-lighter: #a5b4fc;
-  --vp-c-indigo-dark: #4f46e5;
-  --vp-c-indigo-darker: #3730a3;
+  --vp-c-accent: #2563ef;
+  --vp-c-accent-soft: #60a5fa;
 
-  --vp-font-family-base: 'Inter', ui-sans-serif, system-ui, sans-serif;
-  --vp-font-family-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --vp-font-family-base: 'Geist', system-ui, -apple-system, sans-serif;
+  --vp-font-family-mono: 'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
 }
 
 /* ---- Dark mode ---- */
 .dark {
-  --vp-c-bg: #0f172a;
-  --vp-c-bg-soft: #1e293b;
-  --vp-c-bg-mute: #272f42;
-  --vp-c-bg-alt: #334155;
+  --vp-c-bg: #000000;
+  --vp-c-bg-soft: #0a0a0a;
+  --vp-c-bg-mute: #111111;
+  --vp-c-bg-alt: #171717;
 
-  --vp-c-text-1: #f8fafc;
-  --vp-c-text-2: #94a3b8;
-  --vp-c-text-3: #64748b;
+  --vp-c-text-1: #fafafa;
+  --vp-c-text-2: #a1a1a1;
+  --vp-c-text-3: #737373;
 
-  --vp-c-brand-1: #818cf8;
-  --vp-c-brand-2: #6366f1;
-  --vp-c-brand-3: #a5b4fc;
+  --vp-c-brand-1: #3a81f6;
+  --vp-c-brand-2: #2563ef;
+  --vp-c-brand-3: #60a5fa;
 
-  --vp-c-border: rgba(255, 255, 255, 0.08);
-  --vp-c-divider: rgba(255, 255, 255, 0.06);
+  --vp-c-border: #262626;
+  --vp-c-divider: #1f1f1f;
 
-  --vp-c-indigo: #818cf8;
-  --vp-c-indigo-light: #a5b4fc;
-  --vp-c-indigo-lighter: #c7d2fe;
-  --vp-c-indigo-dark: #6366f1;
-  --vp-c-indigo-darker: #4f46e5;
+  --vp-c-accent: #3a81f6;
+  --vp-c-accent-soft: #60a5fa;
 }
 
 /* ---- Base ---- */
@@ -62,7 +56,7 @@ body {
 
 h1, h2, h3, h4, h5, h6 {
   font-family: var(--vp-font-family-base);
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: -0.02em;
 }
 
@@ -70,80 +64,152 @@ code, kbd, samp, pre {
   font-family: var(--vp-font-family-mono);
 }
 
-/* ---- Brand accent glow for buttons ---- */
-.VPButton.brand {
-  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.25);
+/* ---- Atmospheric hero backdrop ---- */
+.VPHome {
+  position: relative;
 }
-.dark .VPButton.brand {
-  box-shadow: 0 4px 14px rgba(129, 140, 248, 0.25);
+.VPHome::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(60% 50% at 72% 0%, rgba(37, 99, 239, 0.12), transparent 70%),
+    radial-gradient(40% 40% at 0% 10%, rgba(37, 99, 239, 0.06), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+.VPHome > * {
+  position: relative;
+  z-index: 1;
 }
 
-/* ---- Feature cards ---- */
+/* ---- Hero ---- */
+.VPHero .name {
+  background: linear-gradient(120deg, #0a0a0a 0%, #2563ef 90%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.dark .VPHero .name {
+  background: linear-gradient(120deg, #fafafa 0%, #60a5fa 55%, #2563ef 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.VPHero .text {
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+.VPHero .tagline {
+  font-family: var(--vp-font-family-mono);
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--vp-c-text-2);
+  max-width: 30rem;
+}
+.VPHero .image img {
+  filter: drop-shadow(0 0 48px rgba(37, 99, 239, 0.28));
+}
+
+/* ---- Brand buttons ---- */
+.VPButton.brand {
+  background: var(--vp-c-brand-2);
+  border-color: var(--vp-c-brand-2);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2), 0 4px 14px rgba(37, 99, 239, 0.3);
+  transition: background 0.2s, box-shadow 0.2s, transform 0.2s;
+}
+.VPButton.brand:hover {
+  background: var(--vp-c-brand-1);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2), 0 6px 20px rgba(37, 99, 239, 0.4);
+  transform: translateY(-1px);
+}
+.dark .VPButton.brand {
+  color: #fff;
+}
+
+/* ---- Feature cards (industrial) ---- */
 .VPFeature {
   border: 1px solid var(--vp-c-border);
   border-radius: 12px;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  background: var(--vp-c-bg-soft);
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
 }
 .VPFeature:hover {
-  border-color: var(--vp-c-brand-1);
-  box-shadow: 0 0 0 1px var(--vp-c-brand-1);
+  border-color: var(--vp-c-brand-2);
+  box-shadow: 0 0 0 1px var(--vp-c-brand-2), 0 8px 24px rgba(37, 99, 239, 0.12);
+  transform: translateY(-2px);
 }
-
 .VPFeature .icon {
-  background: color-mix(in srgb, var(--vp-c-brand-1) 10%, transparent);
+  background: color-mix(in srgb, var(--vp-c-brand-2) 12%, transparent);
   border-radius: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
+  color: var(--vp-c-brand-1);
+}
+.VPFeature .title {
+  font-weight: 600;
+}
+.VPFeature .details {
+  color: var(--vp-c-text-2);
+  line-height: 1.6;
 }
 
 /* ---- Code blocks ---- */
 .vp-doc div[class*='language-'] {
   border: 1px solid var(--vp-c-border);
-  border-radius: 8px;
+  border-radius: 10px;
 }
 
-/* ---- Custom landing section between hero and features ---- */
+/* ---- "How it works" section ---- */
 .home-section {
   max-width: 1152px;
   margin: 0 auto;
-  padding: 64px 24px;
+  padding: 72px 24px 32px;
 }
-
 .home-section h2 {
   font-size: 28px;
   text-align: center;
   margin-bottom: 8px;
 }
-
 .home-section .subtitle {
   text-align: center;
   color: var(--vp-c-text-2);
   margin-bottom: 48px;
   font-size: 16px;
+  max-width: 46rem;
+  margin-left: auto;
+  margin-right: auto;
 }
-
-/* ---- Landing flow diagram ---- */
 .flow-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 16px;
 }
-
 .flow-step {
+  position: relative;
   border: 1px solid var(--vp-c-border);
   border-radius: 12px;
   padding: 20px;
   background: var(--vp-c-bg-soft);
+  overflow: hidden;
 }
-
+.flow-step::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--vp-c-brand-2), transparent);
+  opacity: 0.7;
+}
 .flow-step p {
   margin: 12px 0 0;
   color: var(--vp-c-text-2);
   font-size: 14px;
   line-height: 1.6;
 }
-
 .flow-badge {
   display: inline-block;
   padding: 4px 12px;
@@ -151,16 +217,103 @@ code, kbd, samp, pre {
   font-size: 12px;
   font-weight: 600;
   font-family: var(--vp-font-family-mono);
-  color: var(--vp-c-indigo-dark);
-  background: color-mix(in srgb, var(--vp-c-brand-1) 14%, transparent);
+  color: var(--vp-c-brand-2);
+  background: color-mix(in srgb, var(--vp-c-brand-2) 12%, transparent);
 }
 .dark .flow-badge {
-  color: var(--vp-c-indigo-lighter);
+  color: var(--vp-c-accent-soft);
 }
 
-/* ---- Dark mode VitePress hero gradient ---- */
-.dark .VPContent .VPHome .VPHero .container .main .name .clip {
-  background: linear-gradient(135deg, #f8fafc 0%, #818cf8 50%, #6366f1 100%);
+/* ---- Quickstart terminal + stats band ---- */
+.home-band {
+  max-width: 1152px;
+  margin: 0 auto;
+  padding: 24px 24px 96px;
+}
+.home-band-inner {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 20px;
+  align-items: stretch;
+}
+.terminal {
+  border: 1px solid var(--vp-c-border);
+  border-radius: 12px;
+  background: #0a0a0a;
+  overflow: hidden;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+}
+.dark .terminal {
+  border-color: #2a2a2a;
+}
+.terminal-bar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 11px 14px;
+  background: #111111;
+  border-bottom: 1px solid #1f1f1f;
+}
+.terminal-bar .dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: #333;
+}
+.terminal-bar .dot:nth-child(1) { background: #ff5f56; }
+.terminal-bar .dot:nth-child(2) { background: #ffbd2e; }
+.terminal-bar .dot:nth-child(3) { background: #27c93f; }
+.terminal-title {
+  margin-left: 8px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 12px;
+  color: #737373;
+}
+.terminal pre {
+  margin: 0;
+  padding: 18px 20px;
+  font-family: var(--vp-font-family-mono);
+  font-size: 13px;
+  line-height: 1.7;
+  color: #e5e5e5;
+  overflow-x: auto;
+}
+.terminal code {
+  font-family: inherit;
+  background: none;
+}
+.stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+.stat {
+  border: 1px solid var(--vp-c-border);
+  border-radius: 12px;
+  background: var(--vp-c-bg-soft);
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.stat-num {
+  font-family: var(--vp-font-family-mono);
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1;
+  background: linear-gradient(120deg, var(--vp-c-brand-2), var(--vp-c-accent-soft));
   -webkit-background-clip: text;
   background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.stat-label {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--vp-c-text-2);
+}
+
+@media (max-width: 768px) {
+  .home-band-inner {
+    grid-template-columns: 1fr;
+  }
 }

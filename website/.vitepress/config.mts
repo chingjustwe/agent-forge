@@ -20,7 +20,7 @@ export default defineConfig({
     [
       'link',
       {
-        href: 'https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap',
+        href: 'https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600;700&display=swap',
         rel: 'stylesheet',
       },
     ],
@@ -28,8 +28,8 @@ export default defineConfig({
   themeConfig: {
     logo: {
       src: '/logo.svg',
-      width: 32,
-      height: 32,
+      width: 28,
+      height: 28,
     },
     nav: [
       { text: 'Home', link: '/' },
@@ -62,7 +62,7 @@ export default defineConfig({
     ],
     footer: {
       message: 'Released under the MIT License.',
-      copyright: `Copyright © ${new Date().getFullYear()}`,
+      copyright: `Copyright © ${new Date().getFullYear()} Agent Forge`,
     },
   },
 })
