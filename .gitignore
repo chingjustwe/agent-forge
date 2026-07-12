@@ -16,3 +16,6 @@ frontend/*.tsbuildinfo
 .codebuddy/
 docs/
 /test.*
+website/node_modules/
+website/.vitepress/dist/
+website/.vitepress/cache/
