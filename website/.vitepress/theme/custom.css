@@ -107,8 +107,27 @@ code, kbd, samp, pre {
   color: var(--vp-c-text-2);
   max-width: 30rem;
 }
+.VPHero .image {
+  width: 100%;
+  max-width: 660px;
+  margin-left: auto;
+}
 .VPHero .image img {
+  width: 100%;
+  max-width: 660px;
+  height: auto;
   filter: drop-shadow(0 0 48px rgba(37, 99, 239, 0.28));
+}
+@media (min-width: 960px) {
+  .VPHero .image {
+    justify-content: flex-end;
+    padding-left: 48px;
+  }
+  .VPHero .image .image-src,
+  .VPHero .image img {
+    max-width: 660px;
+    max-height: none;
+  }
 }
 
 /* ---- Brand buttons ---- */
