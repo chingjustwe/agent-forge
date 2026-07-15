@@ -4,10 +4,13 @@ import {
   createMCPServer,
   deleteMCPServer,
   discoverMCPTools,
+  fetchPermissions,
+  getCurrentUser,
   listMCPServers,
   MCPServerInfo,
   MCPToolInfo,
   updateMCPServer,
+  User,
 } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
 import { Modal } from "../components/Modal";
@@ -25,11 +28,22 @@ function detectTransport(endpoint: string): string {
 }
 
 export default function AdminMCP() {
-  const { currentWorkspaceId } = useWorkspace();
+  const { currentWorkspaceId, currentRole } = useWorkspace();
   const toast = useToast();
   const [servers, setServers] = useState<MCPServerInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [canWrite, setCanWrite] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+
+  const isWorkspaceAdmin =
+    currentRole === "workspace_admin" || currentRole === "tenant_admin";
+
+  /** Whether the current user may edit/delete a specific MCP server. */
+  function canEditServer(server: MCPServerInfo): boolean {
+    if (isWorkspaceAdmin) return true;
+    return server.created_by === (user?.id || "");
+  }
 
   // Tools drawer: server name -> tools (lazy loaded)
   const [toolsByServer, setToolsByServer] = useState<Record<string, MCPToolInfo[]>>({});
@@ -77,6 +91,13 @@ export default function AdminMCP() {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentWorkspaceId]);
+
+  useEffect(() => {
+    fetchPermissions()
+      .then(p => setCanWrite(p.permissions.includes("*") || p.permissions.includes("mcp:write")))
+      .catch(() => setCanWrite(false));
+    getCurrentUser().then(setUser).catch(() => {});
+  }, []);
 
   // Auto-switch transport to "sse" when the create-form endpoint ends with /sse
   useEffect(() => {
@@ -212,7 +233,9 @@ export default function AdminMCP() {
           <h1 className="page-title">MCP Servers</h1>
           <p className="page-subtitle">Workspace-scoped Model Context Protocol servers</p>
         </div>
-        <button className="btn btn-primary" onClick={openCreate}>+ Register Server</button>
+        {canWrite && (
+          <button className="btn btn-primary" onClick={openCreate}>+ Register Server</button>
+        )}
       </div>
 
       {error && <EmptyState title="Error loading MCP servers" description={error} />}
@@ -220,8 +243,8 @@ export default function AdminMCP() {
       {!error && !loading && servers.length === 0 && (
         <EmptyState
           title="No MCP servers"
-          description="Register an MCP server to expose its tools to agents in this workspace."
-          action={{ label: "+ Register Server", onClick: openCreate }}
+          description={canWrite ? "Register an MCP server to expose its tools to agents in this workspace." : "No MCP servers are registered."}
+          action={canWrite ? { label: "+ Register Server", onClick: openCreate } : undefined}
         />
       )}
 
@@ -285,18 +308,22 @@ export default function AdminMCP() {
                           >
                             {healthChecking === server.name ? "Pinging..." : "Health"}
                           </button>
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => openEdit(server)}
-                          >
-                            Edit
-                          </button>
-                          <button
-                            className="btn btn-danger btn-sm"
-                            onClick={() => setDeleteTarget(server)}
-                          >
-                            Delete
-                          </button>
+                          {canEditServer(server) && (
+                            <>
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => openEdit(server)}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                className="btn btn-danger btn-sm"
+                                onClick={() => setDeleteTarget(server)}
+                              >
+                                Delete
+                              </button>
+                            </>
+                          )}
                         </div>
                       </td>
                     </tr>

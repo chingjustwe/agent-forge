@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { loginUser, registerUser } from "../api";
+import { fetchSsoProviders, loginUser, registerUser, SsoProviderInfo } from "../api";
 import { useToast } from "../components/Toast";
 
 export default function LoginPage() {
@@ -11,7 +11,12 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
+  const [ssoProviders, setSsoProviders] = useState<SsoProviderInfo[]>([]);
   const toast = useToast();
+
+  useEffect(() => {
+    fetchSsoProviders().then(setSsoProviders).catch(() => setSsoProviders([]));
+  }, []);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -89,14 +94,23 @@ export default function LoginPage() {
           )}
         </div>
 
-        <div className="login-divider" />
-
-        <div className="login-sso-label">Or continue with</div>
-        <div className="login-sso-buttons">
-          <a href="/api/v1/auth/login?provider=google" className="login-sso-btn">Google</a>
-          <a href="/api/v1/auth/login?provider=azure" className="login-sso-btn">Azure AD</a>
-          <a href="/api/v1/auth/login?provider=okta" className="login-sso-btn">Okta</a>
-        </div>
+        {ssoProviders.length > 0 && (
+          <>
+            <div className="login-divider" />
+            <div className="login-sso-label">Or continue with</div>
+            <div className="login-sso-buttons">
+              {ssoProviders.map((p) => (
+                <a
+                  key={p.id}
+                  href={`/api/v1/auth/sso/${p.id}/login?redirect=${encodeURIComponent(searchParams.get("redirect") || "/")}`}
+                  className="login-sso-btn"
+                >
+                  {p.name}
+                </a>
+              ))}
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

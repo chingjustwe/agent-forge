@@ -17,7 +17,8 @@ export default function AdminWorkspaces() {
   const [editDescription, setEditDescription] = useState("");
   const [editIcon, setEditIcon] = useState("");
   const [editTokens, setEditTokens] = useState(0);
-  const [editCost, setEditCost] = useState(0);
+  const [editCostDay, setEditCostDay] = useState(0);
+  const [editCostMonth, setEditCostMonth] = useState(0);
   const [saving, setSaving] = useState(false);
 
   const [createOpen, setCreateOpen] = useState(false);
@@ -27,7 +28,8 @@ export default function AdminWorkspaces() {
   const [newWsDescription, setNewWsDescription] = useState("");
   const [newWsIcon, setNewWsIcon] = useState("");
   const [newWsTokens, setNewWsTokens] = useState(0);
-  const [newWsCost, setNewWsCost] = useState(0);
+  const [newWsCostDay, setNewWsCostDay] = useState(0);
+  const [newWsCostMonth, setNewWsCostMonth] = useState(0);
 
   // Member management state
   const [memberWsId, setMemberWsId] = useState<string | null>(null);
@@ -73,7 +75,8 @@ export default function AdminWorkspaces() {
     setNewWsDescription("");
     setNewWsIcon("");
     setNewWsTokens(0);
-    setNewWsCost(0);
+    setNewWsCostDay(0);
+    setNewWsCostMonth(0);
     setCreateOpen(true);
   };
 
@@ -87,7 +90,8 @@ export default function AdminWorkspaces() {
         description: newWsDescription.trim() || undefined,
         icon: newWsIcon.trim() || undefined,
         max_tokens_per_day: newWsTokens || undefined,
-        max_cost_per_month: newWsCost || undefined,
+        max_cost_per_day: newWsCostDay || undefined,
+        max_cost_per_month: newWsCostMonth || undefined,
       });
       toast.success("Workspace created");
       setCreateOpen(false);
@@ -107,8 +111,9 @@ export default function AdminWorkspaces() {
     setEditSlug(ws.slug || "");
     setEditDescription(ws.description || "");
     setEditIcon(ws.icon || "");
-    setEditTokens(0);
-    setEditCost(0);
+    setEditTokens(ws.max_tokens_per_day || 0);
+    setEditCostDay(ws.max_cost_per_day || 0);
+    setEditCostMonth(ws.max_cost_per_month || 0);
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -122,7 +127,8 @@ export default function AdminWorkspaces() {
         description: editDescription,
         icon: editIcon,
         max_tokens_per_day: editTokens,
-        max_cost_per_month: editCost,
+        max_cost_per_day: editCostDay,
+        max_cost_per_month: editCostMonth,
       });
       toast.success("Workspace updated");
       setEditWs(null);
@@ -527,10 +533,17 @@ export default function AdminWorkspaces() {
             <div className="form-group">
               <label className="form-label">Tokens per day</label>
               <input type="number" value={newWsTokens} onChange={(e) => setNewWsTokens(Number(e.target.value))} />
+              <small style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>0 = Unlimited</small>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Cost per day ($)</label>
+              <input type="number" step="0.01" value={newWsCostDay} onChange={(e) => setNewWsCostDay(Number(e.target.value))} />
+              <small style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>0 = Unlimited</small>
             </div>
             <div className="form-group">
               <label className="form-label">Cost per month ($)</label>
-              <input type="number" value={newWsCost} onChange={(e) => setNewWsCost(Number(e.target.value))} />
+              <input type="number" step="0.01" value={newWsCostMonth} onChange={(e) => setNewWsCostMonth(Number(e.target.value))} />
+              <small style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>0 = Unlimited</small>
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
@@ -571,10 +584,17 @@ export default function AdminWorkspaces() {
             <div className="form-group">
               <label className="form-label">Tokens per day</label>
               <input type="number" value={editTokens} onChange={(e) => setEditTokens(Number(e.target.value))} />
+              <small style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>0 = Unlimited</small>
+            </div>
+            <div className="form-group">
+              <label className="form-label">Cost per day ($)</label>
+              <input type="number" step="0.01" value={editCostDay} onChange={(e) => setEditCostDay(Number(e.target.value))} />
+              <small style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>0 = Unlimited</small>
             </div>
             <div className="form-group">
               <label className="form-label">Cost per month ($)</label>
-              <input type="number" value={editCost} onChange={(e) => setEditCost(Number(e.target.value))} />
+              <input type="number" step="0.01" value={editCostMonth} onChange={(e) => setEditCostMonth(Number(e.target.value))} />
+              <small style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>0 = Unlimited</small>
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>

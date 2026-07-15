@@ -5,11 +5,13 @@ import {
   fetchAvailableSkills,
   fetchPermissions,
   fetchSkill,
+  getCurrentUser,
   reloadSkill,
   SkillDetail,
   SkillInfo,
   SkillLayer,
   updateSkill,
+  User,
 } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
 import { Modal } from "../components/Modal";
@@ -57,13 +59,27 @@ const EMPTY_FORM: SkillForm = {
 };
 
 export default function AdminSkills() {
-  const { currentWorkspaceId } = useWorkspace();
+  const { currentWorkspaceId, currentRole } = useWorkspace();
   const toast = useToast();
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloading, setReloading] = useState<string | null>(null);
   const [canWrite, setCanWrite] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+
+  const isWorkspaceAdmin =
+    currentRole === "workspace_admin" || currentRole === "tenant_admin";
+
+  /** Whether the current user may edit/delete a specific workspace skill. */
+  function canEditSkill(skill: SkillInfo): boolean {
+    // workspace_admin / tenant_admin can edit any skill.
+    if (isWorkspaceAdmin) return true;
+    // Directory-layer skills are read-only for everyone (handled by editable
+    // flag elsewhere); for workspace skills, the user must be the owner.
+    if (!skill.editable) return false;
+    return skill.created_by === (user?.id || "");
+  }
 
   // Detail modal
   const [detail, setDetail] = useState<SkillDetail | null>(null);
@@ -101,6 +117,7 @@ export default function AdminSkills() {
     fetchPermissions()
       .then(p => setCanWrite(p.permissions.includes("*") || p.permissions.includes("skills:write")))
       .catch(() => setCanWrite(false));
+    getCurrentUser().then(setUser).catch(() => {});
   }, []);
 
   async function handleReload(name: string) {
@@ -276,12 +293,12 @@ export default function AdminSkills() {
                       <td>
                         <div style={{ display: "flex", gap: 6 }}>
                           <button className="btn btn-secondary btn-sm" onClick={() => openDetail(skill.name)}>View</button>
-                          {skill.editable && canWrite ? (
+                          {canEditSkill(skill) ? (
                             <>
                               <button className="btn btn-secondary btn-sm" onClick={() => openEdit(skill.name)}>Edit</button>
                               <button className="btn btn-danger btn-sm" onClick={() => setDeleteTarget(skill)}>Delete</button>
                             </>
-                          ) : canWrite ? (
+                          ) : canWrite && !skill.editable ? (
                             <button
                               className="btn btn-secondary btn-sm"
                               disabled={reloading === skill.name}

@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { getObservabilityRequests, fetchAdminAudit, RequestLog, AuditEntry, AuditResponse } from "../api";
+import { fetchAdminRequests, fetchAdminAudit, RequestLog, AuditEntry, AuditResponse } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
 import { EmptyState } from "../components/EmptyState";
 import { Select } from "../components/Select";
@@ -20,14 +20,21 @@ const ACTION_OPTIONS = [
 ];
 
 export default function Audit() {
-  const { currentWorkspaceId } = useWorkspace();
+  const { workspaces } = useWorkspace();
   const navigate = useNavigate();
   const [tab, setTab] = useState<AuditTab>("requests");
 
   // ── Requests tab state ──
   const [requests, setRequests] = useState<RequestLog[]>([]);
-  const [reqFilter, setReqFilter] = useState("");
   const [reqLoading, setReqLoading] = useState(true);
+  // filters
+  const [fWorkspace, setFWorkspace] = useState("");
+  const [fUser, setFUser] = useState("");
+  const [fAgent, setFAgent] = useState("");
+  const [fModel, setFModel] = useState("");
+  const [fStatus, setFStatus] = useState("");
+  const [fSince, setFSince] = useState("");
+  const [fUntil, setFUntil] = useState("");
 
   // ── Logs tab state ──
   const [auditData, setAuditData] = useState<AuditResponse | null>(null);
@@ -40,14 +47,26 @@ export default function Audit() {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const limit = 20;
 
-  // ── Load requests ──
-  useEffect(() => {
-    if (!currentWorkspaceId || tab !== "requests") return;
+  // ── Load requests (admin cross-workspace) ──
+  const loadRequests = useCallback(() => {
     setReqLoading(true);
-    getObservabilityRequests(currentWorkspaceId, { limit: 100 })
+    fetchAdminRequests({
+      workspace_id: fWorkspace || undefined,
+      user_id: fUser || undefined,
+      agent: fAgent || undefined,
+      model: fModel || undefined,
+      status: fStatus ? Number(fStatus) : undefined,
+      since: fSince || undefined,
+      until: fUntil || undefined,
+      limit: 100,
+    })
       .then(setRequests)
       .finally(() => setReqLoading(false));
-  }, [currentWorkspaceId, tab]);
+  }, [fWorkspace, fUser, fAgent, fModel, fStatus, fSince, fUntil]);
+
+  useEffect(() => {
+    if (tab === "requests") loadRequests();
+  }, [tab, loadRequests]);
 
   // ── Load audit logs ──
   const loadAudit = () => {
@@ -68,24 +87,14 @@ export default function Audit() {
     if (tab === "logs") loadAudit();
   }, [tab, offset]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const filteredRequests = requests.filter(r =>
-    !reqFilter || r.model?.includes(reqFilter) || r.status_code === Number(reqFilter)
-  );
-
   const totalPages = auditData ? Math.ceil(auditData.total / limit) : 0;
   const currentPage = Math.floor(offset / limit) + 1;
 
-  if (!currentWorkspaceId) {
-    return (
-      <div>
-        <div className="page-header">
-          <h1 className="page-title">Audit</h1>
-          <p className="page-subtitle">Request logs and administrative audit trail</p>
-        </div>
-        <div className="alert alert-info">No workspace selected. Please select a workspace from the top bar.</div>
-      </div>
-    );
-  }
+  // Workspace options for filter dropdown
+  const workspaceOptions = [
+    { value: "", label: "All workspaces" },
+    ...workspaces.map(w => ({ value: w.id, label: w.name })),
+  ];
 
   return (
     <div>
@@ -116,35 +125,51 @@ export default function Audit() {
       {tab === "requests" && (
         <>
           <div className="filter-bar">
-            <input
-              placeholder="Filter by model or status..."
-              value={reqFilter}
-              onChange={e => setReqFilter(e.target.value)}
+            <Select
+              value={fWorkspace}
+              onChange={setFWorkspace}
+              options={workspaceOptions}
             />
+            <input placeholder="User (id or email)" value={fUser} onChange={e => setFUser(e.target.value)} />
+            <input placeholder="Agent" value={fAgent} onChange={e => setFAgent(e.target.value)} />
+            <input placeholder="Model" value={fModel} onChange={e => setFModel(e.target.value)} />
+            <input placeholder="Status" value={fStatus} onChange={e => setFStatus(e.target.value)} style={{ width: 80 }} />
+            <DatePicker value={fSince} onChange={setFSince} placeholder="From" max={fUntil || undefined} />
+            <DatePicker value={fUntil} onChange={setFUntil} placeholder="To" min={fSince || undefined} />
+            <button className="btn btn-secondary" onClick={loadRequests}>Filter</button>
           </div>
 
           {reqLoading ? (
-            <SkeletonTable rows={6} cols={5} />
-          ) : filteredRequests.length === 0 ? (
+            <SkeletonTable rows={6} cols={9} />
+          ) : requests.length === 0 ? (
             <EmptyState
               title="No requests found"
-              description={reqFilter ? "Try adjusting your search filter." : "No API requests have been recorded yet."}
+              description="Try adjusting your filters or check back later."
             />
           ) : (
             <div className="table-container">
               <table>
                 <thead>
                   <tr>
+                    <th>Workspace</th>
+                    <th>User</th>
+                    <th>Agent</th>
                     <th>Model</th>
                     <th>Status</th>
                     <th>Duration (ms)</th>
+                    <th>Tokens (In/Out)</th>
                     <th>Error</th>
                     <th>Created</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredRequests.map(r => (
+                  {requests.map(r => (
                     <tr key={r.id} onClick={() => navigate(`/requests/${r.trace_id}`)} className="clickable">
+                      <td style={{ fontSize: "0.82rem" }}>{r.workspace_name || r.workspace_id || "-"}</td>
+                      <td style={{ fontSize: "0.82rem" }}>
+                        {r.user_name || r.user_email || r.user_id || "-"}
+                      </td>
+                      <td style={{ fontSize: "0.82rem" }}>{r.agent || "-"}</td>
                       <td>{r.model || "-"}</td>
                       <td>
                         <span className={`badge ${r.status_code >= 400 ? "badge-error" : "badge-success"}`}>
@@ -152,7 +177,12 @@ export default function Audit() {
                         </span>
                       </td>
                       <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.82rem" }}>{r.duration_ms}</td>
-                      <td style={{ color: r.error ? "var(--color-error)" : "var(--text-muted)" }}>{r.error || "-"}</td>
+                      <td style={{ fontFamily: "var(--font-mono)", fontSize: "0.82rem", color: "var(--text-secondary)" }}>
+                        {(r.input_tokens ?? 0).toLocaleString()} / {(r.output_tokens ?? 0).toLocaleString()}
+                      </td>
+                      <td style={{ color: r.error ? "var(--color-error)" : "var(--text-muted)", fontSize: "0.82rem", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {r.error || "-"}
+                      </td>
                       <td style={{ color: "var(--text-secondary)", fontSize: "0.82rem" }}>{r.created_at}</td>
                     </tr>
                   ))}

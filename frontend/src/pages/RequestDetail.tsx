@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { getObservabilityRequests, getRequestDetail } from "../api";
 import TraceTimeline from "../components/TraceTimeline";
 import { useWorkspace } from "../context/WorkspaceContext";
@@ -36,6 +36,7 @@ interface RequestDetailData {
 
 export default function RequestDetail() {
   const { currentWorkspaceId } = useWorkspace();
+  const navigate = useNavigate();
   const { traceId } = useParams<{ traceId: string }>();
   const [detail, setDetail] = useState<RequestDetailData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -58,9 +59,20 @@ export default function RequestDetail() {
     })();
   }, [currentWorkspaceId, traceId]);
 
+  const backBtn = (
+    <button
+      className="btn btn-secondary btn-sm"
+      onClick={() => navigate("/admin/audit")}
+      style={{ marginBottom: 12 }}
+    >
+      ← Back to Audit
+    </button>
+  );
+
   if (!currentWorkspaceId) {
     return (
       <div>
+        {backBtn}
         <div className="page-header">
           <h1 className="page-title">Request Detail</h1>
           <p className="page-subtitle">Trace: {traceId}</p>
@@ -73,6 +85,7 @@ export default function RequestDetail() {
   if (loading) {
     return (
       <div>
+        {backBtn}
         <div className="page-header">
           <h1 className="page-title">Request Detail</h1>
           <p className="page-subtitle">Trace: {traceId}</p>
@@ -88,6 +101,7 @@ export default function RequestDetail() {
   if (!detail) {
     return (
       <div>
+        {backBtn}
         <div className="page-header">
           <h1 className="page-title">Request Detail</h1>
           <p className="page-subtitle">Trace: {traceId}</p>
@@ -99,6 +113,7 @@ export default function RequestDetail() {
 
   return (
     <div>
+      {backBtn}
       <div className="page-header">
         <h1 className="page-title">Request Detail</h1>
         <p className="page-subtitle">Trace: {traceId}</p>
@@ -113,7 +128,14 @@ export default function RequestDetail() {
 
       <div className="detail-section">
         <h2 className="detail-section-title">Trace Waterfall</h2>
-        <TraceTimeline spans={detail.spans} />
+        {detail.spans.length > 0 ? (
+          <TraceTimeline spans={detail.spans} />
+        ) : (
+          <p style={{ color: "var(--text-muted)", fontSize: "0.85rem", padding: "12px 0" }}>
+            No trace spans recorded. Spans are kept in memory and may be lost after a server restart.
+            Tool calls below are persisted in the database.
+          </p>
+        )}
       </div>
 
       {detail.tool_calls.length > 0 && (

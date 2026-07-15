@@ -218,11 +218,20 @@ export interface ObservabilitySummary {
 export interface RequestLog {
   id: string;
   trace_id: string;
+  user_id: string | null;
+  workspace_id: string | null;
+  tenant_id?: string | null;
+  agent: string | null;
   model: string;
   status_code: number;
   duration_ms: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
   error: string;
   created_at: string;
+  user_email?: string | null;
+  user_name?: string | null;
+  workspace_name?: string | null;
 }
 
 export interface DailyToken {
@@ -247,10 +256,12 @@ export interface ErrorGroup {
 
 export interface QuotaInfo {
   max_tokens_per_day: number;
+  max_cost_per_day: number;
   max_cost_per_month: number;
   usage_today: number;
   tokens_used: number;
   cost_today: number;
+  cost_this_month: number;
 }
 
 export interface OTelConfig {
@@ -259,10 +270,11 @@ export interface OTelConfig {
   headers: Record<string, string>;
 }
 
-export async function getObservabilitySummary(wsId: string, userId?: string, since?: string): Promise<ObservabilitySummary> {
+export async function getObservabilitySummary(wsId: string, userId?: string, since?: string, until?: string): Promise<ObservabilitySummary> {
   const qs = new URLSearchParams();
   if (userId) qs.set("user_id", userId);
   if (since) qs.set("since", since);
+  if (until) qs.set("until", until);
   const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/summary?${qs}`);
   if (!resp.ok) throw new Error("Failed to fetch summary");
   return resp.json();
@@ -277,6 +289,32 @@ export async function getObservabilityRequests(wsId: string, params?: { limit?: 
   if (params?.since) qs.set("since", params.since);
   const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/requests?${qs}`);
   if (!resp.ok) throw new Error("Failed to fetch requests");
+  return resp.json();
+}
+
+export async function fetchAdminRequests(params?: {
+  workspace_id?: string;
+  user_id?: string;
+  agent?: string;
+  model?: string;
+  status?: number;
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<RequestLog[]> {
+  const qs = new URLSearchParams();
+  if (params?.workspace_id) qs.set("workspace_id", params.workspace_id);
+  if (params?.user_id) qs.set("user_id", params.user_id);
+  if (params?.agent) qs.set("agent", params.agent);
+  if (params?.model) qs.set("model", params.model);
+  if (params?.status) qs.set("status", String(params.status));
+  if (params?.since) qs.set("since", params.since);
+  if (params?.until) qs.set("until", params.until);
+  if (params?.limit) qs.set("limit", String(params.limit));
+  if (params?.offset) qs.set("offset", String(params.offset));
+  const resp = await apiFetch(`/api/v1/admin/requests?${qs}`);
+  if (!resp.ok) throw new Error("Failed to fetch admin requests");
   return resp.json();
 }
 
@@ -306,9 +344,10 @@ export async function getLatency(wsId: string, since?: string, until?: string, u
   return resp.json();
 }
 
-export async function getErrors(wsId: string, since?: string, userId?: string): Promise<ErrorGroup[]> {
+export async function getErrors(wsId: string, since?: string, until?: string, userId?: string): Promise<ErrorGroup[]> {
   const qs = new URLSearchParams();
   if (since) qs.set("since", since);
+  if (until) qs.set("until", until);
   if (userId) qs.set("user_id", userId);
   const resp = await apiFetch(`/api/v1/workspaces/${wsId}/observability/errors?${qs}`);
   if (!resp.ok) throw new Error("Failed to fetch errors");
@@ -484,6 +523,9 @@ export interface AdminWorkspace {
   // backends omit the field, in which case the workspace is treated as
   // active.
   archived?: boolean;
+  max_tokens_per_day: number;
+  max_cost_per_day: number;
+  max_cost_per_month: number;
   created_at: string;
   updated_at?: string;
 }
@@ -502,7 +544,7 @@ export async function fetchAdminWorkspaces(
 
 export async function createAdminWorkspace(
   name: string,
-  options?: { slug?: string; description?: string; icon?: string; max_tokens_per_day?: number; max_cost_per_month?: number },
+  options?: { slug?: string; description?: string; icon?: string; max_tokens_per_day?: number; max_cost_per_day?: number; max_cost_per_month?: number },
 ): Promise<AdminWorkspace> {
   const resp = await apiFetch("/api/v1/admin/workspaces", {
     method: "POST",
@@ -525,6 +567,7 @@ export async function updateAdminWorkspace(
     icon?: string;
     settings?: Record<string, unknown>;
     max_tokens_per_day?: number;
+    max_cost_per_day?: number;
     max_cost_per_month?: number;
   },
 ): Promise<AdminWorkspace> {
@@ -671,6 +714,7 @@ export interface WorkspaceUsage {
   total_tokens: number;
   total_cost: number;
   max_tokens_per_day: number;
+  max_cost_per_day: number;
   max_cost_per_month: number;
   tokens_used_today: number;
   cost_today: number;
@@ -1000,6 +1044,8 @@ export interface AgentConfig {
   subagents: AgentSubagent[];
   /** MCP server names (workspace-scoped) this agent is bound to. */
   mcp_servers: string[];
+  /** HITL (M29): agent-level tool permission rules. */
+  tool_permissions: ToolPermissionRule[];
   created_by: string;
   created_at: string;
   updated_at?: string;
@@ -1024,6 +1070,134 @@ export async function fetchAvailableTools(wsId: string): Promise<ToolInfo[]> {
   return resp.json();
 }
 
+// ── HITL (M29): Tool permission rules ──
+
+/** A single tool permission rule (allow / ask / deny). */
+export type ToolPermissionAction = "allow" | "ask" | "deny";
+
+/** Agent-level rule shape (stored as JSON on agent_configs.tool_permissions). */
+export interface ToolPermissionRule {
+  tool: string;
+  pattern: string | null;
+  action: ToolPermissionAction;
+}
+
+/** Workspace-level rule shape (stored in tool_permission_rules table). */
+export interface WorkspaceToolPermissionRule {
+  id: string;
+  workspace_id: string;
+  tool_name: string;
+  arg_pattern: string | null;
+  action: ToolPermissionAction;
+  created_by: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/** List workspace-level tool permission rules. */
+export async function listToolPermissionRules(
+  wsId: string,
+): Promise<WorkspaceToolPermissionRule[]> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/tool-permissions`);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to load tool permission rules");
+  }
+  return resp.json();
+}
+
+/** Create a workspace-level tool permission rule. */
+export async function createToolPermissionRule(
+  wsId: string,
+  data: {
+    tool_name: string;
+    arg_pattern?: string | null;
+    action: ToolPermissionAction;
+  },
+): Promise<WorkspaceToolPermissionRule> {
+  const resp = await apiFetch(`/api/v1/workspaces/${wsId}/tool-permissions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to create tool permission rule");
+  }
+  return resp.json();
+}
+
+/** Update a workspace-level tool permission rule. */
+export async function updateToolPermissionRule(
+  wsId: string,
+  ruleId: string,
+  data: {
+    tool_name?: string;
+    arg_pattern?: string | null;
+    action?: ToolPermissionAction;
+  },
+): Promise<WorkspaceToolPermissionRule> {
+  const resp = await apiFetch(
+    `/api/v1/workspaces/${wsId}/tool-permissions/${ruleId}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    },
+  );
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to update tool permission rule");
+  }
+  return resp.json();
+}
+
+/** Delete a workspace-level tool permission rule. */
+export async function deleteToolPermissionRule(
+  wsId: string,
+  ruleId: string,
+): Promise<void> {
+  const resp = await apiFetch(
+    `/api/v1/workspaces/${wsId}/tool-permissions/${ruleId}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok && resp.status !== 204) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to delete tool permission rule");
+  }
+}
+
+/** Resolve a pending HITL tool approval. */
+export async function resolveToolApproval(
+  sessionId: string,
+  callId: string,
+  data: { approved: boolean; always_allow?: boolean; reason?: string },
+): Promise<{
+  call_id: string;
+  session_id: string;
+  approved: boolean;
+  always_allow: boolean;
+  decided_by: string;
+}> {
+  const resp = await apiFetch(
+    `/api/v1/sessions/${sessionId}/tool-approvals/${callId}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        approved: data.approved,
+        always_allow: data.always_allow ?? false,
+        reason: data.reason ?? "",
+      }),
+    },
+  );
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to resolve tool approval");
+  }
+  return resp.json();
+}
+
 /** Which layer a skill originates from. */
 export type SkillLayer = "user" | "project" | "workspace";
 
@@ -1039,6 +1213,8 @@ export interface SkillInfo {
   editable: boolean;
   /** Owning workspace id (workspace layer only; null otherwise). */
   workspace_id: string | null;
+  /** Owner user id (workspace layer only; null for directory-layer skills). */
+  created_by: string | null;
 }
 
 /** List all skills available to this workspace. */
@@ -1137,6 +1313,7 @@ export async function createAgent(
     memory_config?: MemoryConfig | null;
     subagents?: { agent_id: string; name?: string | null }[];
     mcp_servers?: string[];
+    tool_permissions?: ToolPermissionRule[];
   },
 ): Promise<AgentConfig> {
   const payload: Record<string, unknown> = {
@@ -1155,6 +1332,7 @@ export async function createAgent(
   if (data.memory_config !== undefined) payload.memory_config = data.memory_config;
   if (data.subagents !== undefined) payload.subagents = data.subagents;
   if (data.mcp_servers !== undefined) payload.mcp_servers = data.mcp_servers;
+  if (data.tool_permissions !== undefined) payload.tool_permissions = data.tool_permissions;
   const resp = await apiFetch(`/api/v1/workspaces/${wsId}/agents`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1184,6 +1362,7 @@ export async function updateAgent(
     memory_config?: MemoryConfig | null;
     subagents?: { agent_id: string; name?: string | null }[];
     mcp_servers?: string[];
+    tool_permissions?: ToolPermissionRule[];
   },
 ): Promise<AgentConfig> {
   const payload: Record<string, unknown> = {};
@@ -1200,6 +1379,7 @@ export async function updateAgent(
   if (data.memory_config !== undefined) payload.memory_config = data.memory_config;
   if (data.subagents !== undefined) payload.subagents = data.subagents;
   if (data.mcp_servers !== undefined) payload.mcp_servers = data.mcp_servers;
+  if (data.tool_permissions !== undefined) payload.tool_permissions = data.tool_permissions;
   const resp = await apiFetch(`/api/v1/workspaces/${wsId}/agents/${agentId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -1229,6 +1409,8 @@ export interface MCPServerInfo {
   endpoint: string;
   transport: string;
   enabled: boolean;
+  /** Owner user id (null for legacy ownerless servers). */
+  created_by: string | null;
 }
 
 export interface MCPToolInfo {
@@ -1429,6 +1611,7 @@ export interface RestoreResponse {
   title: string;
   restored_from_session_id: string;
   restored_from_sequence: number;
+  mode: string;
 }
 
 export async function listCheckpoints(
@@ -1449,9 +1632,10 @@ export async function restoreCheckpoint(
   wsId: string,
   sessionId: string,
   sequence: number,
+  mode: "fork" | "in_place" = "fork",
 ): Promise<RestoreResponse> {
   const resp = await apiFetch(
-    `/api/v1/workspaces/${wsId}/sessions/${sessionId}/checkpoints/${sequence}/restore`,
+    `/api/v1/workspaces/${wsId}/sessions/${sessionId}/checkpoints/${sequence}/restore?mode=${mode}`,
     { method: "POST" },
   );
   if (!resp.ok) {
@@ -1535,4 +1719,124 @@ export async function fetchPermissions(): Promise<PermissionResponse> {
     throw new Error(err.error?.message || "Failed to fetch permissions");
   }
   return resp.json();
+}
+
+// ── SSO (Phase 1 — SSO authentication) ──────────────────────────────────
+
+export type SsoProviderType = "google" | "microsoft" | "custom_oidc";
+
+/** Public SSO provider info — for rendering login buttons. */
+export interface SsoProviderInfo {
+  id: string;
+  name: string;
+  slug: string;
+  provider_type: SsoProviderType;
+}
+
+/** Full SSO provider config — for admin management. Never includes
+ * ``client_secret`` in responses. */
+export interface SsoProviderConfig {
+  id: string;
+  tenant_id: string | null;
+  name: string;
+  slug: string;
+  provider_type: SsoProviderType;
+  client_id: string;
+  auto_provision: boolean;
+  default_role: string;
+  enabled: boolean;
+  ms_tenant: string | null;
+  scopes: string[];
+  authorize_url: string | null;
+  token_url: string | null;
+  userinfo_url: string | null;
+  issuer_url: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface UserIdentityInfo {
+  id: string;
+  provider_id: string;
+  provider_name: string;
+  provider_type: SsoProviderType;
+  email_at_provider: string | null;
+  created_at: string | null;
+}
+
+/** List enabled SSO providers (public, no auth required). */
+export async function fetchSsoProviders(): Promise<SsoProviderInfo[]> {
+  const resp = await apiFetch("/api/v1/auth/sso/providers");
+  if (!resp.ok) return [];
+  const data = await resp.json();
+  return data.providers || [];
+}
+
+/** Admin: list all SSO providers for the current tenant (+ globals). */
+export async function listSsoProviders(): Promise<SsoProviderConfig[]> {
+  const resp = await apiFetch("/api/v1/admin/sso-providers");
+  if (!resp.ok) throw new Error("Failed to list SSO providers");
+  return resp.json();
+}
+
+/** Admin: create a new SSO provider. */
+export async function createSsoProvider(
+  config: Omit<SsoProviderConfig, "id" | "tenant_id" | "created_at" | "updated_at"> & {
+    client_secret: string;
+    tenant_id?: string | null;
+  }
+): Promise<SsoProviderConfig> {
+  const resp = await apiFetch("/api/v1/admin/sso-providers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to create SSO provider");
+  }
+  return resp.json();
+}
+
+/** Admin: update an SSO provider. */
+export async function updateSsoProvider(
+  id: string,
+  updates: Partial<SsoProviderConfig> & { client_secret?: string }
+): Promise<SsoProviderConfig> {
+  const resp = await apiFetch(`/api/v1/admin/sso-providers/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to update SSO provider");
+  }
+  return resp.json();
+}
+
+/** Admin: delete an SSO provider. */
+export async function deleteSsoProvider(id: string): Promise<void> {
+  const resp = await apiFetch(`/api/v1/admin/sso-providers/${id}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) throw new Error("Failed to delete SSO provider");
+}
+
+/** List the current user's linked SSO identities. */
+export async function fetchMyIdentities(): Promise<UserIdentityInfo[]> {
+  const resp = await apiFetch("/api/v1/me/identities");
+  if (!resp.ok) throw new Error("Failed to fetch identities");
+  const data = await resp.json();
+  return data.identities || [];
+}
+
+export async function unlinkMyIdentity(identityId: string): Promise<void> {
+  const resp = await apiFetch(`/api/v1/me/identities/${identityId}`, {
+    method: "DELETE",
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error?.message || "Failed to unlink identity");
+  }
 }

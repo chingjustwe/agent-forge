@@ -12,6 +12,7 @@ import {
   fetchAvailableSkills,
   fetchAvailableTools,
   fetchModels,
+  fetchPermissions,
   getCurrentUser,
   GuardrailInfo,
   HookInfo,
@@ -153,8 +154,10 @@ export default function Agents() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<AgentFormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
-  // 向导当前步（plan §3.2）
+  // 向导当前步（plan §3.2）：自由导航，不强制顺序
   const [step, setStep] = useState(0);
+  // 已访问过的步骤，用于步骤条显示对勾进度（可随时跳到任意步）
+  const [visited, setVisited] = useState<Set<number>>(new Set([0]));
 
   // Delete confirmation state
   const [deleteTarget, setDeleteTarget] = useState<AgentConfig | null>(null);
@@ -180,6 +183,8 @@ export default function Agents() {
   const [defaultModel, setDefaultModel] = useState<string>("");
 
   const isTenantAdmin = user?.role === "tenant_admin";
+  // Permission-based write check (members now have agents:write too).
+  const [canWrite, setCanWrite] = useState(false);
 
   // Agents eligible to be used as subagents: every agent in the workspace
   // except the one currently being edited (self-reference is not allowed).
@@ -188,6 +193,14 @@ export default function Agents() {
   const canManage =
     currentRole === "workspace_admin" ||
     currentRole === "tenant_admin";
+
+  /** Whether the current user may edit/delete a specific agent (ownership). */
+  function canEditAgent(agent: AgentConfig): boolean {
+    // workspace_admin / tenant_admin can edit any agent.
+    if (canManage) return true;
+    // Otherwise the user must be the owner.
+    return agent.created_by === (user?.id || "");
+  }
 
   async function refresh() {
     if (!currentWorkspaceId) return;
@@ -210,6 +223,9 @@ export default function Agents() {
 
   useEffect(() => {
     getCurrentUser().then(setUser).catch(() => {});
+    fetchPermissions()
+      .then(p => setCanWrite(p.permissions.includes("*") || p.permissions.includes("agents:write")))
+      .catch(() => setCanWrite(false));
   }, []);
 
   // 拉取厂商动态模型列表（后端已在启动时从 /v1/models 缓存）。
@@ -273,6 +289,7 @@ export default function Agents() {
     setForm({ ...EMPTY_FORM, model: defaultModel || "deepseek-v4-flash" });
     setEditingId(null);
     setStep(0);
+    setVisited(new Set([0]));
     setFormModalOpen(true);
   }
 
@@ -297,10 +314,12 @@ export default function Agents() {
     });
     setEditingId(agent.id);
     setStep(0);
+    setVisited(new Set([0]));
     setFormModalOpen(true);
   }
 
-  // 每步校验（plan §3.4）：Step 0 Name 必填；Step 1 temperature 范围 + maxTokens 正整数（非阻断式警告）
+  // ── 创建流程：标准分步向导（Next/Back/Create，逐步校验） ──
+  // 每步校验：Step 0 Name 必填；Step 1 temperature 范围 + maxTokens 正整数。
   function validateStep(s: number): boolean {
     if (s === 0) {
       if (!form.name.trim()) {
@@ -333,9 +352,40 @@ export default function Agents() {
   }
 
   async function handleWizardSubmit() {
-    // 最后一步提交前再校验一次当前步
     if (!validateStep(step)) return;
     await handleFormSubmit();
+  }
+
+  // ── 编辑流程：自由导航（随时跳任意步），底部始终 Cancel + Update Agent ──
+  // 自由导航：随时跳到任意步骤，并记录已访问（用于步骤条对勾）。
+  function goToStep(s: number) {
+    if (s < 0 || s >= WIZARD_STEPS.length) return;
+    setStep(s);
+    setVisited(prev => {
+      if (prev.has(s)) return prev;
+      const next = new Set(prev);
+      next.add(s);
+      return next;
+    });
+  }
+
+  // 整体校验（编辑提交时执行）：Name 必填；temperature 范围 + maxTokens 正整数。
+  function validateForm(): boolean {
+    if (!form.name.trim()) {
+      toast.error("Validation error", "Name is required");
+      return false;
+    }
+    const t = parseFloat(form.temperature);
+    if (!isNaN(t) && (t < 0 || t > 2)) {
+      toast.error("Validation error", "Temperature must be between 0 and 2");
+      return false;
+    }
+    const mt = parseInt(form.maxTokens, 10);
+    if (form.maxTokens.trim() && (isNaN(mt) || mt <= 0)) {
+      toast.error("Validation error", "Max Tokens must be a positive integer");
+      return false;
+    }
+    return true;
   }
 
   function openDeleteConfirm(agent: AgentConfig) {
@@ -344,10 +394,7 @@ export default function Agents() {
 
   async function handleFormSubmit() {
     if (!currentWorkspaceId) return;
-    if (!form.name.trim()) {
-      toast.error("Validation error", "Name is required");
-      return;
-    }
+    if (!validateForm()) return;
     setSaving(true);
     try {
       const payload = formToPayload(form);
@@ -403,7 +450,7 @@ export default function Agents() {
           <h1 className="page-title">Agents</h1>
           <p className="page-subtitle">Manage agent configurations bound to this workspace</p>
         </div>
-        {canManage && (
+        {canWrite && (
           <button className="btn btn-primary" onClick={openCreateModal}>
             + New Agent
           </button>
@@ -417,8 +464,8 @@ export default function Agents() {
       {!error && !loading && agents.length === 0 && (
         <EmptyState
           title="No agents yet"
-          description={canManage ? "Create your first agent to get started." : "No agents have been configured for this workspace."}
-          action={canManage ? { label: "+ New Agent", onClick: openCreateModal } : undefined}
+          description={canWrite ? "Create your first agent to get started." : "No agents have been configured for this workspace."}
+          action={canWrite ? { label: "+ New Agent", onClick: openCreateModal } : undefined}
         />
       )}
 
@@ -435,7 +482,7 @@ export default function Agents() {
                 <div className="agent-card-header">
                   <div className="agent-card-title-row">
                     <h3 className="agent-card-name">{agent.name}</h3>
-                    {canManage && (
+                    {canEditAgent(agent) && (
                       <Dropdown items={[
                         { label: "Edit", onClick: () => startEdit(agent) },
                         ...(isTenantAdmin ? [{ label: "Copy to...", onClick: () => openCopyModal(agent) }] : []),
@@ -477,28 +524,48 @@ export default function Agents() {
         title={editingId ? "Edit Agent" : "Create Agent"}
         width="lg"
         footer={
-          <>
-            <button className="btn btn-secondary" onClick={() => setFormModalOpen(false)} disabled={saving}>
-              Cancel
-            </button>
-            {step > 0 && (
-              <button className="btn btn-secondary" onClick={handleBack} disabled={saving}>
-                ← Back
+          editingId ? (
+            // 编辑：自由导航，底部始终 Cancel + Update Agent
+            <>
+              <button className="btn btn-secondary" onClick={() => setFormModalOpen(false)} disabled={saving}>
+                Cancel
               </button>
-            )}
-            {step < LAST_STEP ? (
-              <button className="btn btn-primary" onClick={handleNext} disabled={saving}>
-                Next →
+              <button className="btn btn-primary" onClick={handleFormSubmit} disabled={saving}>
+                {saving ? "Saving..." : "Update Agent"}
               </button>
-            ) : (
-              <button className="btn btn-primary" onClick={handleWizardSubmit} disabled={saving}>
-                {saving ? "Saving..." : editingId ? "Update Agent" : "Create Agent"}
+            </>
+          ) : (
+            // 创建：标准分步向导（Back / Next / Create）
+            <>
+              <button className="btn btn-secondary" onClick={() => setFormModalOpen(false)} disabled={saving}>
+                Cancel
               </button>
-            )}
-          </>
+              {step > 0 && (
+                <button className="btn btn-secondary" onClick={handleBack} disabled={saving}>
+                  ← Back
+                </button>
+              )}
+              {step < LAST_STEP ? (
+                <button className="btn btn-primary" onClick={handleNext} disabled={saving}>
+                  Next →
+                </button>
+              ) : (
+                <button className="btn btn-primary" onClick={handleWizardSubmit} disabled={saving}>
+                  {saving ? "Saving..." : "Create Agent"}
+                </button>
+              )}
+            </>
+          )
         }
       >
-        <Stepper steps={WIZARD_STEPS} current={step} onJump={setStep} />
+        <Stepper
+          steps={WIZARD_STEPS}
+          current={step}
+          onJump={editingId ? goToStep : (s) => { if (s < step) setStep(s); }}
+          visited={editingId ? [...visited] : undefined}
+          freeNav={!!editingId}
+          disabled={saving}
+        />
         <div className="wizard-body">
           {step === 0 && (
             <>

@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from "react";
+import { useEffect, useState, useRef, useCallback, useMemo } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   AgentConfig,
@@ -273,6 +273,26 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
   const [checkpointLoading, setCheckpointLoading] = useState(false);
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
   const [restoringSeq, setRestoringSeq] = useState<number | null>(null);
+  const [restoreMode, setRestoreMode] = useState<"fork" | "in_place">("fork");
+
+  // Map user message ID → checkpoint sequence, for inline restore buttons.
+  // The backend deduplicates checkpoints to one per user turn (sorted by
+  // sequence ascending), so checkpoint[i] corresponds to the (i+1)th user
+  // message in the conversation.
+  const userMsgCheckpointMap = useMemo(() => {
+    const sortedCps = [...checkpoints].sort((a, b) => a.sequence - b.sequence);
+    const map = new Map<string, number>();
+    let userIdx = 0;
+    for (const m of messages) {
+      if (m.role === "user") {
+        if (userIdx < sortedCps.length) {
+          map.set(m.id, sortedCps[userIdx].sequence);
+        }
+        userIdx++;
+      }
+    }
+    return map;
+  }, [checkpoints, messages]);
 
   async function loadSession() {
     if (!currentWorkspaceId || isNew) return;
@@ -282,6 +302,13 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
       setSession(data.session);
       setMessages(data.messages);
       setTitleDraft(data.session.title);
+      // Load checkpoints in parallel for inline restore buttons.
+      try {
+        const cps = await listCheckpoints(currentWorkspaceId, sessionId);
+        setCheckpoints(cps);
+      } catch {
+        // Non-fatal: inline buttons just won't appear.
+      }
     } catch (e: unknown) {
       toast.error("Load failed", e instanceof Error ? e.message : "Failed to load session");
     } finally {
@@ -311,6 +338,12 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
     loadSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentWorkspaceId, sessionId, isNew]);
+
+  // Focus the input on initial page load so the user can start typing
+  // immediately without clicking the textarea.
+  useEffect(() => {
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
 
   // Load workspace agents for the agent selector.
   useEffect(() => {
@@ -370,6 +403,8 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
     ]);
 
     let assistantContent = "";
+    let streamHadError = false;
+    let streamWasTruncated = false;
     const asstTempId = `tmp-asst-${Date.now()}`;
     setMessages(prev => [
       ...prev,
@@ -458,12 +493,72 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
                     return { ...s, result: output, error, status: "done" as const };
                   }
                 }
+                // HITL: also resolve the nearest pending approval step for
+                // the same tool name so the timeline reflects the decision.
+                if (
+                  s.kind === "tool_approval" &&
+                  s.status === "awaiting_approval" &&
+                  s.name === name
+                ) {
+                  return {
+                    ...s,
+                    status: "resolved" as const,
+                    result: output,
+                    error,
+                  };
+                }
                 return s;
               });
               return { ...m, steps };
             })
           );
+        } else if (event.type === "tool_awaiting_approval") {
+          // HITL: a tool call requires user approval. Append an approval
+          // step to the timeline; the ToolApproval component renders the
+          // approve/deny buttons and calls resolveToolApproval().
+          const { call_id, tool_name, args, reason } = event.data as {
+            call_id: string;
+            tool_name: string;
+            args: unknown;
+            reason?: string;
+          };
+          setMessages(prev =>
+            prev.map(m =>
+              m.id === asstTempId
+                ? {
+                    ...m,
+                    steps: [
+                      ...(m.steps ?? []),
+                      {
+                        kind: "tool_approval" as const,
+                        id: call_id,
+                        name: tool_name,
+                        args,
+                        reason: reason ?? "",
+                        status: "awaiting_approval" as const,
+                      },
+                    ],
+                  }
+                : m
+            )
+          );
+        } else if (event.type === "status") {
+          // Detect truncation: finish_reason="length" means the reply was
+          // cut off by max_tokens. Append a truncated step to the timeline
+          // so the user sees it in real-time (not just after page refresh).
+          const finishReason = (event.data as { finish_reason?: string })?.finish_reason;
+          if (finishReason === "length") {
+            streamWasTruncated = true;
+            setMessages(prev =>
+              prev.map(m =>
+                m.id === asstTempId
+                  ? { ...m, steps: [...(m.steps ?? []), { kind: "truncated" as const, content: "" }] }
+                  : m
+              )
+            );
+          }
         } else if (event.type === "error") {
+          streamHadError = true;
           const errMsg = (event.data as { message?: string })?.message || "Unknown error";
           setMessages(prev =>
             prev.map(m =>
@@ -473,6 +568,20 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
           toast.error("Chat error", errMsg);
           break;
         }
+      }
+
+      // Empty reply detection: stream completed without error but agent
+      // produced no text content. Skip if truncated — the truncated timeline
+      // node already explains why the response is empty/incomplete.
+      if (!streamHadError && !streamWasTruncated && !assistantContent.trim()) {
+        setMessages(prev =>
+          prev.map(m =>
+            m.id === asstTempId
+              ? { ...m, content: "Agent returned no response. This may be a temporary issue — please try again." }
+              : m
+          )
+        );
+        toast.warning("Empty response", "The agent returned no content. Please try sending your message again.");
       }
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : "Network error";
@@ -484,6 +593,31 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
       toast.error("Chat error", errMsg);
     } finally {
       setStreaming(false);
+      // Auto-focus the input so the user can immediately type the next
+      // message without clicking. Use rAF so the focus happens after the
+      // re-render that re-enables the textarea.
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      // Reload both messages (with server-assigned IDs) and checkpoints
+      // so the inline button map (which keys on m.id) works correctly.
+      // The temp messages from the stream are replaced by server messages
+      // with real IDs — without this, the last user bubble's temp ID
+      // won't match any checkpoint, so no inline buttons appear.
+      if (session?.id || justCreatedIdRef.current) {
+        const sid = session?.id || justCreatedIdRef.current || "";
+        if (sid && currentWorkspaceId) {
+          try {
+            const [data, cps] = await Promise.all([
+              getSession(currentWorkspaceId, sid),
+              listCheckpoints(currentWorkspaceId, sid),
+            ]);
+            setMessages(data.messages);
+            setSession(data.session);
+            setCheckpoints(cps);
+          } catch {
+            // Non-fatal: inline buttons just won't appear.
+          }
+        }
+      }
     }
   }, [input, streaming, currentWorkspaceId, session, messages, toast, selectedAgentName, isNew, user, navigate]);
 
@@ -535,15 +669,48 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
     setRestoringSeq(sequence);
     setCheckpointError(null);
     try {
-      const result = await restoreCheckpoint(currentWorkspaceId, session.id, sequence);
-      toast.success("Restored", `Branch created at #${sequence}`);
-      setShowCheckpointModal(false);
-      navigate(`/sessions/${result.session_id}`);
+      const result = await restoreCheckpoint(currentWorkspaceId, session.id, sequence, restoreMode);
+      if (restoreMode === "in_place") {
+        toast.success("Restored", `Rolled back to checkpoint #${sequence}`);
+        setShowCheckpointModal(false);
+        await loadSession();
+      } else {
+        toast.success("Restored", `Branch created at #${sequence}`);
+        setShowCheckpointModal(false);
+        navigate(`/sessions/${result.session_id}`);
+      }
     } catch (e: unknown) {
       setCheckpointError(e instanceof Error ? e.message : "Failed to restore checkpoint");
     } finally {
       setRestoringSeq(null);
     }
+  }
+
+  // Inline restore from a user message bubble.
+  async function handleInlineRestore(sequence: number, mode: "fork" | "in_place") {
+    if (!session || !currentWorkspaceId) return;
+    setRestoringSeq(sequence);
+    try {
+      const result = await restoreCheckpoint(currentWorkspaceId, session.id, sequence, mode);
+      if (mode === "in_place") {
+        toast.success("Restored", `Rolled back to checkpoint #${sequence}`);
+        await loadSession();
+      } else {
+        toast.success("Forked", `New session from checkpoint #${sequence}`);
+        navigate(`/sessions/${result.session_id}`);
+      }
+    } catch (e: unknown) {
+      toast.error("Restore failed", e instanceof Error ? e.message : "Failed to restore");
+    } finally {
+      setRestoringSeq(null);
+    }
+  }
+
+  function handleCopyMessage(content: string) {
+    navigator.clipboard.writeText(content).then(
+      () => toast.success("Copied", "Message copied to clipboard"),
+      () => toast.error("Copy failed", "Could not copy to clipboard"),
+    );
   }
 
   // P3-5: open the share modal -- load current shares + workspace members.
@@ -762,16 +929,100 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
                 <p style={{ fontSize: "0.95rem" }}>No messages yet. Send the first message below.</p>
               </div>
             )}
-            {messages.map(m => (
-              <div key={m.id} className={`chat-message chat-message-${m.role}`}>
-                <div className={`chat-bubble chat-bubble-${m.role}`}>
-                  {m.content || (m.role === "assistant" && streaming ? "..." : "")}
+            {messages.map(m => {
+              const isLiveAssistant = m.role === "assistant" && m.steps && m.steps.length > 0;
+              const cpSeq = m.role === "user" ? userMsgCheckpointMap.get(m.id) : undefined;
+              return (
+                <div key={m.id} className={`chat-message chat-message-${m.role}`}>
+                  {m.role === "system" ? (
+                    <div className="chat-bubble chat-bubble-system">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="1 4 1 10 7 10" />
+                        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                      </svg>
+                      <span>{m.content}</span>
+                    </div>
+                  ) : isLiveAssistant ? (
+                    <div className="chat-assistant-turn">
+                      <AgentSteps
+                        steps={m.steps!}
+                        streaming={streaming}
+                        content={m.content}
+                        sessionId={sessionId}
+                      />
+                      {m.content && (
+                        <div className="chat-bubble chat-bubble-assistant chat-bubble-final">
+                          {m.content}
+                        </div>
+                      )}
+                      {!m.content && streaming && (
+                        <div className="chat-bubble chat-bubble-assistant chat-bubble-streaming">
+                          <span className="chat-typing-dots">
+                            <span /><span /><span />
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className={`chat-bubble chat-bubble-${m.role}`}>
+                      {m.content || (m.role === "assistant" && streaming ? (
+                        <span className="chat-typing-dots">
+                          <span /><span /><span />
+                        </span>
+                      ) : "")}
+                    </div>
+                  )}
+                  {m.role === "user" && cpSeq !== undefined && (
+                    <div className="message-actions">
+                      <button
+                        className="message-action-btn"
+                        onClick={() => handleCopyMessage(m.content)}
+                        title="Copy message"
+                        disabled={restoringSeq !== null}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                        </svg>
+                      </button>
+                      <button
+                        className="message-action-btn"
+                        onClick={() => handleInlineRestore(cpSeq, "fork")}
+                        title="Fork new session from here"
+                        disabled={restoringSeq !== null}
+                      >
+                        {restoringSeq === cpSeq ? (
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="12" y1="2" x2="12" y2="6" />
+                            <line x1="12" y1="18" x2="12" y2="22" />
+                            <line x1="4.93" y1="4.93" x2="7.76" y2="7.76" />
+                            <line x1="16.24" y1="16.24" x2="19.07" y2="19.07" />
+                          </svg>
+                        ) : (
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <line x1="6" y1="3" x2="6" y2="15" />
+                            <circle cx="18" cy="6" r="3" />
+                            <circle cx="6" cy="18" r="3" />
+                            <path d="M18 9a9 9 0 0 1-9 9" />
+                          </svg>
+                        )}
+                      </button>
+                      <button
+                        className="message-action-btn message-action-restore"
+                        onClick={() => handleInlineRestore(cpSeq, "in_place")}
+                        title="Restore in place (rewind to here)"
+                        disabled={restoringSeq !== null}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <polyline points="1 4 1 10 7 10" />
+                          <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
                 </div>
-                {m.role === "assistant" && m.steps && m.steps.length > 0 && (
-                  <AgentSteps steps={m.steps} streaming={streaming} />
-                )}
-              </div>
-            ))}
+              );
+            })}
             <div ref={messagesEndRef} />
           </div>
 
@@ -927,9 +1178,44 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
         title="Checkpoint History"
         width="md"
       >
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", marginBottom: 16 }}>
-          View and restore from previous conversation checkpoints. Restoring creates a new branch session.
+        {/* Mode selector */}
+        <div className="checkpoint-mode-toggle" style={{ display: "flex", gap: 0, marginBottom: 12, borderRadius: "var(--radius-md)", overflow: "hidden", border: "1px solid var(--border-color)" }}>
+          <button
+            type="button"
+            className={`checkpoint-mode-btn ${restoreMode === "fork" ? "active" : ""}`}
+            onClick={() => setRestoreMode("fork")}
+            disabled={restoringSeq !== null}
+          >
+            Fork new session
+          </button>
+          <button
+            type="button"
+            className={`checkpoint-mode-btn ${restoreMode === "in_place" ? "active" : ""}`}
+            onClick={() => setRestoreMode("in_place")}
+            disabled={restoringSeq !== null}
+          >
+            Restore in place
+          </button>
+        </div>
+
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.82rem", marginBottom: 12 }}>
+          {restoreMode === "fork"
+            ? "Creates a new branched session from the selected checkpoint. The original session is not modified."
+            : "Rolls back the current session to the selected checkpoint. Checkpoints after this point will be deleted."}
         </p>
+
+        {restoreMode === "in_place" && (
+          <div className="alert alert-warning" style={{ margin: "0 0 12px", display: "flex", gap: 8, alignItems: "flex-start" }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 1 }}>
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+            <span style={{ fontSize: "0.82rem" }}>
+              This will permanently delete messages and checkpoints after the selected point. This cannot be undone.
+            </span>
+          </div>
+        )}
 
         {checkpointError && <div className="alert alert-error" style={{ margin: "0 0 12px" }}>{checkpointError}</div>}
 
@@ -981,12 +1267,16 @@ function SessionDetail({ sessionId }: { sessionId: string }) {
                   )}
                 </div>
                 <button
-                  className="btn btn-primary btn-sm"
+                  className={`btn btn-sm ${restoreMode === "in_place" ? "btn-danger" : "btn-primary"}`}
                   onClick={() => handleRestore(cp.sequence)}
                   disabled={restoringSeq !== null}
-                  title="Restore from this checkpoint"
+                  title={restoreMode === "in_place" ? "Roll back to this checkpoint" : "Branch from this checkpoint"}
                 >
-                  {restoringSeq === cp.sequence ? "Restoring..." : "Continue from here"}
+                  {restoringSeq === cp.sequence
+                    ? "Restoring..."
+                    : restoreMode === "in_place"
+                      ? "Restore to here"
+                      : "Continue from here"}
                 </button>
               </div>
             ))}
