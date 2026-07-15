@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage";
+import SsoCallback from "./pages/SsoCallback";
 import InviteRegister from "./pages/InviteRegister";
 import Sessions from "./pages/Sessions";
 import AdminPage from "./pages/AdminPage";
@@ -16,6 +17,8 @@ import Agents from "./pages/Agents";
 import ApiKeys from "./pages/ApiKeys";
 import AdminMCP from "./pages/AdminMCP";
 import AdminSkills from "./pages/AdminSkills";
+import AdminSso from "./pages/AdminSso";
+import Account from "./pages/Account";
 import Layout from "./components/Layout";
 import { ToastProvider } from "./components/Toast";
 import { WorkspaceProvider } from "./context/WorkspaceContext";
@@ -83,6 +86,7 @@ function App() {
         <Routes>
           <Route path="/invite" element={<InviteRegister />} />
           <Route path="/login" element={token ? <Navigate to="/" replace /> : <LoginPage />} />
+          <Route path="/callback" element={<SsoCallback />} />
           <Route path="/" element={<Navigate to="/sessions" replace />} />
           <Route path="/sessions" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
           <Route path="/sessions/:sessionId" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
@@ -91,6 +95,7 @@ function App() {
           <Route path="/admin/users" element={<ProtectedRoute><AdminUsers /></ProtectedRoute>} />
           <Route path="/admin/workspaces" element={<ProtectedRoute><AdminWorkspaces /></ProtectedRoute>} />
           <Route path="/admin/audit" element={<ProtectedRoute><Audit /></ProtectedRoute>} />
+          <Route path="/admin/sso" element={<ProtectedRoute><AdminSso /></ProtectedRoute>} />
           <Route path="/analytics" element={<ProtectedRoute><Analytics /></ProtectedRoute>} />
           <Route path="/usage" element={<Navigate to="/analytics" replace />} />
           <Route path="/dashboard" element={<Navigate to="/analytics" replace />} />
@@ -105,6 +110,7 @@ function App() {
           <Route path="/api-keys" element={<ProtectedRoute><ApiKeys /></ProtectedRoute>} />
           <Route path="/mcp" element={<ProtectedRoute><AdminMCP /></ProtectedRoute>} />
           <Route path="/skills" element={<ProtectedRoute><AdminSkills /></ProtectedRoute>} />
+          <Route path="/account" element={<ProtectedRoute><Account /></ProtectedRoute>} />
         </Routes>
       </WorkspaceProvider>
     </ToastProvider>

@@ -45,5 +45,12 @@ class Settings(BaseSettings):
     # ~/.agents/skills; override for container deployments via a mounted path.
     skill_user_dir: str = str(Path.home() / ".agents" / "skills")
 
+    # ── SSO (Phase 1 — SSO authentication) ──
+    # httpOnly cookie name holding the OIDC ``state`` parameter for CSRF
+    # protection during the authorization-code flow.
+    sso_state_cookie_name: str = "sso_state"
+    # State cookie TTL in seconds (30 minutes).
+    sso_state_ttl_seconds: int = 1800
+
 
 settings = Settings()

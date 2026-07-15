@@ -52,6 +52,7 @@ PUBLIC_ROUTES = frozenset({
     "GET:/api/v1/auth/login",
     "GET:/api/v1/auth/callback",
     "GET:/api/v1/auth/invite",
+    "GET:/api/v1/auth/sso/providers",
     "POST:/api/v1/auth/login",
     "POST:/api/v1/auth/register",
     "POST:/api/v1/auth/accept-invite",

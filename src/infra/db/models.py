@@ -460,3 +460,89 @@ class ModelPricing(Base):
     synced_at: Mapped[datetime] = mapped_column(
         DateTime, default=_now, server_default=text("CURRENT_TIMESTAMP")
     )
+
+
+class SsoProvider(Base):
+    """SSO/OIDC provider configuration (Phase 1 — SSO authentication).
+
+    Supports built-in providers (Google, Microsoft) with auto-filled URLs
+    and custom OIDC providers with manually-specified endpoints.
+    ``tenant_id`` NULL = global provider available to all tenants.
+    """
+
+    __tablename__ = "sso_providers"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+
+    #租户隔离：NULL = 全局 provider（所有租户可用）
+    tenant_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("tenants.id"), nullable=True, index=True
+    )
+
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    slug: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    # Provider 类型：google | microsoft | custom_oidc
+    provider_type: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    # OAuth2 凭据
+    client_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    client_secret: Mapped[str] = mapped_column(String(500), nullable=False)
+
+    # OIDC endpoints（google/microsoft 自动从预设填充；custom_oidc 手填）
+    authorize_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    token_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    userinfo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    issuer_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Phase 2: JWKS URI for ID Token verification (auto-filled via discovery)
+    jwks_uri: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    scopes: Mapped[list] = mapped_column(
+        JSON, default=lambda: ["openid", "email", "profile"]
+    )
+
+    # Microsoft 专用：tenant 占位（common / organizations / 具体 tenant ID）
+    ms_tenant: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # 行为配置
+    auto_provision: Mapped[int] = mapped_column(Integer, default=1)
+    default_role: Mapped[str] = mapped_column(String(32), default="member")
+    enabled: Mapped[int] = mapped_column(Integer, default=1)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, onupdate=_now
+    )
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "slug", name="uq_sso_providers_tenant_slug"),
+    )
+
+
+class UserIdentity(Base):
+    """External identity linkage — associates a local user with an SSO
+    provider's ``sub`` claim. One user may have multiple identities
+    (e.g. Google + company OIDC).
+    """
+
+    __tablename__ = "user_identities"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("users.id"), nullable=False, index=True
+    )
+    provider_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("sso_providers.id"), nullable=False
+    )
+    # IdP 返回的 "sub" claim — 外部身份的唯一标识
+    provider_subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    # IdP 返回的 email（审计用，可能变化）
+    email_at_provider: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_id", "provider_subject",
+            name="uq_user_identities_provider_subject",
+        ),
+    )

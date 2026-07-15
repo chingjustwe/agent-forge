@@ -139,6 +139,16 @@ function SkillsIcon() {
   );
 }
 
+function SsoIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      <circle cx="12" cy="11" r="2.5" />
+      <path d="M12 13.5v3" />
+    </svg>
+  );
+}
+
 function SunIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -208,6 +218,15 @@ function SignOutIcon() {
   );
 }
 
+function UserIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </svg>
+  );
+}
+
 // ── Nav item type ─────────────────────────────────────────────────────────
 
 interface NavItem {
@@ -250,6 +269,7 @@ const SECTIONS: NavSection[] = [
       { path: "/admin/users", label: "Users", icon: <UsersIcon /> },
       { path: "/admin/observability", label: "Observability", icon: <ObservabilityIcon /> },
       { path: "/admin/audit", label: "Audit", icon: <AuditLogIcon /> },
+      { path: "/admin/sso", label: "SSO", icon: <SsoIcon /> },
     ],
   },
 ];
@@ -502,6 +522,10 @@ export default function Layout({ children }: { children: React.ReactNode }) {
             <SignOutIcon />
             <span>Sign out</span>
           </button>
+          <Link to="/account" className="sidebar-logout" style={{ textDecoration: "none" }}>
+            <UserIcon />
+            <span>Account</span>
+          </Link>
         </div>
       </aside>
 
