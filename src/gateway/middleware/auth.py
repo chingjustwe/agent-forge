@@ -16,6 +16,7 @@ from src.infra.db.models import ApiKey, User, Workspace
 # ``/accept`` route is NOT matched here and still requires a Bearer token.
 PUBLIC_PATH_PREFIXES = (
     "GET:/api/v1/invitations/",
+    "GET:/api/v1/auth/sso/",
 )
 
 
@@ -86,9 +87,16 @@ async def _authenticate_api_key(raw_key: str) -> dict | None:
 
         return {
             "sub": api_key.created_by,
+            "id": api_key.created_by,
             "tenant_id": creator.tenant_id,
             "email": creator.email,
-            "role": creator.role,
+            # Virtual role — the key does NOT inherit the creator's role.
+            # require_permission checks api_key_scopes instead of role for
+            # authorization. The creator's id is still used for workspace
+            # membership and ownership checks (so a key minted by a member
+            # can edit that member's own resources, but a key minted by an
+            # admin inherits admin-level workspace_role for ownership).
+            "role": "api_key",
             "auth_method": "api_key",
             "api_key_id": api_key.id,
             "api_key_scopes": api_key.scopes or [],

@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.gateway.auth.rbac import require_permission
+from src.gateway.auth.rbac import check_resource_ownership, require_permission
 from src.infra.db.models import AuditLog
 from src.infra.db.session import get_db
 from src.runtime.harness.registry import get_registry
@@ -58,6 +58,7 @@ def _info(s: SkillPackage) -> dict:
         "layer": s.layer,
         "editable": s.editable,
         "workspace_id": s.workspace_id,
+        "created_by": s.created_by,
     }
 
 
@@ -139,6 +140,7 @@ async def create_skill(
         return _error(
             409, "CONFLICT", f"Skill {body.name!r} already exists in this workspace"
         )
+    user = ctx["user"]
     pkg = SkillPackage(
         name=body.name,
         description=body.description,
@@ -149,9 +151,9 @@ async def create_skill(
         layer="workspace",
         editable=True,
         workspace_id=workspace_id,
+        created_by=user.get("sub") or user.get("id", ""),
     )
     saved = await store.save(workspace_id, pkg)
-    user = ctx["user"]
     await _write_audit(
         db,
         tenant_id=user.get("tenant_id", ""),
@@ -175,7 +177,10 @@ async def update_skill(
     db: AsyncSession = Depends(get_db),
     ctx=Depends(require_permission("skills:write", workspace_id_param="workspace_id")),
 ):
-    """Update an existing workspace-level skill. Directory layers → 403."""
+    """Update an existing workspace-level skill. Directory layers → 403.
+
+    Ownership: only the skill's creator or a workspace admin may edit.
+    """
     store = get_registry().skills.store
     if store is None:
         return _error(400, "NO_STORE", "No writable skill store configured")
@@ -185,6 +190,12 @@ async def update_skill(
             403,
             "READ_ONLY",
             f"Skill {name!r} is not editable (only workspace skills can be edited)",
+        )
+    if not check_resource_ownership(existing.created_by, ctx["user"], ctx.get("workspace_role")):
+        return _error(
+            403,
+            "FORBIDDEN",
+            "Only the owner or an admin can modify this skill",
         )
     updated = existing.model_copy(
         update={
@@ -216,15 +227,25 @@ async def delete_skill(
     db: AsyncSession = Depends(get_db),
     ctx=Depends(require_permission("skills:write", workspace_id_param="workspace_id")),
 ):
-    """Delete a workspace-level skill. Directory layers → 403."""
+    """Delete a workspace-level skill. Directory layers → 403.
+
+    Ownership: only the skill's creator or a workspace admin may delete.
+    """
     store = get_registry().skills.store
     if store is None:
         return _error(400, "NO_STORE", "No writable skill store configured")
-    if not await store.exists(workspace_id, name):
+    existing = await store.get(workspace_id, name)
+    if existing is None:
         return _error(
             403,
             "READ_ONLY",
             f"Skill {name!r} is not deletable (only workspace skills can be deleted)",
+        )
+    if not check_resource_ownership(existing.created_by, ctx["user"], ctx.get("workspace_role")):
+        return _error(
+            403,
+            "FORBIDDEN",
+            "Only the owner or an admin can delete this skill",
         )
     await store.delete(workspace_id, name)
     user = ctx["user"]

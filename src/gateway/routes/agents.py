@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.gateway.auth.rbac import require_permission
+from src.gateway.auth.rbac import check_resource_ownership, require_permission
 from src.infra.db.models import AgentConfig, AuditLog, Workspace
 from src.infra.db.session import get_db
 from src.infra.llm.models import resolve_default_model
@@ -309,12 +309,16 @@ async def update_agent(
     body: UpdateAgentRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _ctx=Depends(require_permission("agents:write", workspace_id_param="workspace_id")),
+    ctx=Depends(require_permission("agents:write", workspace_id_param="workspace_id")),
 ):
     """Update name / framework / config / structured fields.
 
     Cross-workspace lookups return 404. P3a structured fields are patched
     only when explicitly provided (None means "leave unchanged").
+
+    Ownership: only the agent's creator (``created_by``) or a workspace
+    admin may edit. Other members get 403 even though they have
+    ``agents:write`` (which grants create + edit-own).
     """
     result = await db.execute(
         select(AgentConfig).where(
@@ -325,6 +329,12 @@ async def update_agent(
     agent = result.scalar_one_or_none()
     if not agent:
         return _not_found()
+
+    if not check_resource_ownership(agent.created_by, ctx["user"], ctx.get("workspace_role")):
+        return JSONResponse(
+            status_code=403,
+            content={"error": {"code": "FORBIDDEN", "message": "Only the owner or an admin can modify this agent"}},
+        )
 
     if body.framework is not None and body.framework not in ALLOWED_FRAMEWORKS:
         return _bad_request(
@@ -404,9 +414,12 @@ async def delete_agent(
     agent_id: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    _ctx=Depends(require_permission("agents:write", workspace_id_param="workspace_id")),
+    ctx=Depends(require_permission("agents:write", workspace_id_param="workspace_id")),
 ):
-    """Hard-delete an agent config. Cross-workspace lookups return 404."""
+    """Hard-delete an agent config. Cross-workspace lookups return 404.
+
+    Ownership: only the agent's creator or a workspace admin may delete.
+    """
     result = await db.execute(
         select(AgentConfig).where(
             AgentConfig.id == agent_id,
@@ -417,7 +430,13 @@ async def delete_agent(
     if not agent:
         return _not_found()
 
-    user = request.state.user
+    if not check_resource_ownership(agent.created_by, ctx["user"], ctx.get("workspace_role")):
+        return JSONResponse(
+            status_code=403,
+            content={"error": {"code": "FORBIDDEN", "message": "Only the owner or an admin can delete this agent"}},
+        )
+
+    user = ctx["user"]
     await _write_audit(
         db,
         tenant_id=user.get("tenant_id", ""),

@@ -399,6 +399,9 @@ class MCPServer(Base):
     transport: Mapped[str] = mapped_column(String(20), default="http")
     auth_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("users.id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     __table_args__ = (
@@ -430,6 +433,9 @@ class Skill(Base):
     tools: Mapped[list] = mapped_column(JSON, default=list)
     required_memory: Mapped[int] = mapped_column(Integer, default=0)
     version: Mapped[str] = mapped_column(String(32), default="1.0")
+    created_by: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("users.id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=_now, onupdate=_now, nullable=True

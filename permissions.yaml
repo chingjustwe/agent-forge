@@ -29,8 +29,10 @@ roles:
       - sessions:read
       - sessions:write
       - agents:read
+      - agents:write
       - quota:read
       - tools:read
+      - tools:approve
       - skills:read
       - skills:write
       - memory:read
@@ -64,6 +66,7 @@ roles:
       - workspace:archive
       - tools:read
       - tools:write
+      - tools:approve
       - skills:read
       - skills:write
       - memory:read

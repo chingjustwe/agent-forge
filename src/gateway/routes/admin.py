@@ -22,6 +22,7 @@ from src.infra.db.models import (
     OTelSettings,
     QuotaUsage,
     RequestLog,
+    SsoProvider,
     Tenant,
     User,
     Workspace,
@@ -559,6 +560,9 @@ async def list_workspaces(
             "owner": owners.get(ws.id, ""),
             "is_default": bool(ws.is_default),
             "archived": bool(ws.archived),
+            "max_tokens_per_day": ws.max_tokens_per_day,
+            "max_cost_per_day": ws.max_cost_per_day,
+            "max_cost_per_month": ws.max_cost_per_month,
             "created_at": ws.created_at.isoformat() if ws.created_at else None,
             "updated_at": ws.updated_at.isoformat() if ws.updated_at else None,
         }
@@ -572,6 +576,7 @@ class CreateWorkspaceBody(BaseModel):
     description: str | None = None
     icon: str | None = None
     max_tokens_per_day: int | None = None
+    max_cost_per_day: float | None = None
     max_cost_per_month: float | None = None
 
 
@@ -594,6 +599,7 @@ async def admin_create_workspace(
         icon=body.icon,
         owner_id=user_id,
         max_tokens_per_day=body.max_tokens_per_day if body.max_tokens_per_day is not None else 1_000_000,
+        max_cost_per_day=body.max_cost_per_day if body.max_cost_per_day is not None else 0.0,
         max_cost_per_month=body.max_cost_per_month if body.max_cost_per_month is not None else 0.0,
     )
     db.add(ws)
@@ -631,6 +637,8 @@ async def update_workspace(
         ws.settings = body["settings"]
     if "max_tokens_per_day" in body:
         ws.max_tokens_per_day = body["max_tokens_per_day"]
+    if "max_cost_per_day" in body:
+        ws.max_cost_per_day = body["max_cost_per_day"]
     if "max_cost_per_month" in body:
         ws.max_cost_per_month = body["max_cost_per_month"]
     if "description" in body:
@@ -948,6 +956,40 @@ async def set_default_workspace(
 # ─── Usage ───────────────────────────────────────────────────────────────────
 
 
+@admin_router.get("/requests")
+async def list_admin_requests(
+    request: Request,
+    workspace_id: Optional[str] = Query(None),
+    user_id: Optional[str] = Query(None),
+    agent: Optional[str] = Query(None),
+    model: Optional[str] = Query(None),
+    status: Optional[int] = Query(None),
+    since: Optional[str] = Query(None),
+    until: Optional[str] = Query(None),
+    limit: int = Query(100),
+    offset: int = Query(0),
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_permission("admin:audit:read")),
+):
+    """跨 workspace 查询 request_logs，供 Audit 页 Requests tab 使用。
+
+    权限：admin:audit:read（workspace_admin / tenant_admin）
+    - tenant_admin: 看整个 tenant 的所有 workspace 请求
+    - workspace_admin: 只看自己管理的 workspace 请求
+    """
+    user = request.state.user
+    tid = user.get("tenant_id", "")
+    admin_ws_ids = await get_admin_workspace_ids(user, db)
+    collector = TelemetryCollector()
+    data = await collector.get_requests_admin(
+        tid, admin_ws_ids,
+        limit=limit, offset=offset,
+        workspace_id=workspace_id, user_id=user_id, agent=agent,
+        model=model, status=status, since=since, until=until,
+    )
+    return data
+
+
 @admin_router.get("/usage")
 async def get_usage(
     request: Request,
@@ -1015,13 +1057,14 @@ async def get_usage(
     ws_ids = [ws["workspace_id"] for ws in result.get("by_workspace", [])]
     if ws_ids:
         ws_rows = (await db.execute(
-            select(Workspace.id, Workspace.name, Workspace.max_tokens_per_day, Workspace.max_cost_per_month)
+            select(Workspace.id, Workspace.name, Workspace.max_tokens_per_day, Workspace.max_cost_per_day, Workspace.max_cost_per_month)
             .where(Workspace.id.in_(ws_ids))
         )).all()
         ws_meta = {
             r.id: {
                 "name": r.name,
                 "max_tokens_per_day": r.max_tokens_per_day,
+                "max_cost_per_day": r.max_cost_per_day,
                 "max_cost_per_month": r.max_cost_per_month,
             }
             for r in ws_rows
@@ -1042,6 +1085,7 @@ async def get_usage(
             qm = quota_meta.get(wid, {"tokens_used_today": 0, "cost_today": 0.0})
             ws["name"] = meta.get("name", wid)
             ws["max_tokens_per_day"] = meta.get("max_tokens_per_day", 0)
+            ws["max_cost_per_day"] = meta.get("max_cost_per_day", 0.0)
             ws["max_cost_per_month"] = meta.get("max_cost_per_month", 0.0)
             ws["tokens_used_today"] = qm["tokens_used_today"]
             ws["cost_today"] = qm["cost_today"]
@@ -1067,11 +1111,14 @@ async def update_quota(
         return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "Workspace not found"}})
     if "max_tokens_per_day" in body:
         ws.max_tokens_per_day = body["max_tokens_per_day"]
+    if "max_cost_per_day" in body:
+        ws.max_cost_per_day = body["max_cost_per_day"]
     if "max_cost_per_month" in body:
         ws.max_cost_per_month = body["max_cost_per_month"]
     await db.commit()
     return {
         "max_tokens_per_day": ws.max_tokens_per_day,
+        "max_cost_per_day": ws.max_cost_per_day,
         "max_cost_per_month": ws.max_cost_per_month,
     }
 
@@ -1163,3 +1210,300 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
         "role": db_user.role,
         "workspace_ids": ws_ids,
     }
+
+
+# ─── SSO Provider CRUD (Phase 1 — SSO authentication) ──────────────────────
+
+
+class SsoProviderCreate(BaseModel):
+    name: str
+    slug: str
+    provider_type: str  # google | microsoft | custom_oidc
+    client_id: str
+    client_secret: str
+    tenant_id: str | None = None
+    auto_provision: bool = True
+    default_role: str = "member"
+    enabled: bool = True
+    ms_tenant: str | None = None
+    scopes: list[str] | None = None
+    authorize_url: str | None = None
+    token_url: str | None = None
+    userinfo_url: str | None = None
+    issuer_url: str | None = None
+
+
+class SsoProviderUpdate(BaseModel):
+    name: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    auto_provision: bool | None = None
+    default_role: str | None = None
+    enabled: bool | None = None
+    ms_tenant: str | None = None
+    scopes: list[str] | None = None
+    authorize_url: str | None = None
+    token_url: str | None = None
+    userinfo_url: str | None = None
+    issuer_url: str | None = None
+
+
+def _resolve_provider_urls(p: SsoProvider) -> None:
+    """Auto-fill OIDC URLs for built-in provider types (google/microsoft).
+
+    For ``custom_oidc``, the manually-supplied URLs are preserved.
+    """
+    from src.gateway.auth.oidc import PROVIDER_PRESETS, resolve_endpoints
+
+    if p.provider_type in PROVIDER_PRESETS:
+        endpoints = resolve_endpoints({
+            "provider_type": p.provider_type,
+            "ms_tenant": p.ms_tenant,
+            "authorize_url": p.authorize_url,
+            "token_url": p.token_url,
+            "userinfo_url": p.userinfo_url,
+            "issuer_url": p.issuer_url,
+            "scopes": p.scopes,
+        })
+        p.authorize_url = endpoints["authorize_url"]
+        p.token_url = endpoints["token_url"]
+        p.userinfo_url = endpoints["userinfo_url"]
+        if not p.issuer_url:
+            p.issuer_url = endpoints.get("issuer_url")
+        if not p.scopes or p.scopes == ["openid", "email", "profile"]:
+            p.scopes = endpoints["scopes"]
+
+
+def _sso_provider_to_dict(p: SsoProvider) -> dict:
+    """Serialize an SsoProvider for API responses.
+
+    Never includes ``client_secret``.
+    """
+    return {
+        "id": p.id,
+        "tenant_id": p.tenant_id,
+        "name": p.name,
+        "slug": p.slug,
+        "provider_type": p.provider_type,
+        "client_id": p.client_id,
+        "auto_provision": bool(p.auto_provision),
+        "default_role": p.default_role,
+        "enabled": bool(p.enabled),
+        "ms_tenant": p.ms_tenant,
+        "scopes": p.scopes or ["openid", "email", "profile"],
+        "authorize_url": p.authorize_url,
+        "token_url": p.token_url,
+        "userinfo_url": p.userinfo_url,
+        "issuer_url": p.issuer_url,
+        "jwks_uri": p.jwks_uri,
+        "created_at": p.created_at.isoformat() if p.created_at else None,
+        "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+    }
+
+
+@router.post("/api/v1/admin/sso-providers")
+async def create_sso_provider(
+    body: SsoProviderCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    ctx: dict = Depends(require_permission("admin:tenant:write")),
+):
+    """Create a new SSO provider configuration."""
+    user = ctx
+    tenant_id = body.tenant_id or user.get("tenant_id", "")
+
+    # Check slug uniqueness within tenant scope.
+    existing = await db.execute(
+        select(SsoProvider).where(
+            SsoProvider.tenant_id == tenant_id,
+            SsoProvider.slug == body.slug,
+        )
+    )
+    if existing.scalar_one_or_none():
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"code": "CONFLICT", "message": f"SSO provider with slug '{body.slug}' already exists"}},
+        )
+
+    # For custom_oidc: if manual URLs are missing but issuer_url is provided,
+    # attempt OIDC Discovery to auto-fetch endpoints.
+    discovered_jwks_uri: str | None = None
+    if body.provider_type == "custom_oidc":
+        if not (body.authorize_url and body.token_url and body.userinfo_url):
+            if body.issuer_url:
+                try:
+                    from src.gateway.auth.oidc import discover_endpoints
+                    discovered = await discover_endpoints(body.issuer_url)
+                    body.authorize_url = body.authorize_url or discovered["authorize_url"]
+                    body.token_url = body.token_url or discovered["token_url"]
+                    body.userinfo_url = body.userinfo_url or discovered["userinfo_url"]
+                    body.issuer_url = discovered["issuer_url"]
+                    discovered_jwks_uri = discovered.get("jwks_uri")
+                except Exception as exc:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": {"code": "BAD_REQUEST", "message": f"OIDC Discovery failed: {exc}"}},
+                    )
+            else:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": {"code": "BAD_REQUEST", "message": "custom_oidc requires authorize_url/token_url/userinfo_url or issuer_url for discovery"}},
+                )
+
+    provider = SsoProvider(
+        tenant_id=tenant_id,
+        name=body.name,
+        slug=body.slug,
+        provider_type=body.provider_type,
+        client_id=body.client_id,
+        client_secret=body.client_secret,
+        authorize_url=body.authorize_url,
+        token_url=body.token_url,
+        userinfo_url=body.userinfo_url,
+        issuer_url=body.issuer_url,
+        jwks_uri=discovered_jwks_uri,
+        scopes=body.scopes or ["openid", "email", "profile"],
+        ms_tenant=body.ms_tenant,
+        auto_provision=1 if body.auto_provision else 0,
+        default_role=body.default_role,
+        enabled=1 if body.enabled else 0,
+    )
+    _resolve_provider_urls(provider)
+    db.add(provider)
+    await db.flush()
+
+    user_id = user.get("sub") or user.get("id", "")
+    db.add(
+        AuditLogModel(
+            tenant_id=tenant_id,
+            workspace_id=None,
+            user_id=user_id,
+            action="sso_provider.create",
+            target_type="sso_provider",
+            target_id=provider.id,
+            details={"name": provider.name, "provider_type": provider.provider_type},
+            ip_address=request.client.host if request.client else "",
+        )
+    )
+    await db.commit()
+    await db.refresh(provider)
+    return JSONResponse(status_code=201, content=_sso_provider_to_dict(provider))
+
+
+@router.get("/api/v1/admin/sso-providers")
+async def list_sso_providers(
+    db: AsyncSession = Depends(get_db),
+    ctx: dict = Depends(require_permission("admin:tenant:write")),
+):
+    """List SSO providers for the current tenant (+ global providers)."""
+    user = ctx
+    tenant_id = user.get("tenant_id", "")
+    result = await db.execute(
+        select(SsoProvider).where(
+            or_(SsoProvider.tenant_id == tenant_id, SsoProvider.tenant_id.is_(None))
+        ).order_by(SsoProvider.created_at)
+    )
+    providers = result.scalars().all()
+    return [_sso_provider_to_dict(p) for p in providers]
+
+
+@router.get("/api/v1/admin/sso-providers/{provider_id}")
+async def get_sso_provider(
+    provider_id: str,
+    db: AsyncSession = Depends(get_db),
+    ctx: dict = Depends(require_permission("admin:tenant:write")),
+):
+    """Get a single SSO provider by ID."""
+    provider = await db.get(SsoProvider, provider_id)
+    if not provider:
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "SSO provider not found"}})
+    # Tenant isolation: non-tenant_admin cannot see other tenants' providers
+    # (but can see global providers where tenant_id is NULL).
+    user = ctx
+    tenant_id = user.get("tenant_id", "")
+    if provider.tenant_id is not None and provider.tenant_id != tenant_id and user.get("role") != "tenant_admin":
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "SSO provider not found"}})
+    return _sso_provider_to_dict(provider)
+
+
+@router.put("/api/v1/admin/sso-providers/{provider_id}")
+async def update_sso_provider(
+    provider_id: str,
+    body: SsoProviderUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    ctx: dict = Depends(require_permission("admin:tenant:write")),
+):
+    """Update an SSO provider configuration."""
+    provider = await db.get(SsoProvider, provider_id)
+    if not provider:
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "SSO provider not found"}})
+    user = ctx
+    tenant_id = user.get("tenant_id", "")
+    if provider.tenant_id is not None and provider.tenant_id != tenant_id and user.get("role") != "tenant_admin":
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "SSO provider not found"}})
+
+    updates = body.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        if field == "auto_provision":
+            provider.auto_provision = 1 if value else 0
+        elif field == "enabled":
+            provider.enabled = 1 if value else 0
+        elif value is not None:
+            setattr(provider, field, value)
+
+    # Re-resolve URLs if provider_type-relevant fields changed.
+    if provider.provider_type in ("google", "microsoft"):
+        _resolve_provider_urls(provider)
+
+    user_id = user.get("sub") or user.get("id", "")
+    db.add(
+        AuditLogModel(
+            tenant_id=tenant_id,
+            workspace_id=None,
+            user_id=user_id,
+            action="sso_provider.update",
+            target_type="sso_provider",
+            target_id=provider.id,
+            details=updates,
+            ip_address=request.client.host if request.client else "",
+        )
+    )
+    await db.commit()
+    await db.refresh(provider)
+    return _sso_provider_to_dict(provider)
+
+
+@router.delete("/api/v1/admin/sso-providers/{provider_id}")
+async def delete_sso_provider(
+    provider_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    ctx: dict = Depends(require_permission("admin:tenant:write")),
+):
+    """Delete an SSO provider configuration."""
+    provider = await db.get(SsoProvider, provider_id)
+    if not provider:
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "SSO provider not found"}})
+    user = ctx
+    tenant_id = user.get("tenant_id", "")
+    if provider.tenant_id is not None and provider.tenant_id != tenant_id and user.get("role") != "tenant_admin":
+        return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "SSO provider not found"}})
+
+    await db.delete(provider)
+
+    user_id = user.get("sub") or user.get("id", "")
+    db.add(
+        AuditLogModel(
+            tenant_id=tenant_id,
+            workspace_id=None,
+            user_id=user_id,
+            action="sso_provider.delete",
+            target_type="sso_provider",
+            target_id=provider_id,
+            details={"name": provider.name},
+            ip_address=request.client.host if request.client else "",
+        )
+    )
+    await db.commit()
+    return {"status": "ok"}

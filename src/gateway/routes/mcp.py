@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.gateway.auth.rbac import require_permission
+from src.gateway.auth.rbac import check_resource_ownership, require_permission
 from src.infra.db.models import AuditLog
 from src.infra.db.session import get_db
 from src.runtime.harness.registry import get_registry
@@ -49,6 +49,7 @@ class MCPServerOut(BaseModel):
     endpoint: str
     transport: str
     enabled: bool
+    created_by: str | None = None
 
 
 def _auto_detect_transport(endpoint: str, transport: str) -> str:
@@ -97,6 +98,7 @@ async def list_mcp_servers(
             endpoint=s.endpoint,
             transport=s.transport,
             enabled=s.enabled,
+            created_by=s.created_by,
         ).model_dump()
         for s in servers
     ]
@@ -120,6 +122,7 @@ async def create_mcp_server(
             content={"error": {"code": "CONFLICT", "message": f"MCP server {body.name!r} already exists"}},
         )
     transport = _auto_detect_transport(body.endpoint, body.transport)
+    user = ctx["user"]
     config = MCPServerConfig(
         name=body.name,
         workspace_id=workspace_id,
@@ -127,9 +130,9 @@ async def create_mcp_server(
         transport=transport,
         auth_token=body.auth_token,
         enabled=body.enabled,
+        created_by=user.get("sub") or user.get("id", ""),
     )
     await mcp.register_server(config)
-    user = ctx["user"]
     await _write_audit(
         db,
         tenant_id=user.get("tenant_id", ""),
@@ -148,6 +151,7 @@ async def create_mcp_server(
             endpoint=config.endpoint,
             transport=config.transport,
             enabled=config.enabled,
+            created_by=config.created_by,
         ).model_dump(),
     )
 
@@ -161,7 +165,10 @@ async def update_mcp_server(
     db: AsyncSession = Depends(get_db),
     ctx=Depends(require_permission("mcp:write", workspace_id_param="workspace_id")),
 ):
-    """Update an MCP server's configuration."""
+    """Update an MCP server's configuration.
+
+    Ownership: only the server's creator or a workspace admin may edit.
+    """
     from src.runtime.harness.mcp import MCPServerConfig
     from datetime import datetime, timezone
 
@@ -172,7 +179,12 @@ async def update_mcp_server(
             status_code=404,
             content={"error": {"code": "NOT_FOUND", "message": f"MCP server {name!r} not found"}},
         )
-    # Re-register with updated fields (preserving created_at).
+    if not check_resource_ownership(existing.created_by, ctx["user"], ctx.get("workspace_role")):
+        return JSONResponse(
+            status_code=403,
+            content={"error": {"code": "FORBIDDEN", "message": "Only the owner or an admin can modify this MCP server"}},
+        )
+    # Re-register with updated fields (preserving created_at and created_by).
     new_endpoint = body.endpoint or existing.endpoint
     new_transport = body.transport or existing.transport
     new_transport = _auto_detect_transport(new_endpoint, new_transport)
@@ -184,6 +196,7 @@ async def update_mcp_server(
         auth_token=body.auth_token if body.auth_token is not None else existing.auth_token,
         enabled=body.enabled if body.enabled is not None else existing.enabled,
         created_at=existing.created_at,
+        created_by=existing.created_by,
     )
     await mcp.register_server(updated)
     user = ctx["user"]
@@ -203,6 +216,7 @@ async def update_mcp_server(
         endpoint=updated.endpoint,
         transport=updated.transport,
         enabled=updated.enabled,
+        created_by=updated.created_by,
     ).model_dump()
 
 
@@ -214,14 +228,23 @@ async def delete_mcp_server(
     db: AsyncSession = Depends(get_db),
     ctx=Depends(require_permission("mcp:write", workspace_id_param="workspace_id")),
 ):
-    """Unregister an MCP server."""
+    """Unregister an MCP server.
+
+    Ownership: only the server's creator or a workspace admin may delete.
+    """
     mcp = get_registry().mcp
-    removed = await mcp.unregister_server(name, workspace_id)
-    if not removed:
+    existing = mcp.get_server(name, workspace_id)
+    if existing is None:
         return JSONResponse(
             status_code=404,
             content={"error": {"code": "NOT_FOUND", "message": f"MCP server {name!r} not found"}},
         )
+    if not check_resource_ownership(existing.created_by, ctx["user"], ctx.get("workspace_role")):
+        return JSONResponse(
+            status_code=403,
+            content={"error": {"code": "FORBIDDEN", "message": "Only the owner or an admin can delete this MCP server"}},
+        )
+    await mcp.unregister_server(name, workspace_id)
     user = ctx["user"]
     await _write_audit(
         db,
