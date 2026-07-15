@@ -1060,3 +1060,221 @@ class TestRestoreCheckpoint:
         new_cps = await store.list(new_sid)
         assert len(new_cps) == 1
         assert new_cps[0].messages == msgs
+
+    @pytest.mark.asyncio
+    async def test_restore_in_place_preserves_earlier_checkpoints(self, app):
+        """In-place restore (mode=in_place) rolls back the current session
+        to the target checkpoint: checkpoints after it are deleted, earlier
+        ones are preserved, chat_messages match the target, and the
+        session_id stays the same."""
+        suffix = _uuid.uuid4().hex[:8]
+        ws_id = f"ws-rip-{suffix}"
+        tid = f"t-rip-{suffix}"
+        owner_id = f"owner-{suffix}"
+        token = await _seed_workspace_with_owner(ws_id, tid, owner_id)
+
+        async with async_session() as session:
+            cs = ChatSession(workspace_id=ws_id, owner_id=owner_id, visibility="private")
+            session.add(cs)
+            await session.commit()
+            await session.refresh(cs)
+            cs_id = cs.id
+
+        from sqlalchemy import text
+
+        from src.infra.db.engine import engine
+        from src.runtime.harness.checkpoint import Checkpoint, SQLiteCheckpointStore
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS checkpoints ("
+                    "session_id VARCHAR(32) NOT NULL,"
+                    "sequence INTEGER NOT NULL,"
+                    "messages TEXT NOT NULL,"
+                    "tool_state TEXT NOT NULL,"
+                    "agent_id VARCHAR(32) NOT NULL,"
+                    "metadata TEXT NOT NULL DEFAULT '{}',"
+                    "created_at DATETIME NOT NULL,"
+                    "PRIMARY KEY (session_id, sequence))"
+                )
+            )
+            await conn.execute(text("DROP TABLE IF EXISTS checkpoint_writes"))
+            await conn.execute(
+                text(
+                    "CREATE TABLE checkpoint_writes ("
+                    "session_id VARCHAR(64) NOT NULL,"
+                    "checkpoint_id VARCHAR(64) NOT NULL DEFAULT '',"
+                    "task_id VARCHAR(64) NOT NULL,"
+                    "task_path VARCHAR(256) NOT NULL DEFAULT '',"
+                    "channel VARCHAR(256) NOT NULL,"
+                    "value TEXT NOT NULL,"
+                    "created_at DATETIME NOT NULL,"
+                    "PRIMARY KEY (session_id, checkpoint_id, task_id, task_path, channel))"
+                )
+            )
+            await conn.execute(text("DROP TABLE IF EXISTS checkpoint_blobs"))
+            await conn.execute(
+                text(
+                    "CREATE TABLE checkpoint_blobs ("
+                    "session_id VARCHAR(32), channel VARCHAR(64), "
+                    "version VARCHAR(64), type VARCHAR(16) DEFAULT 'json', "
+                    "payload TEXT, PRIMARY KEY (session_id, channel, version))"
+                )
+            )
+
+        store = SQLiteCheckpointStore()
+
+        # Three checkpoints: seq 1, 2, 3 with growing message lists.
+        msgs_1 = [{"role": "user", "content": "Hello"}]
+        msgs_2 = [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi there"}]
+        msgs_3 = msgs_2 + [{"role": "user", "content": "How are you?"}]
+        await store.save(Checkpoint(session_id=cs_id, sequence=1, messages=msgs_1, agent_id="a-1"))
+        await store.save(Checkpoint(session_id=cs_id, sequence=2, messages=msgs_2, agent_id="a-1"))
+        await store.save(Checkpoint(session_id=cs_id, sequence=3, messages=msgs_3, agent_id="a-1"))
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/api/v1/workspaces/{ws_id}/sessions/{cs_id}/checkpoints/2/restore?mode=in_place",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            # In-place: session_id stays the same.
+            assert body["session_id"] == cs_id
+            assert body["mode"] == "in_place"
+
+        # Checkpoints after seq 2 are deleted; seq 1 and 2 are preserved.
+        remaining_cps = await store.list(cs_id)
+        seqs = [c.sequence for c in remaining_cps]
+        assert 3 not in seqs, f"seq 3 should be deleted, got {seqs}"
+        assert 2 in seqs, f"seq 2 should be preserved, got {seqs}"
+        assert 1 in seqs, f"seq 1 should be preserved, got {seqs}"
+
+        # chat_messages match checkpoint 2's messages.
+        async with async_session() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        "SELECT role, content FROM chat_messages "
+                        "WHERE session_id = :sid ORDER BY id"
+                    ),
+                    {"sid": cs_id},
+                )
+            ).fetchall()
+        contents = [(r.role, r.content) for r in rows]
+        assert ("user", "Hello") in contents
+        assert ("assistant", "Hi there") in contents
+        assert ("user", "How are you?") not in contents, \
+            "Messages after checkpoint 2 should be deleted"
+
+    @pytest.mark.asyncio
+    async def test_fork_preserves_prior_checkpoint_history(self, app):
+        """Fork (default mode) must copy ALL checkpoints with sequence
+        <= target to the new session, not just the target checkpoint.
+        Without this, the forked session would only have one checkpoint
+        and the inline button map would only show a button on the first
+        user bubble."""
+        suffix = _uuid.uuid4().hex[:8]
+        ws_id = f"ws-fk-{suffix}"
+        tid = f"t-fk-{suffix}"
+        owner_id = f"owner-{suffix}"
+        token = await _seed_workspace_with_owner(ws_id, tid, owner_id)
+
+        async with async_session() as session:
+            cs = ChatSession(workspace_id=ws_id, owner_id=owner_id, visibility="private")
+            session.add(cs)
+            await session.commit()
+            await session.refresh(cs)
+            cs_id = cs.id
+
+        from sqlalchemy import text
+
+        from src.infra.db.engine import engine
+        from src.runtime.harness.checkpoint import Checkpoint, SQLiteCheckpointStore
+
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS checkpoints ("
+                    "session_id VARCHAR(32) NOT NULL,"
+                    "sequence INTEGER NOT NULL,"
+                    "messages TEXT NOT NULL,"
+                    "tool_state TEXT NOT NULL,"
+                    "agent_id VARCHAR(32) NOT NULL,"
+                    "metadata TEXT NOT NULL DEFAULT '{}',"
+                    "created_at DATETIME NOT NULL,"
+                    "PRIMARY KEY (session_id, sequence))"
+                )
+            )
+            await conn.execute(text("DROP TABLE IF EXISTS checkpoint_writes"))
+            await conn.execute(
+                text(
+                    "CREATE TABLE checkpoint_writes ("
+                    "session_id VARCHAR(64) NOT NULL,"
+                    "checkpoint_id VARCHAR(64) NOT NULL DEFAULT '',"
+                    "task_id VARCHAR(64) NOT NULL,"
+                    "task_path VARCHAR(256) NOT NULL DEFAULT '',"
+                    "channel VARCHAR(256) NOT NULL,"
+                    "value TEXT NOT NULL,"
+                    "created_at DATETIME NOT NULL,"
+                    "PRIMARY KEY (session_id, checkpoint_id, task_id, task_path, channel))"
+                )
+            )
+            await conn.execute(text("DROP TABLE IF EXISTS checkpoint_blobs"))
+            await conn.execute(
+                text(
+                    "CREATE TABLE checkpoint_blobs ("
+                    "session_id VARCHAR(32), channel VARCHAR(64), "
+                    "version VARCHAR(64), type VARCHAR(16) DEFAULT 'json', "
+                    "payload TEXT, PRIMARY KEY (session_id, channel, version))"
+                )
+            )
+
+        store = SQLiteCheckpointStore()
+
+        # Three checkpoints: seq 1, 2, 3 with growing message lists.
+        msgs_1 = [{"role": "user", "content": "Hello"}]
+        msgs_2 = msgs_1 + [{"role": "assistant", "content": "Hi there"}]
+        msgs_3 = msgs_2 + [{"role": "user", "content": "How are you?"}]
+        await store.save(Checkpoint(session_id=cs_id, sequence=1, messages=msgs_1, agent_id="a-1"))
+        await store.save(Checkpoint(session_id=cs_id, sequence=2, messages=msgs_2, agent_id="a-1"))
+        await store.save(Checkpoint(session_id=cs_id, sequence=3, messages=msgs_3, agent_id="a-1"))
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            # Fork from checkpoint 2 (default mode=fork).
+            resp = await client.post(
+                f"/api/v1/workspaces/{ws_id}/sessions/{cs_id}/checkpoints/2/restore",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            new_sid = body["session_id"]
+            assert new_sid != cs_id, "Fork must create a new session"
+            assert body["mode"] == "fork"
+
+        # The forked session must have checkpoints 1 AND 2 (all <= target).
+        new_cps = await store.list(new_sid)
+        new_seqs = sorted(c.sequence for c in new_cps)
+        assert 1 in new_seqs, f"Fork should preserve checkpoint 1, got {new_seqs}"
+        assert 2 in new_seqs, f"Fork should preserve checkpoint 2, got {new_seqs}"
+        assert 3 not in new_seqs, f"Fork should NOT include checkpoint 3, got {new_seqs}"
+
+        # The forked session's messages should match checkpoint 2 (not 3).
+        async with async_session() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        "SELECT role, content FROM chat_messages "
+                        "WHERE session_id = :sid ORDER BY id"
+                    ),
+                    {"sid": new_sid},
+                )
+            ).fetchall()
+        contents = [(r.role, r.content) for r in rows]
+        assert ("user", "Hello") in contents
+        assert ("assistant", "Hi there") in contents
+        assert ("user", "How are you?") not in contents, \
+            "Fork should only include messages up to checkpoint 2"

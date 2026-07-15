@@ -54,6 +54,7 @@ class SkillPackage(BaseModel):
     layer: str = "project"          # "user" | "project" | "workspace"
     editable: bool = False          # True only for the workspace layer
     workspace_id: str | None = None  # set only for the workspace layer
+    created_by: str | None = None   # owner (workspace layer only)
 
 
 def parse_skill_markdown(content: str, *, name_fallback: str = "") -> dict[str, Any]:

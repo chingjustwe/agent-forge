@@ -83,6 +83,7 @@ class DBSkillStore(SkillStore):
             layer="workspace",
             editable=True,
             workspace_id=row.workspace_id,
+            created_by=row.created_by,
         )
 
     async def list(self, workspace_id: str) -> list[SkillPackage]:
@@ -122,6 +123,7 @@ class DBSkillStore(SkillStore):
                     workspace_id=workspace_id,
                     name=pkg.name,
                     created_at=now,
+                    created_by=pkg.created_by,
                 )
                 db.add(row)
             row.description = pkg.description

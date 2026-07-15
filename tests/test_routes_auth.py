@@ -81,15 +81,17 @@ async def test_logout(app):
 
 @pytest.mark.asyncio
 async def test_oidc_login_redirect(app):
+    """Legacy /auth/login is deprecated (410 GONE); SSO uses /auth/sso/{id}/login."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/api/v1/auth/login?provider=google")
-        assert resp.status_code == 302
+        assert resp.status_code == 410
 
 
 @pytest.mark.asyncio
 async def test_oidc_callback(app):
+    """Legacy /auth/callback is deprecated (410 GONE); SSO uses /auth/sso/{id}/callback."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.get("/api/v1/auth/callback?code=test&state=test")
-        assert resp.status_code == 200
+        assert resp.status_code == 410

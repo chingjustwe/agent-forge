@@ -29,6 +29,40 @@ from src.infra.settings import settings
 from src.runtime.adapters.base import RunAdapter
 from src.runtime.models import StreamEvent, Usage
 
+# ── Monkey-patch: teach langchain-openai to extract DeepSeek's
+# ``reasoning_content`` field from streaming deltas.
+#
+# DeepSeek V4 (flash/pro) returns ``delta.reasoning_content`` alongside
+# ``delta.content`` when thinking mode is enabled. langchain-openai (≤1.3.5)
+# only reads ``content`` and silently discards ``reasoning_content``, so the
+# ReAct timeline never receives reasoning events. We patch
+# ``_convert_delta_to_message_chunk`` to preserve ``reasoning_content`` in
+# ``additional_kwargs["reasoning_content"]``.
+try:
+    import langchain_openai.chat_models.base as _lc_base
+    _orig_convert = _lc_base._convert_delta_to_message_chunk
+
+    def _patched_convert(_dict, default_class):
+        msg = _orig_convert(_dict, default_class)
+        # Extract DeepSeek's non-standard reasoning_content field.
+        reasoning = _dict.get("reasoning_content") if isinstance(_dict, dict) else None
+        if reasoning and hasattr(msg, "additional_kwargs"):
+            existing = msg.additional_kwargs.get("reasoning_content", "")
+            msg.additional_kwargs["reasoning_content"] = existing + reasoning
+            # Also set content to a reasoning block so content_blocks picks
+            # it up. Without this, the openai translator (model_provider=
+            # "openai") skips reasoning extraction and content_blocks is
+            # empty, so langgraph v3 never emits reasoning-delta events.
+            if not msg.content:
+                msg.content = [{"type": "reasoning", "reasoning": reasoning}]
+        return msg
+
+    _lc_base._convert_delta_to_message_chunk = _patched_convert
+except Exception as _patch_err:  # pragma: no cover
+    logging.getLogger(__name__).warning(
+        "Failed to patch langchain-openai for reasoning_content: %s", _patch_err
+    )
+
 from langchain.agents.middleware import AgentMiddleware
 
 if TYPE_CHECKING:
@@ -319,12 +353,26 @@ class DeepAgentsAdapter(RunAdapter):
             )
 
         # 5. Build the LLM (DeepSeek via OpenAI-compatible endpoint)
+        # Build extra_body:
+        # - max_tokens: DeepSeek (OpenAI-compatible) only honors the
+        #   `max_tokens` request field. langchain-openai rewrites the
+        #   `max_tokens` kwarg to `max_completion_tokens`, which DeepSeek
+        #   silently ignores — so the limit never applied. Inject it via
+        #   `extra_body` instead.
+        # - thinking: DeepSeek V4 supports a thinking mode that emits
+        #   reasoning_content before the final answer. Flash defaults to
+        #   non-thinking; Pro thinks by default. Passing `enabled` is
+        #   idempotent for Pro (already on) and required for Flash.
+        extra_body: dict = {
+            "max_tokens": max_tokens,
+            "thinking": {"type": "enabled"},
+        }
         model = init_chat_model(
             f"openai:{model_name}",
             base_url=self.base_url,
             api_key=self.api_key,
             temperature=temperature,
-            max_tokens=max_tokens,
+            extra_body=extra_body,
         )
 
         # 6. Compile the deep agent.
@@ -613,9 +661,14 @@ class DeepAgentsAdapter(RunAdapter):
             if sub_event == "content-block-start":
                 return []
 
-            # --- message-finish: usage metadata ---
+            # --- message-finish: usage + finish_reason metadata ---
+            # finish_reason values: "stop" (normal), "length" (truncated by
+            # max_tokens), "tool_calls", "content_filter". We forward it so
+            # chat.py can flag truncated responses for the user.
             if sub_event == "message-finish":
                 usage_data = payload.get("usage")
+                metadata = payload.get("metadata") or {}
+                finish_reason = metadata.get("finish_reason", "")
                 if usage_data and isinstance(usage_data, dict):
                     usage = Usage(
                         input_tokens=usage_data.get("input_tokens", 0),
@@ -624,7 +677,15 @@ class DeepAgentsAdapter(RunAdapter):
                     )
                     return [StreamEvent(
                         type="status",
-                        data={"usage": usage.model_dump()},
+                        data={
+                            "usage": usage.model_dump(),
+                            "finish_reason": finish_reason,
+                        },
+                    )]
+                if finish_reason:
+                    return [StreamEvent(
+                        type="status",
+                        data={"finish_reason": finish_reason},
                     )]
                 return []
 

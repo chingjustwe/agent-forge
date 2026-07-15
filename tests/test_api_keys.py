@@ -467,11 +467,13 @@ class TestApiKeyAuthentication:
 
     @pytest.mark.asyncio
     async def test_api_key_can_list_agents(self, app):
-        """A valid X-API-Key reaches a workspace-scoped endpoint."""
+        """A valid X-API-Key with agents:read scope reaches a workspace-scoped endpoint."""
         suffix = _uuid.uuid4().hex[:8]
         ws = f"ws-{suffix}"
         tok = await _seed(ws, f"t-{suffix}", f"admin-{suffix}", ws_role="workspace_admin")
-        plaintext = (await _create_key_via_api(app, tok, ws)).json()["key"]
+        plaintext = (await _create_key_via_api(
+            app, tok, ws, scopes=["chat:write", "agents:read"],
+        )).json()["key"]
 
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:

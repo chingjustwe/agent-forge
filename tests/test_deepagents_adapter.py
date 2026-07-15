@@ -1224,3 +1224,93 @@ class TestSubagentWiring:
         assert len(subagent_events) == 1
         assert subagent_events[0].data["action"] == "end"
         assert "subagent result" in subagent_events[0].data["output"]
+
+
+# ── Max Tokens wiring (bug: "Agent Max Tokens 不起作用") ────────────────
+
+
+class TestMaxTokensWiring:
+    """Regression guard for the bug report "Agent Max Tokens 不起作用".
+
+    Root cause: langchain-openai rewrites the ``max_tokens`` kwarg to
+    ``max_completion_tokens`` on the wire. DeepSeek's OpenAI-compatible API
+    silently ignores the unknown ``max_completion_tokens`` field, so the
+    limit never applied and the agent ignored the setting.
+
+    The adapter must inject ``max_tokens`` via ``extra_body`` so the request
+    carries ``max_tokens`` (and no ``max_completion_tokens``).
+    """
+
+    async def _capture_init_chat_model_kwargs(self, agent=None) -> dict:
+        adapter = DeepAgentsAdapter(api_key="fake")
+        mock_deep_agent = MagicMock()
+        mock_deep_agent.astream_events = _awaitable_stream([])
+
+        with patch("deepagents.create_deep_agent", return_value=mock_deep_agent), \
+             patch("langchain.chat_models.init_chat_model", return_value=MagicMock()) as mock_init:
+            await _collect(adapter.run(
+                [{"role": "user", "content": "x"}], _make_ctx(agent=agent)
+            ))
+
+        assert mock_init.called, "init_chat_model was never called"
+        return mock_init.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_max_tokens_injected_via_extra_body(self):
+        """An agent with ``max_tokens=1000`` must send ``max_tokens=1000`` inside
+        ``extra_body``, and must NOT pass a bare ``max_tokens`` kwarg
+        (otherwise langchain rewrites it to ``max_completion_tokens``)."""
+        from src.runtime.harness.agents import AgentDefinition
+
+        agent = AgentDefinition(
+            id="a-max",
+            name="max-tok",
+            workspace_id="ws-1",
+            adapter="deepagents",
+            system_prompt="x",
+            max_tokens=1000,
+        )
+        kwargs = await self._capture_init_chat_model_kwargs(agent)
+
+        extra = kwargs.get("extra_body") or {}
+        assert extra.get("max_tokens") == 1000, (
+            f"max_tokens must be injected via extra_body; kwargs={kwargs}"
+        )
+        # The bare kwarg must NOT be passed — that is the exact bug.
+        assert "max_tokens" not in kwargs, (
+            f"max_tokens kwarg must not be passed (rewritten to "
+            f"max_completion_tokens by langchain); kwargs={kwargs}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_max_tokens_small_value_passed_through(self):
+        """Small ``max_tokens`` values (e.g. 10) are passed through as-is —
+        no floor is applied. This lets users diagnose whether thinking
+        tokens are eating the output budget."""
+        from src.runtime.harness.agents import AgentDefinition
+
+        agent = AgentDefinition(
+            id="a-floor",
+            name="floor-tok",
+            workspace_id="ws-1",
+            adapter="deepagents",
+            system_prompt="x",
+            max_tokens=10,
+        )
+        kwargs = await self._capture_init_chat_model_kwargs(agent)
+
+        extra = kwargs.get("extra_body") or {}
+        assert extra.get("max_tokens") == 10, (
+            f"max_tokens should pass through without floor; kwargs={kwargs}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_default_max_tokens_falls_back_to_4096(self):
+        """A default agent (no max_tokens) must still carry the 4096 fallback
+        via ``extra_body``."""
+        kwargs = await self._capture_init_chat_model_kwargs()  # _make_agent() default
+        extra = kwargs.get("extra_body") or {}
+        assert extra.get("max_tokens") == 4096, (
+            f"default max_tokens should be 4096 via extra_body; kwargs={kwargs}"
+        )
+        assert "max_tokens" not in kwargs

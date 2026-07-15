@@ -277,3 +277,113 @@ class TestSkillAudit:
                 )
             ).scalars().all()
             assert any(r.target_id == "del-audit" for r in rows)
+
+
+# ── Ownership tests ────────────────────────────────────────────────────
+
+
+class TestSkillOwnership:
+    """User-level ownership: all members can create, only owner/admin can
+    edit or delete."""
+
+    @pytest.mark.asyncio
+    async def test_owner_can_update_own_skill(self, app):
+        ws, tenant = "ws-sk-own1", "t-sk-own1"
+        mem_a = "u-mem-a1"
+        tok_a = await _seed(ws, tenant, mem_a, role="member")
+        h = {"Authorization": f"Bearer {tok_a}"}
+        async with _client(app) as ac:
+            await ac.post(
+                f"/api/v1/workspaces/{ws}/skills",
+                headers=h,
+                json={"name": "own-skill", "instructions": "v1"},
+            )
+            resp = await ac.put(
+                f"/api/v1/workspaces/{ws}/skills/own-skill",
+                headers=h,
+                json={"instructions": "v2"},
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["instructions"] == "v2"
+
+    @pytest.mark.asyncio
+    async def test_owner_can_delete_own_skill(self, app):
+        ws, tenant = "ws-sk-own2", "t-sk-own2"
+        mem_a = "u-mem-a2"
+        tok_a = await _seed(ws, tenant, mem_a, role="member")
+        h = {"Authorization": f"Bearer {tok_a}"}
+        async with _client(app) as ac:
+            await ac.post(
+                f"/api/v1/workspaces/{ws}/skills",
+                headers=h,
+                json={"name": "del-own", "instructions": "x"},
+            )
+            resp = await ac.delete(
+                f"/api/v1/workspaces/{ws}/skills/del-own", headers=h
+            )
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.asyncio
+    async def test_non_owner_cannot_update_skill(self, app):
+        ws, tenant = "ws-sk-own3", "t-sk-own3"
+        mem_a = "u-mem-a3"
+        mem_b = "u-mem-b3"
+        tok_a = await _seed(ws, tenant, mem_a, role="member")
+        tok_b = await _seed(ws, tenant, mem_b, role="member")
+        h_a = {"Authorization": f"Bearer {tok_a}"}
+        h_b = {"Authorization": f"Bearer {tok_b}"}
+        async with _client(app) as ac:
+            await ac.post(
+                f"/api/v1/workspaces/{ws}/skills",
+                headers=h_a,
+                json={"name": "a-skill", "instructions": "v1"},
+            )
+            resp = await ac.put(
+                f"/api/v1/workspaces/{ws}/skills/a-skill",
+                headers=h_b,
+                json={"instructions": "hacked"},
+            )
+        assert resp.status_code == 403, resp.text
+
+    @pytest.mark.asyncio
+    async def test_non_owner_cannot_delete_skill(self, app):
+        ws, tenant = "ws-sk-own4", "t-sk-own4"
+        mem_a = "u-mem-a4"
+        mem_b = "u-mem-b4"
+        tok_a = await _seed(ws, tenant, mem_a, role="member")
+        tok_b = await _seed(ws, tenant, mem_b, role="member")
+        h_a = {"Authorization": f"Bearer {tok_a}"}
+        h_b = {"Authorization": f"Bearer {tok_b}"}
+        async with _client(app) as ac:
+            await ac.post(
+                f"/api/v1/workspaces/{ws}/skills",
+                headers=h_a,
+                json={"name": "no-delete", "instructions": "x"},
+            )
+            resp = await ac.delete(
+                f"/api/v1/workspaces/{ws}/skills/no-delete", headers=h_b
+            )
+        assert resp.status_code == 403, resp.text
+
+    @pytest.mark.asyncio
+    async def test_admin_can_update_others_skill(self, app):
+        ws, tenant = "ws-sk-own5", "t-sk-own5"
+        mem_a = "u-mem-a5"
+        admin = "u-admin-a5"
+        tok_a = await _seed(ws, tenant, mem_a, role="member")
+        tok_admin = await _seed(ws, tenant, admin, role="workspace_admin")
+        h_a = {"Authorization": f"Bearer {tok_a}"}
+        h_admin = {"Authorization": f"Bearer {tok_admin}"}
+        async with _client(app) as ac:
+            await ac.post(
+                f"/api/v1/workspaces/{ws}/skills",
+                headers=h_a,
+                json={"name": "admin-edit", "instructions": "v1"},
+            )
+            resp = await ac.put(
+                f"/api/v1/workspaces/{ws}/skills/admin-edit",
+                headers=h_admin,
+                json={"instructions": "admin-overwrite"},
+            )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["instructions"] == "admin-overwrite"

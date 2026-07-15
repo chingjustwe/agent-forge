@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.infra.db.models import Workspace, WorkspaceMember
+from src.infra.db.models import SsoProvider, UserIdentity, Workspace, WorkspaceMember
 from src.infra.db.session import get_db
 from src.gateway.auth.permissions import get_role_permissions, get_frontend_tabs, get_api_key_scopes
 
@@ -155,3 +155,89 @@ async def get_my_permissions(request: Request, db: AsyncSession = Depends(get_db
         "frontend_tabs": visible_tabs,
         "api_key_scopes": get_api_key_scopes(),
     }
+
+
+@router.get("/api/v1/me/identities")
+async def list_my_identities(request: Request, db: AsyncSession = Depends(get_db)):
+    """List the current user's linked SSO identities."""
+    user = getattr(request.state, "user", None)
+    if not user:
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"code": "UNAUTHORIZED", "message": "Not authenticated"}},
+        )
+    user_id = user.get("sub") or user.get("id", "")
+
+    result = await db.execute(
+        select(UserIdentity, SsoProvider)
+        .join(SsoProvider, SsoProvider.id == UserIdentity.provider_id)
+        .where(UserIdentity.user_id == user_id)
+    )
+    rows = result.all()
+
+    return {
+        "identities": [
+            {
+                "id": identity.id,
+                "provider_id": identity.provider_id,
+                "provider_name": provider.name,
+                "provider_type": provider.provider_type,
+                "email_at_provider": identity.email_at_provider,
+                "created_at": identity.created_at.isoformat() if identity.created_at else None,
+            }
+            for identity, provider in rows
+        ]
+    }
+
+
+@router.delete("/api/v1/me/identities/{identity_id}")
+async def delete_my_identity(
+    identity_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Unlink an SSO identity from the current user.
+
+    Safety checks:
+    - The identity must belong to the current user.
+    - If the user is SSO-only (no password), they must keep at least one
+      identity to avoid lockout.
+    """
+    from src.infra.db.models import User
+
+    user = getattr(request.state, "user", None)
+    if not user:
+        return JSONResponse(
+            status_code=401,
+            content={"error": {"code": "UNAUTHORIZED", "message": "Not authenticated"}},
+        )
+    user_id = user.get("sub") or user.get("id", "")
+
+    result = await db.execute(
+        select(UserIdentity).where(
+            UserIdentity.id == identity_id,
+            UserIdentity.user_id == user_id,
+        )
+    )
+    identity = result.scalar_one_or_none()
+    if not identity:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "NOT_FOUND", "message": "Identity not found"}},
+        )
+
+    # Prevent lockout: SSO-only users must keep at least one identity.
+    user_row = await db.get(User, user_id)
+    if user_row and not user_row.hashed_password:
+        count_result = await db.execute(
+            select(UserIdentity).where(UserIdentity.user_id == user_id)
+        )
+        if len(count_result.scalars().all()) <= 1:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "BAD_REQUEST", "message": "Cannot unlink your last SSO identity — set a password first to avoid lockout"}},
+            )
+
+    await db.delete(identity)
+    await db.commit()
+    return {"status": "ok"}

@@ -661,6 +661,7 @@ class RestoreResponse(BaseModel):
     title: str
     restored_from_session_id: str
     restored_from_sequence: int
+    mode: str = "fork"
 
 
 def _checkpoint_preview(messages: list[dict]) -> str:
@@ -741,8 +742,10 @@ async def list_checkpoints(
     cps = await store.list(session_id)
     shim = LangGraphCheckpointShim(store, session_id, "")
 
-    # Reconstruct the full message list for each checkpoint (the stored
-    # ``messages`` column may be empty for rows written before the fix).
+    # Reconstruct the full message list for each checkpoint. The stored
+    # ``cp.messages`` column is the authoritative snapshot — if empty,
+    # ``reconstruct_checkpoint_messages`` returns ``[]`` (not the full
+    # session writes) so empty checkpoints are filtered out below.
     rebuilt: list[tuple[Any, list[dict]]] = []
     for cp in cps:
         messages = await shim.reconstruct_checkpoint_messages(cp)
@@ -774,6 +777,200 @@ async def list_checkpoints(
     return result
 
 
+async def _reseed_checkpoint_sql(
+    *,
+    db: AsyncSession,
+    shim: "LangGraphCheckpointShim",
+    session_id: str,
+    sequence: int,
+    messages: list[dict],
+    agent_id: str,
+    metadata: dict,
+) -> str:
+    """Re-seed a checkpoint + per-message writes via raw SQL on the given
+    ``db`` session (single transaction, no separate connections).
+
+    Returns the new LangGraph ``checkpoint_id`` (UUID hex) so callers can
+    reference it if needed. All inserts use ``INSERT OR REPLACE`` so this
+    can overwrite an existing checkpoint at the same sequence (in-place
+    restore) or create a fresh one (fork).
+
+    This replaces ``store.save`` + ``shim.aput_writes`` which each opened
+    their own ``async_session()`` and committed independently — that
+    non-atomic behavior caused garbled history after multiple restores
+    (deletions on the request session could roll back while the re-seed
+    on separate connections persisted).
+    """
+    import base64 as _b64
+    import json as _json
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    from sqlalchemy import text as _sa_text
+
+    if not messages:
+        return ""
+
+    lc_messages = shim._to_langchain_messages(messages)
+    new_checkpoint_id = _uuid.uuid4().hex
+    envelope = {
+        "v": 1,
+        "id": new_checkpoint_id,
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "channel_values": {},
+        "channel_versions": {
+            "messages": 0,
+            "__start__": 1,
+        },
+        "versions_seen": {},
+        "pending_sends": [],
+    }
+    type_str, payload_bytes = shim.serde.dumps_typed(envelope)
+    encoded = {
+        "type": type_str,
+        "payload_b64": _b64.b64encode(payload_bytes).decode("ascii"),
+        "checkpoint_id": new_checkpoint_id,
+    }
+
+    # Insert/replace the checkpoint row.
+    await db.execute(
+        _sa_text(
+            "INSERT OR REPLACE INTO checkpoints "
+            "(session_id, sequence, messages, tool_state, agent_id, metadata, created_at) "
+            "VALUES (:sid, :seq, :msg, :ts, :aid, :meta, :cat)"
+        ),
+        {
+            "sid": session_id,
+            "seq": sequence,
+            "msg": _json.dumps(messages),
+            "ts": _json.dumps({"langgraph_checkpoint": encoded}),
+            "aid": agent_id,
+            "meta": _json.dumps(metadata),
+            "cat": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+    # Seed per-message writes scoped to the new checkpoint_id.
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for idx, lc_msg in enumerate(lc_messages, start=1):
+        w_type, w_payload = shim.serde.dumps_typed([lc_msg])
+        w_value = _json.dumps({
+            "type": w_type,
+            "payload_b64": _b64.b64encode(w_payload).decode("ascii"),
+        })
+        await db.execute(
+            _sa_text(
+                "INSERT OR REPLACE INTO checkpoint_writes "
+                "(session_id, checkpoint_id, task_id, task_path, channel, value, created_at) "
+                "VALUES (:sid, :cid, :tid, :tp, :ch, :val, :cat)"
+            ),
+            {
+                "sid": session_id,
+                "cid": new_checkpoint_id,
+                "tid": f"r{idx}",
+                "tp": "",
+                "ch": "messages",
+                "val": w_value,
+                "cat": now_iso,
+            },
+        )
+
+    return new_checkpoint_id
+
+
+async def _restore_in_place(
+    *,
+    db: AsyncSession,
+    store: "SQLiteCheckpointStore",
+    shim: "LangGraphCheckpointShim",
+    cs: ChatSession,
+    session_id: str,
+    sequence: int,
+    target_cp: "Checkpoint",
+    messages: list[dict],
+) -> RestoreResponse:
+    """Rollback the current session to ``sequence`` in-place.
+
+    Strategy: delete ALL LangGraph state (checkpoints/writes/blobs) and
+    re-seed a single fresh checkpoint from the target's messages. This
+    avoids the fragile "selectively keep old writes" approach which breaks
+    because old writes reference checkpoint_ids that may not survive the
+    truncation. The re-seeded checkpoint gives the agent a clean, complete
+    conversation state to continue from.
+
+    - Checkpoints with sequence <= N are kept for UI restore history.
+      Their ``messages`` snapshots are self-contained and don't depend on
+      writes/blobs.
+    - All writes/blobs are wiped and re-seeded for the target checkpoint.
+    - chat_messages are truncated to match the target checkpoint.
+
+    All operations use the request's ``db`` session (single transaction)
+    to guarantee atomicity — previously ``store.save`` and
+    ``shim.aput_writes`` used separate connections that committed
+    independently, causing garbled history if the main transaction failed.
+    """
+    from sqlalchemy import text as _sa_text
+
+    # 1. Delete ALL checkpoint_writes and checkpoint_blobs for this session.
+    await db.execute(
+        _sa_text("DELETE FROM checkpoint_writes WHERE session_id = :sid"),
+        {"sid": session_id},
+    )
+    await db.execute(
+        _sa_text("DELETE FROM checkpoint_blobs WHERE session_id = :sid"),
+        {"sid": session_id},
+    )
+
+    # 2. Delete checkpoint rows with sequence > N (future checkpoints).
+    await db.execute(
+        _sa_text(
+            "DELETE FROM checkpoints WHERE session_id = :sid AND sequence > :seq"
+        ),
+        {"sid": session_id, "seq": sequence},
+    )
+
+    # 3. Truncate chat_messages and re-insert from target checkpoint.
+    await db.execute(
+        _sa_text("DELETE FROM chat_messages WHERE session_id = :sid"),
+        {"sid": session_id},
+    )
+    for msg in messages:
+        db.add(ChatMessage(
+            session_id=session_id,
+            role=msg.get("role", "user"),
+            content=msg.get("content", ""),
+            tokens=0,
+        ))
+
+    # 4. Re-seed the target checkpoint with a fresh LangGraph envelope
+    #    and per-message writes — all via raw SQL on the same db session.
+    if messages:
+        source_metadata = target_cp.metadata if isinstance(target_cp.metadata, dict) else {}
+        new_metadata = {
+            "step": source_metadata.get("step", 0),
+            "source": "restore_in_place",
+            "restored_from_sequence": sequence,
+        }
+        await _reseed_checkpoint_sql(
+            db=db,
+            shim=shim,
+            session_id=session_id,
+            sequence=sequence,
+            messages=messages,
+            agent_id=cs.agent_name or "",
+            metadata=new_metadata,
+        )
+
+    await db.commit()
+
+    return RestoreResponse(
+        session_id=session_id,
+        title=cs.title,
+        restored_from_session_id=session_id,
+        restored_from_sequence=sequence,
+        mode="in_place",
+    )
+
+
 @router.post(
     "/api/v1/workspaces/{workspace_id}/sessions/{session_id}/checkpoints/{sequence}/restore",
     response_model=RestoreResponse,
@@ -783,13 +980,21 @@ async def restore_checkpoint(
     session_id: str,
     sequence: int,
     request: Request,
+    mode: str = "fork",
     db: AsyncSession = Depends(get_db),
 ):
-    """Branch-restore from a checkpoint: creates a new session seeded with
-    the checkpoint's messages (deepagents only).
+    """Restore from a checkpoint in one of two modes:
 
-    Returns the new session_id so the frontend can navigate to it. The
-    original session is never modified — this is a branch, not a rollback.
+    - ``mode=fork`` (default): creates a NEW session seeded with the
+      checkpoint's messages. The original session is never modified.
+      Returns the new session_id so the frontend can navigate to it.
+
+    - ``mode=in_place``: rolls back the CURRENT session to the target
+      checkpoint. Checkpoints with sequence > N are deleted (along with
+      their orphaned writes/blobs), and chat_messages are truncated to
+      match the target checkpoint's message list. Checkpoints with
+      sequence <= N are preserved so the user can still restore to
+      earlier points. Returns the same session_id.
     """
     user = getattr(request.state, "user", None)
     if not user:
@@ -848,6 +1053,19 @@ async def restore_checkpoint(
     shim = LangGraphCheckpointShim(store, session_id, "")
     messages = await shim.reconstruct_checkpoint_messages(cp)
 
+    # ── In-place restore: rollback the current session ──
+    if mode == "in_place":
+        return await _restore_in_place(
+            db=db,
+            store=store,
+            shim=shim,
+            cs=cs,
+            session_id=session_id,
+            sequence=sequence,
+            target_cp=cp,
+            messages=messages,
+        )
+
     # Create a new session (branch from parent).
     import uuid as _uuid
 
@@ -863,7 +1081,11 @@ async def restore_checkpoint(
     )
     db.add(new_cs)
 
-    # Seed the new session with the checkpoint's messages.
+    # Seed the new session with ONLY the target checkpoint's messages
+    # (not the full session history). The ``messages`` list comes from
+    # ``reconstruct_checkpoint_messages`` which returns the snapshot
+    # stored in ``cp.messages`` — the full conversation up to that
+    # checkpoint, nothing after.
     for msg in messages:
         db.add(ChatMessage(
             session_id=new_session_id,
@@ -880,64 +1102,37 @@ async def restore_checkpoint(
         tokens=0,
     ))
 
-    # Persist a resumable checkpoint for the new branch session so the
-    # agent can continue the conversation with the restored history.
+    # Copy ALL prior checkpoint rows (sequence <= target) from the
+    # original session to the new session. This preserves the full
+    # checkpoint history so the user can see restore points in the
+    # forked session — without this, the forked session would only have
+    # a single checkpoint and the inline button map (which matches the
+    # i-th user message to the i-th checkpoint) would only show a button
+    # on the first user bubble.
     #
-    # Mirrors a NORMAL turn-1 checkpoint produced by the shim: the
-    # LangGraph envelope carries an EMPTY ``channel_values`` (aput pops
-    # messages before serializing) and the authoritative conversation
-    # lives in ``checkpoint_writes`` — one ``messages`` write per message,
-    # each wrapped as a single-element list (exactly how langgraph 1.2+
-    # routes appended messages). ``aget_tuple`` then rebuilds the full
-    # history from those writes on resume, and subsequent turns append to
-    # the same table so the post-restore conversation stays consistent.
-    #
-    # Seeding the writes (not stuffing them into the envelope) is what
-    # prevents the restore from losing the pre-restore history after the
-    # first continued turn — without it, only the new messages would ever
-    # reach ``checkpoint_writes``.
+    # We copy only the ``checkpoints`` table rows (self-contained
+    # ``messages`` snapshots). Writes/blobs are NOT copied — the target
+    # checkpoint gets fresh writes via ``_reseed_checkpoint_sql`` below,
+    # and earlier checkpoints are only needed for UI history (their
+    # ``tool_state`` is stale but never used by ``aget_tuple`` because
+    # the agent always resumes from the latest checkpoint).
+    from sqlalchemy import text as _sa_text
+    await db.execute(
+        _sa_text(
+            "INSERT INTO checkpoints "
+            "(session_id, sequence, messages, tool_state, agent_id, metadata, created_at) "
+            "SELECT :new_sid, sequence, messages, tool_state, agent_id, metadata, created_at "
+            "FROM checkpoints "
+            "WHERE session_id = :old_sid AND sequence <= :target_seq"
+        ),
+        {"new_sid": new_session_id, "old_sid": session_id, "target_seq": sequence},
+    )
+
+    # Re-seed the target checkpoint with a fresh LangGraph envelope +
+    # per-message writes so the agent can resume from it. This overwrites
+    # the copied row at the same sequence (INSERT OR REPLACE) with a
+    # clean state that doesn't reference old blob versions.
     if messages:
-        import base64 as _b64
-        from datetime import datetime, timezone
-
-        from src.runtime.harness.checkpoint import Checkpoint as CPCheckpoint
-
-        new_checkpoint_id = _uuid.uuid4().hex
-        lc_messages = shim._to_langchain_messages(messages)
-        envelope = {
-            "v": 1,
-            "id": new_checkpoint_id,
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "channel_values": {},
-            # Channel versions MUST be integers. LangGraph's pregel loop
-            # does ``max(checkpoint["channel_versions"].values())`` when
-            # applying the seeded pending writes on resume
-            # (_algo.py:apply_writes); a mixed str/int value raises
-            # ``TypeError: '>' not supported between instances of 'int'
-            # and 'str'``. The base ``messages`` version is 0 — the
-            # channel is empty until the seeded writes (one per restored
-            # message) are re-applied, exactly like a normal resume.
-            "channel_versions": {
-                "messages": 0,
-                "__start__": 1,
-            },
-            "versions_seen": {},
-            "pending_sends": [],
-        }
-        type_str, payload_bytes = shim.serde.dumps_typed(envelope)
-        encoded = {
-            "type": type_str,
-            "payload_b64": _b64.b64encode(payload_bytes).decode("ascii"),
-            "checkpoint_id": new_checkpoint_id,
-        }
-        # Carry the source checkpoint's LangGraph metadata so resume works.
-        # LangGraph reads ``metadata["step"]`` when resuming a thread
-        # (pregel/_loop.py: `self.step = self.checkpoint_metadata["step"] + 1`);
-        # without it the next message raises ``KeyError: 'step'``. We keep
-        # the original ``step`` (so numbering continues naturally) and drop
-        # ``writes``/``parents`` — those describe the OLD checkpoint's
-        # pending tool calls and would wrongly signal resumable tool state
-        # on the fresh branch.
         source_metadata = cp.metadata if isinstance(cp.metadata, dict) else {}
         new_metadata = {
             "step": source_metadata.get("step", 0),
@@ -945,31 +1140,15 @@ async def restore_checkpoint(
             "restored_from": session_id,
             "restored_from_sequence": sequence,
         }
-        await store.save(
-            CPCheckpoint(
-                session_id=new_session_id,
-                sequence=1,
-                messages=messages,
-                tool_state={"langgraph_checkpoint": encoded},
-                agent_id=cs.agent_name or "",
-                metadata=new_metadata,
-            )
+        await _reseed_checkpoint_sql(
+            db=db,
+            shim=shim,
+            session_id=new_session_id,
+            sequence=sequence,
+            messages=messages,
+            agent_id=cs.agent_name or "",
+            metadata=new_metadata,
         )
-        # Seed the per-message writes (scoped to the new checkpoint id so
-        # aget_tuple's pending-write load picks them up). task_id ordering
-        # (t1, t2, …) is the tiebreaker when created_at values collide.
-        restore_config = {
-            "configurable": {
-                "thread_id": new_session_id,
-                "checkpoint_id": new_checkpoint_id,
-            }
-        }
-        for idx, lc_msg in enumerate(lc_messages, start=1):
-            await shim.aput_writes(
-                restore_config,
-                [("messages", [lc_msg])],
-                task_id=f"r{idx}",
-            )
 
     await db.commit()
 

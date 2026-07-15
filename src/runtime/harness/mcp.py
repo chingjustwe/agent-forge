@@ -53,6 +53,7 @@ class MCPServerConfig(BaseModel):
     auth_token: str | None = None
     enabled: bool = True
     created_at: datetime | None = None
+    created_by: str | None = None  # owner (for ownership checks)
 
 
 class MCPConnection:
@@ -234,7 +235,7 @@ class MCPManager:
             result = await db.execute(
                 text(
                     "SELECT id, name, workspace_id, endpoint, transport, "
-                    "auth_token, enabled, created_at FROM mcp_servers"
+                    "auth_token, enabled, created_at, created_by FROM mcp_servers"
                 )
             )
             for row in result.fetchall():
@@ -249,15 +250,16 @@ class MCPManager:
         key = (config.workspace_id, config.name)
         # Persist to DB. Upsert on (workspace_id, name) so re-registration
         # (incl. updates routed through this method) replaces the row without
-        # changing its id or created_at.
+        # changing its id or created_at. ``created_by`` is only set on INSERT
+        # (not overwritten on UPDATE) so ownership survives re-registration.
         async with async_session() as db:
             await db.execute(
                 text(
                     "INSERT INTO mcp_servers "
                     "(id, name, workspace_id, endpoint, transport, "
-                    "auth_token, enabled, created_at) "
+                    "auth_token, enabled, created_at, created_by) "
                     "VALUES (:id, :name, :ws, :endpoint, :transport, "
-                    ":auth_token, :enabled, :created_at) "
+                    ":auth_token, :enabled, :created_at, :created_by) "
                     "ON CONFLICT(workspace_id, name) DO UPDATE SET "
                     "endpoint=excluded.endpoint, "
                     "transport=excluded.transport, "
@@ -273,6 +275,7 @@ class MCPManager:
                     "auth_token": config.auth_token,
                     "enabled": 1 if config.enabled else 0,
                     "created_at": config.created_at.isoformat(),
+                    "created_by": config.created_by,
                 },
             )
             await db.commit()
@@ -330,6 +333,7 @@ class MCPManager:
             auth_token=row.auth_token,
             enabled=bool(row.enabled),
             created_at=created_at,
+            created_by=row.created_by if hasattr(row, "created_by") else None,
         )
 
     async def connect(
