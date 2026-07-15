@@ -137,6 +137,7 @@ class TelemetryCollector:
         self,
         ws_id: str,
         since: str | None = None,
+        until: str | None = None,
         user_id: str | None = None,
     ) -> dict:
         async with async_session() as session:
@@ -145,6 +146,9 @@ class TelemetryCollector:
             if since:
                 conditions += " AND created_at >= :since"
                 params["since"] = since
+            if until:
+                conditions += " AND date(created_at) <= :until"
+                params["until"] = until
             if user_id:
                 conditions += " AND user_id = :user_id"
                 params["user_id"] = user_id
@@ -185,23 +189,100 @@ class TelemetryCollector:
         since: str | None = None,
     ) -> list[dict]:
         async with async_session() as session:
-            conditions = ["WHERE workspace_id = :ws_id"]
+            conditions = ["WHERE r.workspace_id = :ws_id"]
             params: dict[str, Any] = {"ws_id": ws_id, "limit": limit, "offset": offset}
             if status is not None:
-                conditions.append("AND status_code = :status")
+                conditions.append("AND r.status_code = :status")
                 params["status"] = status
             if model:
-                conditions.append("AND model = :model")
+                conditions.append("AND r.model = :model")
                 params["model"] = model
             if since:
-                conditions.append("AND created_at >= :since")
+                conditions.append("AND r.created_at >= :since")
                 params["since"] = since
 
             rows = (await session.execute(
                 text(f"""
-                    SELECT id, trace_id, user_id, workspace_id, agent, model, status_code, duration_ms, input_tokens, output_tokens, error, created_at
-                    FROM request_logs {' '.join(conditions)}
-                    ORDER BY created_at DESC
+                    SELECT r.id, r.trace_id, r.user_id, r.workspace_id, r.agent, r.model,
+                           r.status_code, r.duration_ms, r.input_tokens, r.output_tokens,
+                           r.error, r.created_at,
+                           u.email AS user_email, u.name AS user_name
+                    FROM request_logs r
+                    LEFT JOIN users u ON r.user_id = u.id
+                    {' '.join(conditions)}
+                    ORDER BY r.created_at DESC
+                    LIMIT :limit OFFSET :offset
+                """),
+                params,
+            )).all()
+
+            return [dict(r._mapping) for r in rows]
+
+    async def get_requests_admin(
+        self,
+        tenant_id: str,
+        ws_ids: list[str] | None,
+        limit: int = 50,
+        offset: int = 0,
+        workspace_id: str | None = None,
+        user_id: str | None = None,
+        agent: str | None = None,
+        model: str | None = None,
+        status: int | None = None,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> list[dict]:
+        """跨 workspace 查询 request_logs，供 admin Audit 页使用。
+
+        ws_ids=None 表示 tenant_admin 看所有；ws_ids=list 表示 workspace_admin
+        只看自己管理的 workspace 列表。
+        """
+        async with async_session() as session:
+            conditions = ["WHERE r.tenant_id = :tenant_id"]
+            params: dict[str, Any] = {"tenant_id": tenant_id, "limit": limit, "offset": offset}
+
+            if ws_ids is not None:
+                if not ws_ids:
+                    return []
+                placeholders = ",".join(f":ws_{i}" for i in range(len(ws_ids)))
+                conditions.append(f"AND r.workspace_id IN ({placeholders})")
+                for i, wid in enumerate(ws_ids):
+                    params[f"ws_{i}"] = wid
+            if workspace_id:
+                conditions.append("AND r.workspace_id = :workspace_id")
+                params["workspace_id"] = workspace_id
+            if user_id:
+                conditions.append("AND (r.user_id = :user_id OR u.email LIKE :user_like)")
+                params["user_id"] = user_id
+                params["user_like"] = f"%{user_id}%"
+            if agent:
+                conditions.append("AND r.agent LIKE :agent")
+                params["agent"] = f"%{agent}%"
+            if model:
+                conditions.append("AND r.model LIKE :model")
+                params["model"] = f"%{model}%"
+            if status is not None:
+                conditions.append("AND r.status_code = :status")
+                params["status"] = status
+            if since:
+                conditions.append("AND r.created_at >= :since")
+                params["since"] = since
+            if until:
+                conditions.append("AND r.created_at <= :until")
+                params["until"] = until
+
+            rows = (await session.execute(
+                text(f"""
+                    SELECT r.id, r.trace_id, r.user_id, r.workspace_id, r.tenant_id,
+                           r.agent, r.model, r.status_code, r.duration_ms,
+                           r.input_tokens, r.output_tokens, r.error, r.created_at,
+                           u.email AS user_email, u.name AS user_name,
+                           w.name AS workspace_name
+                    FROM request_logs r
+                    LEFT JOIN users u ON r.user_id = u.id
+                    LEFT JOIN workspaces w ON r.workspace_id = w.id
+                    {' '.join(conditions)}
+                    ORDER BY r.created_at DESC
                     LIMIT :limit OFFSET :offset
                 """),
                 params,
@@ -213,8 +294,13 @@ class TelemetryCollector:
         async with async_session() as session:
             row = (await session.execute(
                 text("""
-                    SELECT id, trace_id, user_id, workspace_id, agent, model, status_code, duration_ms, input_tokens, output_tokens, error, created_at
-                    FROM request_logs WHERE trace_id = :trace_id AND workspace_id = :ws_id
+                    SELECT r.id, r.trace_id, r.user_id, r.workspace_id, r.agent, r.model,
+                           r.status_code, r.duration_ms, r.input_tokens, r.output_tokens,
+                           r.error, r.created_at,
+                           u.email AS user_email, u.name AS user_name
+                    FROM request_logs r
+                    LEFT JOIN users u ON r.user_id = u.id
+                    WHERE r.trace_id = :trace_id AND r.workspace_id = :ws_id
                 """),
                 {"trace_id": trace_id, "ws_id": ws_id},
             )).one_or_none()
@@ -238,10 +324,34 @@ class TelemetryCollector:
                 {"trace_id": trace_id},
             )).all()
 
-            spans = [
-                s.to_dict()
-                for s in tracer.get_spans(trace_id)
-            ]
+            spans = [s.to_dict() for s in tracer.get_spans(trace_id)]
+
+            # Fallback: build spans from DB data when in-memory spans are empty
+            # (e.g. after server restart). This ensures the Trace Waterfall always
+            # has meaningful content from persisted tool_calls + request duration.
+            if not spans:
+                spans = []
+                for tc in tool_calls:
+                    spans.append({
+                        "span_id": tc.id if isinstance(tc.id, str) else str(tc.id),
+                        "trace_id": trace_id,
+                        "parent_span_id": None,
+                        "name": f"tool.{tc.tool_name}",
+                        "attributes": {"tool": tc.tool_name, "success": bool(tc.success)},
+                        "start_time": None,
+                        "duration_ms": float(tc.duration_ms) if tc.duration_ms else None,
+                    })
+                # Add a root span for the overall request
+                if row.duration_ms:
+                    spans.append({
+                        "span_id": "root",
+                        "trace_id": trace_id,
+                        "parent_span_id": None,
+                        "name": "chat.request",
+                        "attributes": {"model": row.model, "agent": row.agent},
+                        "start_time": None,
+                        "duration_ms": float(row.duration_ms),
+                    })
 
             return {
                 "request": dict(row._mapping),
@@ -296,7 +406,7 @@ class TelemetryCollector:
                 conditions.append("AND created_at >= :since")
                 params["since"] = since
             if until:
-                conditions.append("AND created_at <= :until")
+                conditions.append("AND date(created_at) <= :until")
                 params["until"] = until
             if user_id:
                 conditions.append("AND user_id = :user_id")
@@ -346,13 +456,16 @@ class TelemetryCollector:
                 ],
             }
 
-    async def get_errors(self, ws_id: str, since: str | None = None, user_id: str | None = None) -> list[dict]:
+    async def get_errors(self, ws_id: str, since: str | None = None, until: str | None = None, user_id: str | None = None) -> list[dict]:
         async with async_session() as session:
             conditions = ["WHERE workspace_id = :ws_id AND error != ''"]
             params: dict[str, Any] = {"ws_id": ws_id}
             if since:
                 conditions.append("AND created_at >= :since")
                 params["since"] = since
+            if until:
+                conditions.append("AND date(created_at) <= :until")
+                params["until"] = until
             if user_id:
                 conditions.append("AND user_id = :user_id")
                 params["user_id"] = user_id

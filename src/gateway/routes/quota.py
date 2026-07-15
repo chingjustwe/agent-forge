@@ -14,6 +14,7 @@ router = APIRouter()
 
 class QuotaUpdate(BaseModel):
     max_tokens_per_day: int | None = None
+    max_cost_per_day: float | None = None
     max_cost_per_month: float | None = None
 
 
@@ -29,10 +30,12 @@ async def get_quota(
     usage = await guardrail.get_usage(ws_id)
     return {
         "max_tokens_per_day": usage["max_tokens_per_day"],
+        "max_cost_per_day": usage["max_cost_per_day"],
         "max_cost_per_month": usage["max_cost_per_month"],
         "usage_today": usage["tokens_used"],
         "tokens_used": usage["tokens_used"],
         "cost_today": usage["cost_today"],
+        "cost_this_month": usage["cost_this_month"],
     }
 
 
@@ -55,6 +58,8 @@ async def update_quota(
 
         if body.max_tokens_per_day is not None:
             ws.max_tokens_per_day = body.max_tokens_per_day
+        if body.max_cost_per_day is not None:
+            ws.max_cost_per_day = body.max_cost_per_day
         if body.max_cost_per_month is not None:
             ws.max_cost_per_month = body.max_cost_per_month
         await session.commit()
@@ -63,6 +68,7 @@ async def update_quota(
     return {
         "quota": {
             "max_tokens_per_day": ws.max_tokens_per_day,
+            "max_cost_per_day": ws.max_cost_per_day,
             "max_cost_per_month": ws.max_cost_per_month,
         }
     }

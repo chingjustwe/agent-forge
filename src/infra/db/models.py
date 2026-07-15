@@ -44,6 +44,7 @@ class Workspace(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     settings: Mapped[dict] = mapped_column(JSON, default=dict)
     max_tokens_per_day: Mapped[int] = mapped_column(Integer, default=1_000_000)
+    max_cost_per_day: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0.0"))
     max_cost_per_month: Mapped[float] = mapped_column(Float, default=0.0)
     archived: Mapped[int] = mapped_column(Integer, default=0)
     is_default: Mapped[int] = mapped_column(Integer, default=0)

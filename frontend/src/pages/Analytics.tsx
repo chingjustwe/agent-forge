@@ -2,13 +2,11 @@ import { useEffect, useState, useCallback } from "react";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, LineChart, Line, PieChart, Pie, Cell, ResponsiveContainer } from "recharts";
 import {
   getObservabilitySummary, getTokenDaily, getLatency, getErrors,
-  fetchUsage, updateQuota, getQuota,
+  fetchUsage, getQuota,
   ObservabilitySummary, DailyToken, LatencyData, ErrorGroup,
   UsageData, QuotaInfo,
 } from "../api";
 import { useWorkspace } from "../context/WorkspaceContext";
-import { useToast } from "../components/Toast";
-import { Modal } from "../components/Modal";
 import { EmptyState } from "../components/EmptyState";
 import { SkeletonTable, SkeletonText } from "../components/Skeleton";
 import { DatePicker } from "../components/DatePicker";
@@ -67,7 +65,6 @@ function formatTokens(n: number): string {
 
 export default function Analytics() {
   const { currentWorkspaceId, currentRole } = useWorkspace();
-  const toast = useToast();
 
   // Data state
   const [summary, setSummary] = useState<ObservabilitySummary | null>(null);
@@ -83,17 +80,10 @@ export default function Analytics() {
   const [until, setUntil] = useState("");
   const [activePreset, setActivePreset] = useState<RangePreset | null>("today");
 
-  // Quota edit modal
-  const [editing, setEditing] = useState<string | null>(null);
-  const [editTokens, setEditTokens] = useState(0);
-  const [editCost, setEditCost] = useState(0);
-  const [saving, setSaving] = useState(false);
-
   // Admin 判断：workspace_admin 或 tenant_admin 看 workspace 全量数据
   const isAdmin = currentRole === "workspace_admin" || currentRole === "tenant_admin";
   // Per-workspace 表格仅 tenant_admin 可见（跨 workspace 视图）
   const showPerWorkspaceTable = currentRole === "tenant_admin";
-  const canEditQuota = currentRole === "workspace_admin" || currentRole === "tenant_admin";
 
   // 视角切换：admin 可在 Workspace / My Activity 之间切换；member 只能看自己
   const [scope, setScope] = useState<"workspace" | "me">("workspace");
@@ -116,10 +106,10 @@ export default function Analytics() {
     const sinceParam = since || undefined;
     const untilParam = until || undefined;
     Promise.all([
-      getObservabilitySummary(currentWorkspaceId, userIdParam, sinceParam),
+      getObservabilitySummary(currentWorkspaceId, userIdParam, sinceParam, untilParam),
       getTokenDaily(currentWorkspaceId, sinceParam, untilParam, userIdParam),
       getLatency(currentWorkspaceId, sinceParam, untilParam, userIdParam),
-      getErrors(currentWorkspaceId, sinceParam, userIdParam),
+      getErrors(currentWorkspaceId, sinceParam, untilParam, userIdParam),
       getQuota(currentWorkspaceId),
     ]).then(([s, t, l, e, q]) => {
       setSummary(s);
@@ -155,30 +145,6 @@ export default function Analytics() {
     setActivePreset(null);
   };
 
-  const openEditModal = (wsId: string, maxTokens: number, maxCost: number) => {
-    setEditing(wsId);
-    setEditTokens(maxTokens);
-    setEditCost(maxCost);
-  };
-
-  const handleSave = async () => {
-    if (!editing) return;
-    setSaving(true);
-    try {
-      await updateQuota(editing, {
-        max_tokens_per_day: editTokens,
-        max_cost_per_month: editCost,
-      });
-      setEditing(null);
-      toast.success("Quota updated", "Limits have been saved successfully.");
-      load();
-    } catch (err) {
-      toast.error("Save failed", err instanceof Error ? err.message : "Failed to update quota");
-    } finally {
-      setSaving(false);
-    }
-  };
-
   if (!currentWorkspaceId) {
     return (
       <div>
@@ -198,11 +164,19 @@ export default function Analytics() {
   const inputPct = totalTokens > 0 ? (summary!.input_tokens / totalTokens) * 100 : 0;
   const outputPct = totalTokens > 0 ? (summary!.output_tokens / totalTokens) * 100 : 0;
 
-  // Quota progress
-  const quotaPct = quota && quota.max_tokens_per_day > 0
+  // Quota progress — three independent dimensions
+  const tokenPct = quota && quota.max_tokens_per_day > 0
     ? Math.min(100, (quota.tokens_used / quota.max_tokens_per_day) * 100)
     : 0;
-  const barClass = quotaPct > 90 ? "progress-bar-fill-error" : quotaPct > 70 ? "progress-bar-fill-warning" : "";
+  const costDayPct = quota && quota.max_cost_per_day > 0
+    ? Math.min(100, (quota.cost_today / quota.max_cost_per_day) * 100)
+    : 0;
+  const costMonthPct = quota && quota.max_cost_per_month > 0
+    ? Math.min(100, (quota.cost_this_month / quota.max_cost_per_month) * 100)
+    : 0;
+
+  const barClassFor = (pct: number) =>
+    pct > 90 ? "progress-bar-fill-error" : pct > 70 ? "progress-bar-fill-warning" : "";
 
   return (
     <div>
@@ -284,7 +258,7 @@ export default function Analytics() {
               <div className="stat-card-label">Output Tokens</div>
             </div>
             <div className="stat-card stat-card-accent-warning">
-              <div className="stat-card-value">${summary.total_cost.toFixed(2)}</div>
+              <div className="stat-card-value">${summary.total_cost.toFixed(4)}</div>
               <div className="stat-card-label">Total Cost</div>
             </div>
           </div>
@@ -333,27 +307,66 @@ export default function Analytics() {
             </div>
           )}
 
-          {/* Quota management — admin only, workspace scope only */}
-          {canEditQuota && quota && scope === "workspace" && (
+          {/* Quota usage display — admin only, workspace scope only (read-only) */}
+          {isAdmin && quota && scope === "workspace" && (
             <div className="card" style={{ marginBottom: 20 }}>
               <div className="card-header">
                 <h3 className="card-title">Workspace Quota — Today</h3>
-                <button
-                  className="btn btn-secondary btn-sm"
-                  onClick={() => openEditModal(currentWorkspaceId, quota.max_tokens_per_day, quota.max_cost_per_month)}
-                >
-                  Edit Limits
-                </button>
               </div>
-              <div className="progress-bar">
-                <div className={`progress-bar-fill ${barClass}`} style={{ width: `${quotaPct}%` }} />
+
+              {/* Tokens / day */}
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, fontSize: "0.82rem" }}>
+                  <span style={{ color: "var(--text-secondary)" }}>Tokens / day</span>
+                  <span style={{ fontFamily: "var(--font-mono)" }}>
+                    {quota.tokens_used.toLocaleString()} /{" "}
+                    {quota.max_tokens_per_day === 0 ? "∞" : quota.max_tokens_per_day.toLocaleString()}
+                    {quota.max_tokens_per_day > 0 && ` (${tokenPct.toFixed(1)}%)`}
+                  </span>
+                </div>
+                <div className="progress-bar">
+                  <div
+                    className={`progress-bar-fill ${barClassFor(tokenPct)}`}
+                    style={{ width: `${quota.max_tokens_per_day > 0 ? tokenPct : 0}%` }}
+                  />
+                </div>
               </div>
-              <p className="quota-usage-text">
-                {quota.tokens_used.toLocaleString()} /{" "}
-                {quota.max_tokens_per_day === 0 ? "Unlimited" : quota.max_tokens_per_day.toLocaleString()} tokens today
-                {" · "}Cost today: ${quota.cost_today.toFixed(4)}
-                {" · "}Max cost/month: ${quota.max_cost_per_month.toFixed(2)}
-              </p>
+
+              {/* Cost / day */}
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, fontSize: "0.82rem" }}>
+                  <span style={{ color: "var(--text-secondary)" }}>Cost / day</span>
+                  <span style={{ fontFamily: "var(--font-mono)" }}>
+                    ${quota.cost_today.toFixed(4)} /{" "}
+                    {quota.max_cost_per_day === 0 ? "∞" : `$${quota.max_cost_per_day.toFixed(2)}`}
+                    {quota.max_cost_per_day > 0 && ` (${costDayPct.toFixed(1)}%)`}
+                  </span>
+                </div>
+                <div className="progress-bar">
+                  <div
+                    className={`progress-bar-fill ${barClassFor(costDayPct)}`}
+                    style={{ width: `${quota.max_cost_per_day > 0 ? costDayPct : 0}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Cost / month */}
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6, fontSize: "0.82rem" }}>
+                  <span style={{ color: "var(--text-secondary)" }}>Cost / month</span>
+                  <span style={{ fontFamily: "var(--font-mono)" }}>
+                    ${quota.cost_this_month.toFixed(4)} /{" "}
+                    {quota.max_cost_per_month === 0 ? "∞" : `$${quota.max_cost_per_month.toFixed(2)}`}
+                    {quota.max_cost_per_month > 0 && ` (${costMonthPct.toFixed(1)}%)`}
+                  </span>
+                </div>
+                <div className="progress-bar">
+                  <div
+                    className={`progress-bar-fill ${barClassFor(costMonthPct)}`}
+                    style={{ width: `${quota.max_cost_per_month > 0 ? costMonthPct : 0}%` }}
+                  />
+                </div>
+              </div>
             </div>
           )}
 
@@ -373,7 +386,6 @@ export default function Analytics() {
                       <th>Cost</th>
                       <th>Daily Limit</th>
                       <th>Usage %</th>
-                      {canEditQuota && <th>Actions</th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -401,16 +413,6 @@ export default function Analytics() {
                               <span style={{ fontSize: "0.82rem", fontFamily: "var(--font-mono)" }}>{pct.toFixed(0)}%</span>
                             </div>
                           </td>
-                          {canEditQuota && (
-                            <td>
-                              <button
-                                className="btn btn-secondary btn-sm"
-                                onClick={() => openEditModal(ws.workspace_id, ws.max_tokens_per_day, ws.max_cost_per_month)}
-                              >
-                                Edit
-                              </button>
-                            </td>
-                          )}
                         </tr>
                       );
                     })}
@@ -494,41 +496,6 @@ export default function Analytics() {
           description="No data is available for the selected period."
         />
       )}
-
-      <Modal
-        open={editing !== null}
-        onClose={() => setEditing(null)}
-        title="Edit Quota Limits"
-        width="sm"
-        footer={
-          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-            <button className="btn btn-secondary" onClick={() => setEditing(null)}>
-              Cancel
-            </button>
-            <button className="btn btn-primary" onClick={handleSave} disabled={saving}>
-              {saving ? "Saving..." : "Save"}
-            </button>
-          </div>
-        }
-      >
-        <div className="form-group">
-          <label className="form-label">Max Tokens Per Day</label>
-          <input
-            type="number"
-            value={editTokens}
-            onChange={e => setEditTokens(Number(e.target.value))}
-          />
-        </div>
-        <div className="form-group">
-          <label className="form-label">Max Cost Per Month (USD)</label>
-          <input
-            type="number"
-            step="0.01"
-            value={editCost}
-            onChange={e => setEditCost(Number(e.target.value))}
-          />
-        </div>
-      </Modal>
     </div>
   );
 }

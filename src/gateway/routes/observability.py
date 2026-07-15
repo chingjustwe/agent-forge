@@ -37,9 +37,10 @@ async def get_summary(
     ),
 ):
     since = request.query_params.get("since")
+    until = request.query_params.get("until")
     user_id = _resolve_user_id(request, ctx)
     collector = TelemetryCollector()
-    summary = await collector.get_summary(ws_id, since, user_id=user_id)
+    summary = await collector.get_summary(ws_id, since, until=until, user_id=user_id)
     return summary
 
 
@@ -127,7 +128,8 @@ async def get_errors(
     ),
 ):
     since = request.query_params.get("since")
+    until = request.query_params.get("until")
     user_id = _resolve_user_id(request, ctx)
     collector = TelemetryCollector()
-    data = await collector.get_errors(ws_id, since, user_id=user_id)
+    data = await collector.get_errors(ws_id, since, until=until, user_id=user_id)
     return data

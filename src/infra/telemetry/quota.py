@@ -16,6 +16,12 @@ class GuardrailResult:
         self.scope = scope
 
 
+def _month_start() -> str:
+    """Return the first day of the current month as YYYY-MM-DD."""
+    today = date_type.today()
+    return today.replace(day=1).isoformat()
+
+
 class QuotaGuardrail:
     async def check(self, workspace_id: str) -> GuardrailResult:
         if not workspace_id:
@@ -26,25 +32,53 @@ class QuotaGuardrail:
             if not ws:
                 return GuardrailResult(passed=True, action="allow")
 
-            # 1. Workspace-level check (original logic). max=0 means unlimited.
-            if ws.max_tokens_per_day > 0:
-                row = (await session.execute(
-                    text("SELECT tokens_used FROM quota_usage WHERE workspace_id = :ws_id AND date = :today"),
-                    {"ws_id": workspace_id, "today": today},
-                )).one_or_none()
+            # ── 1. Workspace-level checks ──
+            # Fetch today's usage once (tokens + cost) for all workspace checks.
+            ws_row = (await session.execute(
+                text("SELECT tokens_used, cost FROM quota_usage WHERE workspace_id = :ws_id AND date = :today"),
+                {"ws_id": workspace_id, "today": today},
+            )).one_or_none()
+            ws_tokens_used = ws_row.tokens_used if ws_row else 0
+            ws_cost_today = ws_row.cost if ws_row else 0.0
 
-                tokens_used = row.tokens_used if row else 0
+            # 1a. Workspace tokens/day
+            if ws.max_tokens_per_day > 0 and ws_tokens_used >= ws.max_tokens_per_day:
+                return GuardrailResult(
+                    passed=False,
+                    action="block",
+                    scope="workspace",
+                    reason=f"Workspace daily token quota exceeded ({ws_tokens_used}/{ws.max_tokens_per_day})",
+                )
 
-                if tokens_used >= ws.max_tokens_per_day:
+            # 1b. Workspace cost/day
+            if ws.max_cost_per_day > 0 and ws_cost_today >= ws.max_cost_per_day:
+                return GuardrailResult(
+                    passed=False,
+                    action="block",
+                    scope="workspace",
+                    reason=f"Workspace daily cost quota exceeded (${ws_cost_today:.4f}/${ws.max_cost_per_day:.2f})",
+                )
+
+            # 1c. Workspace cost/month — aggregate across the current month
+            if ws.max_cost_per_month > 0:
+                month_start = _month_start()
+                ws_cost_month = (await session.execute(
+                    text(
+                        "SELECT COALESCE(SUM(cost), 0) FROM quota_usage "
+                        "WHERE workspace_id = :ws_id AND date >= :month_start"
+                    ),
+                    {"ws_id": workspace_id, "month_start": month_start},
+                )).scalar() or 0.0
+                if ws_cost_month >= ws.max_cost_per_month:
                     return GuardrailResult(
                         passed=False,
                         action="block",
                         scope="workspace",
-                        reason=f"Workspace daily quota exceeded ({tokens_used}/{ws.max_tokens_per_day})",
+                        reason=f"Workspace monthly cost quota exceeded (${ws_cost_month:.4f}/${ws.max_cost_per_month:.2f})",
                     )
 
-            # 2. Tenant-level check (P2-4). Aggregates quota_usage across all
-            # workspaces under the same tenant for today. max=0 means unlimited.
+            # ── 2. Tenant-level checks ──
+            # max=0 means unlimited.
             tenant = await session.get(Tenant, ws.tenant_id)
             if tenant and tenant.max_total_tokens_per_day > 0:
                 tenant_used = (await session.execute(
@@ -62,7 +96,7 @@ class QuotaGuardrail:
                         passed=False,
                         action="block",
                         scope="tenant",
-                        reason=f"Tenant daily quota exceeded ({tenant_used}/{tenant.max_total_tokens_per_day})",
+                        reason=f"Tenant daily token quota exceeded ({tenant_used}/{tenant.max_total_tokens_per_day})",
                     )
 
             return GuardrailResult(passed=True, action="allow")
@@ -84,6 +118,7 @@ class QuotaGuardrail:
 
     async def get_usage(self, workspace_id: str) -> dict:
         today = date_type.today().isoformat()
+        month_start = _month_start()
         async with async_session() as session:
             ws = await session.get(Workspace, workspace_id)
 
@@ -94,6 +129,15 @@ class QuotaGuardrail:
 
             tokens_used = row.tokens_used if row else 0
             cost_today = row.cost if row else 0.0
+
+            # Monthly cost aggregation for this workspace
+            cost_this_month = (await session.execute(
+                text(
+                    "SELECT COALESCE(SUM(cost), 0) FROM quota_usage "
+                    "WHERE workspace_id = :ws_id AND date >= :month_start"
+                ),
+                {"ws_id": workspace_id, "month_start": month_start},
+            )).scalar() or 0.0
 
             # P2-4: tenant-level usage. Aggregates quota_usage across all
             # workspaces under the same tenant for today (returns 0 if the
@@ -116,9 +160,11 @@ class QuotaGuardrail:
 
             return {
                 "max_tokens_per_day": ws.max_tokens_per_day if ws else 1_000_000,
+                "max_cost_per_day": ws.max_cost_per_day if ws else 0.0,
                 "max_cost_per_month": ws.max_cost_per_month if ws else 0.0,
                 "tokens_used": tokens_used,
                 "cost_today": cost_today,
+                "cost_this_month": cost_this_month,
                 "tenant_max_tokens_per_day": tenant_max_tokens,
                 "tenant_tokens_used": tenant_tokens_used,
             }
