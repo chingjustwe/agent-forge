@@ -1,5 +1,5 @@
 export interface StreamEvent {
-  type: "text" | "tool_call" | "tool_result" | "reasoning" | "error" | "status" | "subagent" | "session.created";
+  type: "text" | "tool_call" | "tool_result" | "reasoning" | "error" | "status" | "subagent" | "session.created" | "tool_awaiting_approval";
   data: Record<string, unknown>;
   metadata?: Record<string, unknown>;
 }
@@ -14,6 +14,17 @@ export type AgentStep =
       result?: string;
       error?: string;
       status: "running" | "done";
+    }
+  | { kind: "truncated"; content: string }
+  | {
+      kind: "tool_approval";
+      id: string;  // call_id from the shim
+      name: string;  // tool name
+      args: unknown;
+      reason: string;
+      status: "awaiting_approval" | "approved" | "denied" | "resolved";
+      result?: string;
+      error?: string;
     };
 
 export interface User {
@@ -747,6 +758,7 @@ export interface ChatMessageInfo {
   role: "user" | "assistant" | "system";
   content: string;
   tokens: number;
+  steps?: AgentStep[];
   created_at: string;
 }
 

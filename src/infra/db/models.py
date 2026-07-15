@@ -184,6 +184,10 @@ class ChatMessage(Base):
     role: Mapped[str] = mapped_column(String(20))  # user / assistant / system
     content: Mapped[str] = mapped_column(Text)
     tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # ReAct steps (reasoning + tool calls) persisted for assistant messages.
+    # NULL for user/system messages. Format: [{"kind":"reasoning","content":"..."},
+    # {"kind":"tool","id":"...","name":"...","args":{...},"result":"...","status":"done"}]
+    steps: Mapped[list | None] = mapped_column(JSON, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 

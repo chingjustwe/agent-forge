@@ -70,6 +70,7 @@ def _serialize_message(msg: ChatMessage) -> dict:
         "role": msg.role,
         "content": msg.content,
         "tokens": msg.tokens,
+        "steps": msg.steps,
         "created_at": msg.created_at.isoformat() if msg.created_at else None,
     }
 

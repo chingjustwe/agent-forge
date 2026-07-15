@@ -11,8 +11,8 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.gateway.auth.permissions import has_permission
 from src.gateway.auth.rbac import get_workspace_member_role
-from src.gateway.auth.roles import has_permission
 from src.infra.db.engine import async_session
 from src.infra.db.models import ChatMessage, ChatSession, WorkspaceMember
 from src.infra.db.session import get_db
@@ -58,9 +58,15 @@ async def _persist_user_message(session_id: str, content: str) -> None:
         logger.warning("Failed to persist user message to session %s: %s", session_id, exc)
 
 
-async def _persist_assistant_message(session_id: str, content: str, tokens: int) -> None:
-    """Write the assistant's accumulated reply as a ChatMessage."""
-    if not content:
+async def _persist_assistant_message(
+    session_id: str, content: str, tokens: int, steps: list | None = None
+) -> None:
+    """Write the assistant's accumulated reply as a ChatMessage.
+
+    ``steps`` carries the ReAct trace (reasoning + tool calls) so the
+    frontend can replay the full thinking process on page reload.
+    """
+    if not content and not steps:
         return
     try:
         async with async_session() as db:
@@ -68,8 +74,9 @@ async def _persist_assistant_message(session_id: str, content: str, tokens: int)
                 ChatMessage(
                     session_id=session_id,
                     role="assistant",
-                    content=content,
+                    content=content or "",
                     tokens=tokens,
+                    steps=steps if steps else None,
                 )
             )
             await db.commit()
@@ -155,6 +162,8 @@ async def _event_stream(
     start = time.monotonic()
     error = ""
     total_tokens = {"input": 0, "output": 0}
+    # Collect ReAct steps (reasoning + tool calls) for persistence.
+    react_steps: list[dict] = []
 
     runtime = get_runtime()
     try:
@@ -174,6 +183,66 @@ async def _event_stream(
                 usage = event.data.get("usage", {})
                 total_tokens["input"] = usage.get("input_tokens", 0)
                 total_tokens["output"] = usage.get("output_tokens", 0)
+                # Detect truncation: finish_reason="length" means the reply
+                # was cut off by max_tokens. Flag it as a timeline step so
+                # the user sees why the response is incomplete.
+                if event.data.get("finish_reason") == "length":
+                    react_steps.append({"kind": "truncated", "content": ""})
+            # Persist ReAct steps: reasoning (incremental) and tool calls.
+            if event.type == "reasoning":
+                chunk = event.data.get("content", "") or ""
+                last = react_steps[-1] if react_steps else None
+                if last and last.get("kind") == "reasoning":
+                    last["content"] += chunk
+                else:
+                    react_steps.append({"kind": "reasoning", "content": chunk})
+            elif event.type == "tool_call":
+                react_steps.append({
+                    "kind": "tool",
+                    "id": event.data.get("call_id", "") or event.data.get("id", ""),
+                    "name": event.data.get("name", ""),
+                    "args": event.data.get("args"),
+                    "result": None,
+                    "error": None,
+                    "status": "running",
+                })
+            elif event.type == "tool_awaiting_approval":
+                # HITL: track the approval prompt as a pending step so the
+                # timeline shows why the assistant paused. When the
+                # corresponding tool_result arrives (after user decision),
+                # the step is updated to "done" via the call_id match.
+                react_steps.append({
+                    "kind": "tool_approval",
+                    "id": event.data.get("call_id", ""),
+                    "name": event.data.get("tool_name", ""),
+                    "args": event.data.get("args"),
+                    "reason": event.data.get("reason", ""),
+                    "status": "awaiting_approval",
+                })
+            elif event.type == "tool_result":
+                call_id = event.data.get("call_id", "")
+                name = event.data.get("name", "")
+                for s in reversed(react_steps):
+                    if s.get("kind") == "tool" and s.get("status") == "running":
+                        match_by_id = call_id and s.get("id") == call_id
+                        match_by_name = not call_id and s.get("name") == name
+                        if match_by_id or match_by_name:
+                            s["result"] = event.data.get("output")
+                            s["error"] = event.data.get("error")
+                            s["status"] = "done"
+                            break
+                # HITL: also resolve the nearest pending approval step for
+                # the same tool so the timeline reflects the decision.
+                for s in reversed(react_steps):
+                    if (
+                        s.get("kind") == "tool_approval"
+                        and s.get("status") == "awaiting_approval"
+                        and s.get("name") == name
+                    ):
+                        s["status"] = "resolved"
+                        s["result"] = event.data.get("output")
+                        s["error"] = event.data.get("error")
+                        break
     except Exception as e:
         error = str(e)
         yield f"data: {StreamEvent(type='error', data={'code': 'LLM_ERROR', 'message': error}).model_dump_json()}\n\n"
@@ -225,7 +294,8 @@ async def _event_stream(
     # P1-1: persist the assistant reply AFTER the stream completes.
     if session_id:
         await _persist_assistant_message(
-            session_id, assistant_text, total_tokens.get("output", 0)
+            session_id, assistant_text, total_tokens.get("output", 0),
+            steps=react_steps if react_steps else None,
         )
 
 
@@ -238,7 +308,9 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
             content={"error": {"code": "UNAUTHORIZED", "message": "Not authenticated"}},
         )
 
-    # P2-3: API-key callers must carry the ``chat:write`` scope.
+    # API-key callers: the ``chat:write`` scope is the sole authority.
+    # The creator's role is NOT inherited (virtual ``api_key`` role), so
+    # ``has_permission`` would fail — the scope check replaces it.
     if user.get("auth_method") == "api_key":
         scopes = user.get("api_key_scopes") or []
         if "chat:write" not in scopes:
@@ -251,8 +323,7 @@ async def chat(request: Request, db: AsyncSession = Depends(get_db)):
                     }
                 },
             )
-
-    if not has_permission(user.get("role", "viewer"), "member"):
+    elif not has_permission(user.get("role", "viewer"), "sessions:write"):
         return JSONResponse(
             status_code=403,
             content={"error": {"code": "FORBIDDEN", "message": "Viewer role cannot send messages"}},
